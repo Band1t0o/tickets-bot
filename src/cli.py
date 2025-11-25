@@ -64,6 +64,7 @@ def main():
     p_scrape.add_argument("--commit", action="store_true", help="Used by CI: exit 0 even if no data")
 
     p_watch = sub.add_parser("watch", help="Run forever with day/night intervals")
+    p_watch.add_argument("--provider", action="append", choices=list(REGISTRY.keys()))
 
     args = parser.parse_args()
     settings = get_settings()
