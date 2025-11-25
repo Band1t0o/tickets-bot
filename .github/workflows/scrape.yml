@@ -1,0 +1,53 @@
+name: scrape
+on:
+  schedule:
+    - cron: '0 6-21 * * *'   # Every hour from 6am-9pm UTC
+    - cron: '0 22,0,2,4 * * *'  # Every 2 hours at night (10pm, 12am, 2am, 4am UTC)
+  workflow_dispatch: {}
+permissions:
+  contents: write
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+      - run: pip install -r requirements.txt
+      - run: python -m playwright install --with-deps
+      - name: Run scraper
+        env:
+          ORIGIN: ${{ secrets.ORIGIN }}
+          DESTINATION: ${{ secrets.DESTINATION }}
+          DEPARTURE_DATE: ${{ secrets.DEPARTURE_DATE }}
+          ARRIVAL_DATE: ${{ secrets.ARRIVAL_DATE }}
+          ADULTS: ${{ secrets.ADULTS }}
+          USER_AGENT: ${{ secrets.USER_AGENT }}
+          HEADLESS: 'true'
+        run: python -m src.cli scrape --commit
+      - name: Send Discord notification
+        if: success()
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          OFFER_COUNT=$(cat data/latest_offer_count.txt 2>/dev/null || echo "0")
+          if [ "$OFFER_COUNT" -gt 0 ]; then
+            echo "Found $OFFER_COUNT new offers, sending Discord notification..."
+            python -m src.notify_discord "$OFFER_COUNT"
+          else
+            echo "No new offers found, skipping Discord notification"
+          fi
+      - name: Commit & push data
+        if: success()
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add data/*.jsonl data/*.csv data/*/ data/latest_offer_count.txt meta.json || true
+          git commit -m "chore(data): scrape $(date -u +'%Y-%m-%dT%H:%M:%SZ')" || echo "No changes"
+          git push || echo "Nothing to push"

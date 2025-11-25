@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+
+# Environment
+.env.local
+.env
+
+# Data (optional - comment out if you want to commit scraped data)
+# data/
+# But always ignore the offer count file
+data/latest_offer_count.txt
+
+# Debug screenshots
+debug_*.png
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
