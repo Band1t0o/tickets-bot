@@ -9,7 +9,6 @@ import json
 import requests
 from pathlib import Path
 from datetime import datetime
-from .config import get_settings
 
 
 def send_discord_notification(webhook_url: str, offers_count: int, data_dir: str = "./data"):
@@ -107,9 +106,8 @@ def send_discord_notification(webhook_url: str, offers_count: int, data_dir: str
 
 
 if __name__ == "__main__":
-    # Load settings from .env.local or environment
-    settings = get_settings()
-    webhook_url = settings.DISCORD_WEBHOOK_URL or os.getenv("DISCORD_WEBHOOK_URL")
+    # Get webhook URL from environment (don't load full settings to avoid requiring scraper env vars)
+    webhook_url = os.getenv("DISCORD_WEBHOOK_URL")
 
     if not webhook_url:
         print("[Discord] DISCORD_WEBHOOK_URL not set, skipping notification")
