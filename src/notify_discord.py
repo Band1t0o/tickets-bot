@@ -28,10 +28,15 @@ def send_discord_notification(webhook_url: str, offers_count: int, data_dir: str
     today = datetime.now().strftime("%Y-%m-%d")
     today_dir = Path(data_dir) / today
 
-    # Read all JSONL files from today
+    # Read all JSONL files from today (excluding DEMO_STATIC files)
     all_offers = []
     if today_dir.exists():
         for jsonl_file in today_dir.glob("*.jsonl"):
+            # Skip demo/static files
+            if "DEMO_STATIC" in jsonl_file.name or "demo" in jsonl_file.name.lower():
+                print(f"[Discord] Skipping demo file: {jsonl_file.name}")
+                continue
+
             with open(jsonl_file, "r") as f:
                 for line in f:
                     if line.strip():
@@ -71,24 +76,27 @@ def send_discord_notification(webhook_url: str, offers_count: int, data_dir: str
         "footer": {"text": "Vietnam Tickets Scraper"}
     })
 
-    # Find best deals (cheapest 3)
-    sorted_offers = sorted(all_offers, key=lambda x: x['price_amount'])[:3]
-    if sorted_offers:
-        best_deals_fields = []
-        for i, offer in enumerate(sorted_offers, 1):
-            best_deals_fields.append({
-                "name": f"#{i} - {offer['origin']} → {offer['destination']}",
-                "value": f"**{offer['price_amount']:,.0f} {offer['price_currency']}** | {offer['provider']}\n"
-                         f"Dates: {offer['departure_date']} - {offer.get('return_date', 'N/A')}\n"
-                         f"[View offer]({offer.get('url', '#')})" if offer.get('url') else "",
-                "inline": False
-            })
+    # Find best 3 deals for EACH route
+    for route, route_offers in routes.items():
+        # Sort offers by price and get top 3
+        sorted_route_offers = sorted(route_offers, key=lambda x: x['price_amount'])[:3]
 
-        embeds.append({
-            "title": "🏆 Best Deals",
-            "color": 3066993,  # Green
-            "fields": best_deals_fields
-        })
+        if sorted_route_offers:
+            best_deals_fields = []
+            for i, offer in enumerate(sorted_route_offers, 1):
+                best_deals_fields.append({
+                    "name": f"#{i} - {offer['price_amount']:,.0f} {offer['price_currency']}",
+                    "value": f"**{offer['provider']}**\n"
+                             f"Dates: {offer['departure_date']} → {offer.get('return_date', 'N/A')}\n"
+                             f"[View offer]({offer.get('url', '#')})" if offer.get('url') else "",
+                    "inline": False
+                })
+
+            embeds.append({
+                "title": f"🏆 Best Deals: {route}",
+                "color": 3066993,  # Green
+                "fields": best_deals_fields
+            })
 
     # Send webhook
     payload = {
