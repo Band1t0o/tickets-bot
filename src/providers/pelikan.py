@@ -51,20 +51,23 @@ class PelikanProvider(BaseProvider):
                 disable_cookies.click()
                 time.sleep(0.5)
 
-                # Remove default options (Praha and Vídeň) from origin field
+                 # Remove default options (Praha and Vídeň) from origin field
                 print(f"[{self.NAME}] Removing default origin options...")
                 try:
-                    # Find all remove buttons in the origin field
-                    # The remove buttons are <i> tags with class "input-tags_remove" inside the origin field
-                    remove_buttons = page.locator("#pl-departure-from-flights i.input-tags_remove").all()
-                    print(f"[{self.NAME}] Found {len(remove_buttons)} default options to remove")
+                    # Find the specific remove buttons using the exact selectors
+                    # First removal button
+                    first_remove_btn = page.locator("li.input-tags_item:nth-child(1) > i:nth-child(2)").first
+                    if first_remove_btn.is_visible():
+                        print(f"[{self.NAME}] Removing first default option...")
+                        first_remove_btn.click()
+                        time.sleep(0.3)
                     
-                    # Click each remove button to remove the default options
-                    for idx, remove_btn in enumerate(remove_buttons):
-                        if remove_btn.is_visible():
-                            print(f"[{self.NAME}] Removing default option {idx + 1}...")
-                            remove_btn.click()
-                            time.sleep(0.3)
+                    # Second removal button
+                    second_remove_btn = page.locator("li.input-tags_item:nth-child(2) > i:nth-child(2)").first
+                    if second_remove_btn.is_visible():
+                        print(f"[{self.NAME}] Removing second default option...")
+                        second_remove_btn.click()
+                        time.sleep(0.3)
                     
                     time.sleep(0.5)
                     print(f"[{self.NAME}] Default options removed")
@@ -123,7 +126,7 @@ class PelikanProvider(BaseProvider):
 
                     # Click the add button to confirm/add the destination
                     print(f"[{self.NAME}] Clicking add button to confirm destination...")
-                    add_btn = page.locator("button.btn.btn-alt:has(i:has-text('plus')), button:has(i.icon.icon-m)").first
+                    add_btn = page.locator("table.active > tbody:nth-child(1) > tr:nth-child(1) > td:nth-child(5) > div:nth-child(1) > button:nth-child(1)").first
                     add_btn.click()
                     time.sleep(0.5)
 
