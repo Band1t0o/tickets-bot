@@ -337,7 +337,11 @@ class PelikanProvider(BaseProvider):
         # Find all flight offer boxes
         result_cards = page.locator("div[id^='flight-'], flights-flight").all()
         print(f"[{self.NAME}] Found {len(result_cards)} flight offers")
-        
+
+        # Limit to first 10 offers (they're sorted by price, lowest to highest)
+        result_cards = result_cards[:10]
+        print(f"[{self.NAME}] Processing first {len(result_cards)} offers")
+
         for idx, card in enumerate(result_cards):
             try:
                 print(f"[{self.NAME}] Parsing offer {idx + 1}...")
