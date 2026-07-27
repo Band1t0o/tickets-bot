@@ -1,3 +1,0 @@
-provider,origin,destination,departure_date,return_date,airline,flight_number,cabin,fare_class,price_currency,price_amount,url
-DEMO_STATIC,PRG,SGN,2026-08-01,2026-08-15,VN,VN750,Economy,,EUR,699.0,https://example.test/demo-static/vn750
-DEMO_STATIC,PRG,SGN,2026-08-01,2026-08-15,QH,QH89,Economy,,EUR,640.0,https://example.test/demo-static/qh89

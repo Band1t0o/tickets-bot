@@ -1,173 +1,64 @@
 from __future__ import annotations
 from typing import Iterable
 import os
+import re
 import time
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout, Page
 from ..models import Offer
 from .base import BaseProvider
 
+CZECH_MONTHS = {
+    1: "Leden", 2: "Únor", 3: "Březen", 4: "Duben",
+    5: "Květen", 6: "Červen", 7: "Červenec", 8: "Srpen",
+    9: "Září", 10: "Říjen", 11: "Listopad", 12: "Prosinec",
+}
+
 
 class LetuskaProvider(BaseProvider):
-    """
-    Letuska.cz scraper for personal use only.
-
-    IMPORTANT: This scraper is for personal, non-commercial use only.
-    - robots.txt disallows /searchform and /api/
-    - Use reasonable delays between requests
-    """
-
     NAME = "LETUSKA"
     BASE_URL = "https://www.letuska.cz"
 
     def scrape(self, origin: str, destination: str, departure_date: str, adults: int, arrival_date: str) -> Iterable[Offer]:
-        """
-        Scrape Letuska.cz using Playwright for JS-rendered content.
-
-        Note: Letuska uses dynamic search forms, so we need Playwright.
-        """
         headless = os.getenv("HEADLESS", "true").lower() == "true"
         ua = os.getenv("USER_AGENT", "Mozilla/5.0 (compatible; VietnamTicketsScraper/1.0)")
-
         offers: list[Offer] = []
 
         try:
             with sync_playwright() as pw:
                 browser = pw.chromium.launch(headless=headless)
-                ctx = browser.new_context(
-                    user_agent=ua,
-                    viewport={"width": 1920, "height": 1080},
-                    locale="cs-CZ"
-                )
+                ctx = browser.new_context(user_agent=ua, viewport={"width": 1920, "height": 1080}, locale="cs-CZ")
                 page = ctx.new_page()
 
-                # Navigate to homepage
                 print(f"[{self.NAME}] Navigating to {self.BASE_URL}...")
                 page.goto(self.BASE_URL, wait_until="domcontentloaded", timeout=30000)
-
-                # Add delay to be respectful
                 time.sleep(2.0)
 
-                # Fill search form - Updated with actual Letuska.cz autocomplete behavior
+                self._accept_cookies(page)
+
                 try:
-                    # Wait for search form to load
-                    departure_input = page.locator(".departure > div:nth-child(1) > input:nth-child(2)")
- 
-                    departure_input.click()
-                    print(f"[{self.NAME}] Departure input clicked")
+                    self._fill_origin(page, origin)
+                    self._fill_destination(page, destination)
+                    self._select_calendar_date(page, departure_date, "departure")
                     time.sleep(0.5)
-                    
-                    page.wait_for_selector(".flight-search-cmp", timeout=10000)
-                    print(f"[{self.NAME}] Search form loaded")
-                    
-                    origin_whisper = page.locator("whisper-input[iconname='departure']")
-                    origin_input = origin_whisper.locator("input[formcontrolname='term']")
-                    print(f"[{self.NAME}] Clicking origin field...")
-                    origin_input.click()
+                    self._select_calendar_date(page, arrival_date, "return")
                     time.sleep(0.5)
-                    
-                    # Type directly into the input (it's already the right one)
-                    print(f"[{self.NAME}] Typing origin: {origin}")
-                    origin_input.type(origin, delay=100)
-                    time.sleep(1.5)
+                    self._set_adults(page, adults)
+                    self._click_search(page)
 
-                        # Click first result in the dropdown (whisper-list)
-                    try:
-                        page.wait_for_selector("whisper-list li", timeout=3000)
-                        # Click the first li element or the strong inside it
-                        first_result = page.locator("whisper-list li").first
-                        first_result.click()
-                        print(f"[{self.NAME}] Selected first origin result")
-                        time.sleep(0.5)
-                    except PlaywrightTimeout:
-                        page.keyboard.press("Enter")
-                        time.sleep(0.5)
-
-                    # Destination field
-                    page.wait_for_selector(".flight-search-cmp", timeout=10000)
-                    print(f"[{self.NAME}] Search form loaded")
-                    
-                    origin_whisper = page.locator("whisper-input[iconname='departure']")
-                    origin_input = origin_whisper.locator("input[formcontrolname='term']")
-                    print(f"[{self.NAME}] Clicking destination field...")
-                    origin_input.click()
-                    time.sleep(0.5)
-                    
-                    # Type directly into the input (it's already the right one)
-                    print(f"[{self.NAME}] Typing destination: {destination}")
-                    origin_input.type(destination, delay=100)
-                    time.sleep(1.5)
-
-                        # Click first result in the dropdown (whisper-list)
-                    try:
-                        page.wait_for_selector("whisper-list li", timeout=3000)
-                        # Click the first li element or the strong inside it
-                        first_result = page.locator("whisper-list li").first
-                        first_result.click()
-                        print(f"[{self.NAME}] Selected first destination result")
-                        time.sleep(0.5)
-                    except PlaywrightTimeout:
-                        page.keyboard.press("Enter")
-                        time.sleep(0.5)
-                    
-                    # Fill date
-                    self.select_date(page, departure_date)
-                    time.sleep(0.5)
-                    self.select_date(page, arrival_date)
-                    time.sleep(0.5)
-
-                    # Select adults count
-                    print(f"[{self.NAME}] Setting adults count to {adults}...")
-                    
-                    # Find the add button for adults (the + button)
-                    add_adult_btn = page.locator(".formModal-content > passengers-widget:nth-child(2) > passengers-widget-cmp:nth-child(1) > passenger-line:nth-child(1) > div:nth-child(1) > plus-minus:nth-child(2) > div:nth-child(1) > div:nth-child(3)")
-                    
-                    # Click the add button (adults - 1) times since it starts at 1
-                    # If adults=1, we don't need to click (already at 1)
-                    # If adults=2, we click once to go from 1 to 2
-                    clicks_needed = adults - 1
-                    
-                    if clicks_needed > 0:
-                        print(f"[{self.NAME}] Clicking add adult button {clicks_needed} time(s)...")
-                        for i in range(clicks_needed):
-                            add_adult_btn.click()
-                            time.sleep(0.3)  # Small delay between clicks
-                    else:
-                        print(f"[{self.NAME}] Adults count already at 1, no need to add more")
-                    
-                    time.sleep(0.5)
-
-                    # Submit search
-                    search_btn = page.locator(".sbm-search").first
-                    print(f"[{self.NAME}] Clicking search button...")
-                    search_btn.click()
-
-                    # Wait for search results to load (1 minute as requested)
                     print(f"[{self.NAME}] Waiting for search results (60 seconds)...")
                     time.sleep(60)
 
-                    # After waiting, parse the results
-                    print(f"[{self.NAME}] Search completed, parsing results...")
-
+                    print(f"[{self.NAME}] Parsing results...")
                     offers = self._parse_results(page, origin, destination, departure_date)
 
-                except PlaywrightTimeout as e:
-                    print(f"[{self.NAME}] Timeout waiting for search form or results: {e}")
-                    # Take a screenshot for debugging
+                except (PlaywrightTimeout, Exception) as e:
+                    print(f"[{self.NAME}] Error: {e}")
                     try:
-                        screenshot_path = f"debug_letuska_timeout_{int(time.time())}.png"
-                        page.screenshot(path=screenshot_path, full_page=False)
-                        print(f"[{self.NAME}] Debug screenshot saved to {screenshot_path}")
-                    except Exception as screenshot_err:
-                        print(f"[{self.NAME}] Could not save screenshot: {screenshot_err}")
-                except Exception as e:
-                    print(f"[{self.NAME}] Error during search: {e}")
-                    # Take a screenshot for debugging
-                    try:
-                        screenshot_path = f"debug_letuska_error_{int(time.time())}.png"
-                        page.screenshot(path=screenshot_path, full_page=False)
-                        print(f"[{self.NAME}] Debug screenshot saved to {screenshot_path}")
-                    except Exception as screenshot_err:
-                        print(f"[{self.NAME}] Could not save screenshot: {screenshot_err}")
+                        path = f"debug_letuska_{int(time.time())}.png"
+                        page.screenshot(path=path, full_page=False)
+                        print(f"[{self.NAME}] Debug screenshot saved to {path}")
+                    except Exception:
+                        pass
 
                 ctx.close()
                 browser.close()
@@ -175,153 +66,196 @@ class LetuskaProvider(BaseProvider):
         except Exception as e:
             print(f"[{self.NAME}] Failed to scrape: {e}")
 
-        # Be respectful - add delay after scraping
         time.sleep(5.0)
-
         return offers
-    
-    def select_date(self, page: Page, departure_date: str) -> str:
-        target_month_name, target_year, target_day = self._parse_date(departure_date)
-        target_text = f"{target_month_name}"
 
-        print(f"[{self.NAME}] Looking for calendar month: {target_text}")
+    def _accept_cookies(self, page: Page):
+        try:
+            btn = page.locator("text=SOUHLASÍM")
+            if btn.count() > 0 and btn.first.is_visible():
+                btn.first.click()
+                print(f"[{self.NAME}] Cookie consent accepted")
+                time.sleep(1)
+        except Exception:
+            pass
 
-        forward_btn = page.locator("button.btnSquare:nth-child(2)")
+    def _fill_origin(self, page: Page, origin: str):
+        if origin.upper() == "PRG":
+            return
+        print(f"[{self.NAME}] Setting origin to {origin}...")
+        departure_btn = page.locator("button.text-dark-blue:nth-child(2) > div:nth-child(1)")
+        departure_btn.click()
+        time.sleep(0.5)
+        page.wait_for_selector(".border-lavender-blue > div:nth-child(1)", timeout=10000)
+        origin_input = page.locator(".border-lavender-blue > div:nth-child(1)")
+        origin_input.click()
+        time.sleep(0.5)
+        origin_input.type(origin, delay=100)
+        time.sleep(1.5)
+        try:
+            page.wait_for_selector("whisper-list li", timeout=3000)
+            page.locator("whisper-list li").first.click()
+            time.sleep(0.5)
+        except PlaywrightTimeout:
+            page.keyboard.press("Enter")
+            time.sleep(0.5)
 
-        # Loop until we find the target month
-        max_attempts = 12  # Safety limit (max 12 months forward)
-        found = False
+    def _fill_destination(self, page: Page, destination: str):
+        print(f"[{self.NAME}] Setting destination to {destination}...")
+        page.locator("button.md\\:col-span-2:nth-child(2)").click()
+        time.sleep(0.5)
+        page.wait_for_selector(".border-lavender-blue input", timeout=5000)
+        dest_input = page.locator(".border-lavender-blue input")
+        dest_input.type(destination, delay=100)
+        time.sleep(1.5)
+        try:
+            page.wait_for_selector("whisper-list li", timeout=3000)
+            page.locator("whisper-list li").first.click()
+            time.sleep(0.5)
+        except PlaywrightTimeout:
+            page.keyboard.press("Enter")
+            time.sleep(0.5)
 
-        for attempt in range(max_attempts):
-            # Check if the target month is visible in the calendar
-            # Look for the year header text
-            year_header = page.locator(f"text=/{target_year}/i")
-            # if year not found, click forward
-            if year_header.count() == 0:
-                print(f"[{self.NAME}] Year not found, clicking forward... (attempt {attempt + 1})")
-                forward_btn.click()
-                time.sleep(0.4)  # Wait for calendar to update
-                continue
-
-            month_header = page.locator(f"text=/{target_text}/i")
-            
-            if month_header.count() > 0 and month_header.first.is_visible():
-                print(f"[{self.NAME}] Found target month: {target_text}")
-                found = True
-                break
-
-            # Not found, click forward
-            print(f"[{self.NAME}] Month not found, clicking forward... (attempt {attempt + 1})")
-            forward_btn.click()
-            time.sleep(0.4)  # Wait for calendar to update
-
-        if not found:
-            print(f"[{self.NAME}] Warning: Could not find {target_text} after {max_attempts} attempts")
-        else:
-            # Select the specific day
-            print(f"[{self.NAME}] Selecting day {target_day}...")
-            target_month_elem = None
-            for month_elem in page.locator("datepick-month").all():
-                header_text = month_elem.locator("table > tr:nth-child(1)").first.inner_text()
-                if target_text.upper() in header_text.upper():
-                    target_month_elem = month_elem
-                    break
-            
-            if target_month_elem:
-                # Click the day within this specific month calendar
-                day_cell = target_month_elem.locator(f"table td:has-text('{target_day}')").first
-                day_cell.click()
-                time.sleep(0.5)
-                print(f"[{self.NAME}] Date selected: {departure_date}")
-            else:
-                print(f"[{self.NAME}] Error: Could not locate the target month element")
-    
-    def _parse_date(self, departure_date: str) -> str:
-        """
-        Parse the departure date from the config,
-        """
+    def _select_calendar_date(self, page: Page, date_str: str, label: str):
         from datetime import datetime
-        target_date = datetime.strptime(departure_date, "%Y-%m-%d")
-        target_month = target_date.month
-        target_year = target_date.year
+        dt = datetime.strptime(date_str, "%Y-%m-%d")
+        month_name = CZECH_MONTHS[dt.month]
+        year = dt.year
+        day = dt.day
 
-        # Czech month names (lowercase)
-        czech_months = {
-            1: "leden", 2: "únor", 3: "březen", 4: "duben",
-            5: "květen", 6: "červen", 7: "červenec", 8: "srpen",
-            9: "září", 10: "říjen", 11: "listopad", 12: "prosinec"
-        }
+        print(f"[{self.NAME}] Selecting {label} date: {day} {month_name} {year}...")
 
-        target_month_name = czech_months[target_month].upper()
-        print(f"[{self.NAME}] Looking for: {target_month_name} {target_year}")
-        return target_month_name, target_year, target_date.day
-        
+        clicked = page.evaluate("""([monthName, year, day]) => {
+            const sf = document.querySelector('new-letuska-sf-component');
+            if (!sf || !sf.shadowRoot) return 'no sf shadow';
+            const cp = sf.shadowRoot.querySelector('calendar-prices');
+            if (!cp || !cp.shadowRoot) return 'no calendar-prices shadow';
+            const root = cp.shadowRoot;
 
-    def _parse_results(self, page, origin: str, destination: str, departure_date: str) -> list[Offer]:
-        """
-        Parse flight results from Letuska.cz search results page.
+            const containers = root.querySelectorAll('.flex-shrink-0');
+            // First half are month headers, second half are day grids
+            const totalMonths = Math.floor(containers.length / 2);
+            let monthIndex = -1;
+            for (let i = 0; i < totalMonths; i++) {
+                const headerText = containers[i].textContent.trim();
+                if (headerText.includes(monthName) && headerText.includes(String(year))) {
+                    monthIndex = i;
+                    break;
+                }
+            }
+            if (monthIndex === -1) return 'month not found: ' + monthName + ' ' + year;
 
-        """
+            const gridContainer = containers[totalMonths + monthIndex];
+            const grid = gridContainer.querySelector('.grid.grid-cols-7');
+            if (!grid) return 'grid not found';
+
+            const buttons = grid.querySelectorAll('button');
+            for (const btn of buttons) {
+                const spans = btn.querySelectorAll('span');
+                for (const span of spans) {
+                    if (span.textContent.trim() === String(day) && !span.nextElementSibling) {
+                        // This is just the day number span (not the one with price)
+                        btn.click();
+                        return 'ok';
+                    }
+                }
+                // Fallback: check if button's first span matches
+                if (spans.length > 0 && spans[0].textContent.trim() === String(day)) {
+                    btn.click();
+                    return 'ok';
+                }
+            }
+            return 'day not found: ' + day;
+        }""", [month_name, year, day])
+
+        if clicked != "ok":
+            print(f"[{self.NAME}] Calendar click failed: {clicked}")
+        else:
+            print(f"[{self.NAME}] Date selected: {date_str}")
+        time.sleep(0.5)
+
+    def _set_adults(self, page: Page, adults: int):
+        if adults <= 1:
+            return
+        print(f"[{self.NAME}] Setting adults to {adults}...")
+        pax_btn = page.locator("button:has-text('Osoba')")
+        pax_btn.first.click()
+        time.sleep(0.5)
+
+        # The +/- buttons come in pairs per passenger type (adult, student, child, infant)
+        # The first + button is for adults
+        add_btn = page.evaluate("""(clicks) => {
+            const sf = document.querySelector('new-letuska-sf-component');
+            const root = sf.shadowRoot;
+            const buttons = root.querySelectorAll('button');
+            // Find all + buttons
+            const plusBtns = [];
+            for (const b of buttons) {
+                if (b.textContent.trim() === '+') plusBtns.push(b);
+            }
+            if (plusBtns.length === 0) return 'no + buttons found';
+            // First + button is for adults
+            for (let i = 0; i < clicks; i++) {
+                plusBtns[0].click();
+            }
+            return 'ok';
+        }""", adults - 1)
+
+        if add_btn != "ok":
+            print(f"[{self.NAME}] Adults button failed: {add_btn}")
+        else:
+            print(f"[{self.NAME}] Adults set to {adults}")
+        time.sleep(0.5)
+
+    def _click_search(self, page: Page):
+        print(f"[{self.NAME}] Clicking search...")
+        page.evaluate("""() => {
+            const sf = document.querySelector('new-letuska-sf-component');
+            const root = sf.shadowRoot;
+            const buttons = root.querySelectorAll('button');
+            for (const b of buttons) {
+                if (b.textContent.trim() === 'HLEDAT') {
+                    b.click();
+                    return;
+                }
+            }
+        }""")
+
+    def _parse_results(self, page: Page, origin: str, destination: str, departure_date: str) -> list[Offer]:
         offers = []
-
-        # Find all flight offer boxes
         result_cards = page.locator("app-flight-offer-box.ng-star-inserted").all()
         print(f"[{self.NAME}] Found {len(result_cards)} flight offers")
-
-        # Limit to first 10 offers (they're sorted by price, lowest to highest)
         result_cards = result_cards[:10]
-        print(f"[{self.NAME}] Processing first {len(result_cards)} offers")
 
         for idx, card in enumerate(result_cards):
             try:
-                # Get price
-                price_text = card.locator(".ftSummary-price .value").first.inner_text()
-                currency_text = card.locator(".ftSummary-price .currency").first.inner_text()
-                print(f"[{self.NAME}] Price: {price_text} {currency_text}")
-                
-                # Extract numeric price - handle space-separated thousands
-                import re
-                # Remove all types of whitespace (spaces, non-breaking spaces, etc.)
-                clean_price = re.sub(r'\s+', '', price_text)  # Remove all whitespace
-                print(f"[{self.NAME}] Clean price: '{clean_price}'")
+                price_text = card.locator(".ftSummary-price .value").first.inner_text(timeout=3000)
+                currency_text = card.locator(".ftSummary-price .currency").first.inner_text(timeout=3000)
+
+                clean_price = re.sub(r'\s+', '', price_text)
                 price_match = re.search(r'(\d+)', clean_price)
-                if price_match:
-                    price_amount = float(price_match.group(1))
-                    print(f"[{self.NAME}] Extracted price: {price_amount}")
-                else:
-                    print(f"[{self.NAME}] Could not extract price from: '{price_text}'")
+                if not price_match:
                     continue
+                price_amount = float(price_match.group(1))
                 currency = "CZK" if "Kč" in currency_text else "EUR"
-                
-                # Get both departure and return dates
+
                 date_elements = card.locator("div[id='d-date'].flight-date-date").all()
-                
                 if len(date_elements) >= 2:
-                    departure_date_text = date_elements[0].inner_text()  # First date (02.08.2026)
-                    return_date_text = date_elements[1].inner_text()     # Second date (17.08.2026)
+                    departure_date_text = date_elements[0].inner_text()
+                    return_date_text = date_elements[1].inner_text()
                 else:
-                    # Fallback to single date if only one found
                     departure_date_text = card.locator(".flight-date-date").first.inner_text()
                     return_date_text = departure_date_text
-                print(f"[{self.NAME}] Dates: {departure_date_text} - {return_date_text}")
 
-                # Get origin airport code and name
-                origin_elem = card.locator("span.transferBox-from").first
-                origin_iata = origin_elem.inner_text().strip()  # e.g., "PRG"
-                origin_name = origin_elem.get_attribute("title")  # e.g., "Praha, Letiště Václava Havla Praha"
-                
-                # Get destination airport code and name
-                destination_elem = card.locator("span.transferBox-to").first
-                destination_iata = destination_elem.inner_text().strip()  # e.g., "SGN"
-                destination_name = destination_elem.get_attribute("title")  # e.g., "Ho Či Minovo Město, Letiště Tân Sơn Nhất"
-                
-                print(f"[{self.NAME}] Origin: {origin_iata} - {origin_name}")
-                print(f"[{self.NAME}] Destination: {destination_iata} - {destination_name}")
+                origin_elem = card.locator(".transferBox-from").first
+                origin_iata = origin_elem.inner_text(timeout=3000).strip()
+                destination_elem = card.locator(".transferBox-to").first
+                destination_iata = destination_elem.inner_text(timeout=3000).strip()
 
                 if origin_iata != origin or destination_iata != destination:
                     continue
-                # Create offer for departure
-                departure_offer = Offer(
+
+                offers.append(Offer(
                     provider=self.NAME,
                     origin=origin,
                     destination=destination,
@@ -333,12 +267,10 @@ class LetuskaProvider(BaseProvider):
                     fare_class=None,
                     price_currency=currency,
                     price_amount=price_amount,
-                    url=page.url
-                )
-                
-                offers.append(departure_offer)
-                print(f"[{self.NAME}] Departure offer: {price_amount} {currency} on {departure_date_text} - {return_date_text}")
-                
+                    url=page.url,
+                ))
+                print(f"[{self.NAME}] Offer: {price_amount} {currency} on {departure_date_text} - {return_date_text}")
+
             except Exception as e:
                 print(f"[{self.NAME}] Error parsing offer {idx + 1}: {e}")
                 continue

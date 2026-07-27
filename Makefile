@@ -10,11 +10,7 @@ watch:
 	. .venv/bin/activate && python -m src.cli watch
 
 fmt:
-	. .venv/bin/activate && python - <<'PY' \
-import subprocess, sys; \
-subprocess.run([sys.executable, '-m', 'pip', 'install', 'ruff'], check=True); \
-subprocess.run(['ruff', 'check', '--select', 'I', '--fix', 'src'], check=False)
-PY
+	. .venv/bin/activate && pip install -q ruff && ruff check --select I --fix src
 
 pw-install:
 	. .venv/bin/activate && python -m playwright install --with-deps

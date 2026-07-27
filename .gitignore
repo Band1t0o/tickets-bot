@@ -31,3 +31,5 @@ debug_*.png
 # OS
 .DS_Store
 Thumbs.db
+
+data/
