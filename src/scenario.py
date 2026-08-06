@@ -63,16 +63,8 @@ class Scenario:
                 raise ValueError(f"{label} minimum ({low}) exceeds maximum ({high})")
             if low < 1:
                 raise ValueError(f"{label} minimum must be at least 1 day")
-        if self.adults != 1:
-            # pelikan.cz honours P:{n}000E_0_0 - the results page reports the
-            # right passenger count - but returned byte-identical prices for 1,
-            # 2 and 3 passengers. Until it is settled whether the card price is
-            # per person or a party total, refuse rather than risk totals that
-            # are wrong by a factor of the party size.
-            raise ValueError(
-                "adults must be 1: multi-passenger pricing on pelikan.cz is "
-                "unverified (identical prices returned for 1, 2 and 3 passengers)"
-            )
+        if not 1 <= self.adults <= 9:
+            raise ValueError(f"adults must be between 1 and 9, got {self.adults}")
 
     @property
     def step_days(self) -> int:

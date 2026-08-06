@@ -19,10 +19,17 @@ while the destination is prefixed with "A" in CDT; the asymmetry is the site's,
 not ours.
 
 Passenger count: verified live that `P:{n}000E_0_0` is honoured - the results
-page reports "1 Dospělý" / "2 osoby" / "3 osoby" for n = 1/2/3. Prices in the
-result cards were byte-identical across all three, so **the displayed price is
-per person, not a trip total**. Anything summing legs must multiply by the
-passenger count.
+page reports "1 Dospělý" / "2 osoby" / "3 osoby" for n = 1/2/3.
+
+Card prices are **per person**, confirmed from the site's own label, which
+switches with the passenger count:
+
+    1 passenger  -> "Celková cena pro všechny osoby" (total for all persons)
+    2 passengers -> "Průměrná cena na osobu"         (average price per person)
+
+For a single passenger the two are the same number, which is why prices look
+identical across passenger counts. Multiply by the party size for a trip total
+(`Itinerary.total_for_party`).
 """
 from __future__ import annotations
 

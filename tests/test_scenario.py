@@ -62,14 +62,16 @@ def test_rejects_inverted_stay_range():
         multi_city(japan_stay_days=(11, 9)).validate()
 
 
-def test_rejects_unverified_multi_passenger_search():
-    # pelikan.cz honours P:{n}000E_0_0 in the URL (the results page reports the
-    # right passenger count) but returned byte-identical prices for 1, 2 and 3
-    # passengers, so whether the price is per-person or a party total is
-    # unresolved. Blocking is safer than reporting a total that may be wrong by
-    # a factor of the party size.
+def test_accepts_multi_passenger_search():
+    # Card prices are per person - confirmed from the site's own label, which
+    # reads "Celková cena pro všechny osoby" for 1 passenger and "Průměrná cena
+    # na osobu" for 2. Itinerary.total_for_party multiplies accordingly.
+    multi_city(adults=2).validate()  # must not raise
+
+
+def test_rejects_absurd_party_size():
     with pytest.raises(ValueError, match="adults"):
-        multi_city(adults=2).validate()
+        multi_city(adults=0).validate()
 
 
 def test_accepts_a_valid_scenario():
