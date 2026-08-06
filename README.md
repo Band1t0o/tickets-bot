@@ -1,250 +1,199 @@
-# Vietnam Tickets Scraper
+# Flight scenario watcher
 
-**File-first** flight price watcher for routes **to Vietnam** (e.g., `PRG → SGN`, `VIE → HAN`, etc.).
+Finds the cheapest way to fly a **multi-leg trip** — Europe → Japan → Philippines → Europe —
+and watches the price until you book.
 
-- ✅ Stores results as **CSV/JSON on disk** (no database)
-- ✅ Tracks **only new** price snapshots (de-duped via content hash)
-- ✅ **Providers** per website (extensible)
-- ✅ **CLI** + **Docker** + **GitHub Actions** for cron-style runs
-- ✅ Optional **Playwright** for JS-heavy sites
+- **Scenarios** are committed JSON files: which airports, which date window, how long to stay where
+- **GitHub Actions does the searching** on a schedule and commits results back, so it works whether or not your machine is on
+- **Discord** pings you only when the best total actually improves
+- **A local web UI** (`make ui`) to define scenarios, launch sweeps and read results
+- No database — everything is files under `data/` and `scenarios/`
 
-> ⚠️ Always check each site’s **Terms of Service** and **robots.txt**. Use reasonable rates & headers. This project is for personal/educational use.
+> Personal, non-commercial use. Keep the politeness delays in place.
 
 ---
 
 ## Quick start
 
 ```bash
-# Python 3.11+
-make install        # installs pip deps
-cp .env.example .env.local && $EDITOR .env.local
-make run            # scrape once
-make watch          # loop with day/night intervals
+make install     # creates a Python 3.12 venv and installs deps
+make pw-install  # installs the Chromium Playwright needs
+make ui          # http://localhost:8000
 ```
 
-### Docker
-```bash
-docker compose up --build
-```
-
-### What you get after a run
-```
-./data/
-  2025-10-12/
-    meta.json                    # run metadata
-    PRG-SGN-2025-12-20_BAMBOO.csv
-    PRG-SGN-2025-12-20_BAMBOO.jsonl
-    PRG-SGN-2025-12-20_VIETNAM_AIRLINES.csv
-    seen_offers.txt             # dedupe ledger
-```
-
----
-
-## Configure
-
-Environment variables (use `.env.local` for local dev):
-
-| Var | Example | Required | Notes |
-| --- | --- | :---: | --- |
-| `ORIGIN` | `PRG` or `PRG\|VIE\|BRQ` | ✅ | IATA code(s), pipe-separated for multiple |
-| `DESTINATION` | `SGN` or `SGN\|HAN\|DAD` | ✅ | IATA code(s), pipe-separated for multiple |
-| `DEPARTURE_DATE` | `2025-12-20` | ✅ | ISO date |
-| `ARRIVAL_DATE` | `2025-12-30` | ✅ | ISO date |
-| `ADULTS` | `1` | ✅ | Pax count |
-| `REFRESH_INTERVAL_DAYTIME_MINUTES` | `30` |  | Watch loop interval |
-| `REFRESH_INTERVAL_NIGHTTIME_MINUTES` | `120` |  | Night interval (22–06) |
-| `USER_AGENT` | custom UA |  | Requests header |
-| `HEADLESS` | `true` |  | Playwright headless mode |
-
-Provider-specific vars are documented in each provider file (e.g., cookies, locale).
-
-### Multiple Origins/Destinations
-
-You can track prices across **multiple routes** by specifying pipe-separated (`|`) values:
+Python **3.12+** is required — `str | None` annotations are evaluated at runtime by pydantic and
+will crash on 3.9 (which is what macOS ships).
 
 ```bash
-# Track flights from Prague OR Vienna to Saigon OR Hanoi
-ORIGIN=PRG|VIE
-DESTINATION=SGN|HAN
-
-# This will scrape 4 routes:
-# - PRG → SGN
-# - PRG → HAN
-# - VIE → SGN
-# - VIE → HAN
+make test                                                  # run the suite
+python -m src.cli sweep --scenario japan-philippines --dry-run   # cost, no browser
+python -m src.cli sweep --scenario japan-philippines --depth quick
 ```
 
-Each route combination will:
-- Be scraped separately by each provider
-- Generate separate CSV/JSONL files (e.g., `PRG-SGN-2026-08-01_PELIKAN.csv`, `VIE-HAN-2026-08-01_PELIKAN.csv`)
-- Allow you to compare prices across different departure cities
+---
+
+## How a trip is modelled
+
+The three legs are searched **independently** and then chained, rather than searching whole
+itineraries. That keeps cost additive rather than multiplicative — each leg is searched once and
+reused across every itinerary built from it.
+
+| Stage | What it does | Where |
+|---|---|---|
+| Planner | Scenario → list of one-way searches | [src/sweep/planner.py](src/sweep/planner.py) |
+| Runner | Runs them across 4 browsers, writes `legs.jsonl` | [src/sweep/runner.py](src/sweep/runner.py) |
+| Combiner | Chains legs into valid itineraries | [src/combine.py](src/combine.py) |
+| Notifier | Posts to Discord when the best total improves | [src/notify_discord.py](src/notify_discord.py) |
+
+Stay lengths are computed from the dates **on the returned flights**, never the requested ones —
+pelikan.cz substitutes nearby dates, so asking for 22 January can return the 23rd.
+
+### Depth
+
+| Depth | Date step | Searches | Time |
+|---|---|---:|---:|
+| `quick` | every 7 days | 87 | ~6 min |
+| `standard` | every 3 days | 204 | ~14 min |
+| `deep` | every day | 597 | ~42 min |
 
 ---
 
-## Providers
+## Airports
 
-Each provider lives in `src/providers/` and implements `BaseProvider`.
+Every airport below was checked live against pelikan.cz on a sample January 2027 date
+(one-way to NRT, and one-way back from MNL, 1 adult, CZK). Failures are kept in the list rather
+than deleted so nobody re-litigates them later.
 
-### Available Providers:
+| Airport | →NRT | MNL→ | Combined | Status |
+|---|---:|---:|---:|---|
+| **VIE** Vienna | 15,057 | 8,567 | **23,624** | on by default |
+| **FRA** Frankfurt | 13,546 | 13,608 | **27,154** | on by default — 45% under Prague on a live run |
+| **PRG** Prague | 14,480 | 16,255 | **30,735** | on by default |
+| BER Berlin | 14,785 | 16,269 | 31,054 | available, off |
+| MUC Munich | 16,963 | 14,832 | 31,795 | available, off |
+| KRK Krakow | 16,723 | 17,105 | 33,828 | available, off |
+| KTW Katowice | 16,860 | 21,313 | 38,173 | available, off |
+| BTS Bratislava | 25,706 | — | — | **unavailable** — no return inventory |
+| BRQ Brno | — | — | — | **unavailable** — no long-haul inventory at all |
 
-**API-based (Recommended):**
-- `skyscanner_api.py` – **Skyscanner API via RapidAPI** (requires API key)
-  - ✅ Legal and ToS-compliant
-  - ✅ Free tier: 100 calls/month
-  - ✅ Stable, reliable data
-  - Setup: Get API key from https://rapidapi.com/skyscanner/api/skyscanner-api
-
-**Web Scraping (Personal use only):**
-- `letuska.py` – Letuska.cz scraper (Playwright)
-  - ⚠️ Personal, non-commercial use only
-  - ⚠️ Respects robots.txt disallow rules
-  - ⚠️ Built-in rate limiting
-- `pelikan.py` – Pelikan.cz scraper (Playwright)
-  - ⚠️ Personal, non-commercial use only
-  - ⚠️ Respects robots.txt disallow rules
-  - ⚠️ Built-in rate limiting
-- `vietnam_airlines.py` – Vietnam Airlines (skeleton, needs implementation)
-- `bamboo_airways.py` – Bamboo Airways (skeleton, needs implementation)
-
-**Testing:**
-- `demo_static.py` – Fully offline example to test the pipeline
-
-Add your own provider by copying a template and registering it in `src/providers/__init__.py`.
+The Japan→Philippines leg is cheap and well served: NRT→MNL from 3,863 Kč, HND→MNL 4,261,
+KIX→CEB 4,669.
 
 ---
 
-## Setting up Skyscanner API (Recommended)
+## The deep-link URL grammar
 
-1. **Sign up for RapidAPI:**
-   - Go to https://rapidapi.com/skyscanner/api/skyscanner-api
-   - Create a free account
+Searches navigate straight to a constructed URL instead of driving the search form. This took a
+search from ~150 s to **~14 s**, and is what makes a full 3-leg sweep possible at all.
 
-2. **Subscribe to Skyscanner API:**
-   - Choose the **Basic (Free)** plan: 100 calls/month
-   - Or choose a paid plan for more requests
+```
+/cs/letenky/T:{type},P:{adults}000E_0_0,CDF:{FROM}{FROM},CDT:A{TO},DD:{y}_{m}_{d}[,DR:{y}_{m}_{d}]/
+```
 
-3. **Get your API key:**
-   - On the API page, go to the "Endpoints" tab
-   - Your API key is shown in the code examples under "x-rapidapi-key"
-
-4. **Add to your environment:**
-   ```bash
-   # In .env.local or .env
-   SKYSCANNER_API_KEY=your_actual_api_key_here
-   ```
-
-5. **Run with Skyscanner API:**
-   ```bash
-   python -m src.cli scrape --provider SKYSCANNER_API
-   ```
+- `T:1` round trip (needs `DR`), `T:2` one-way. `T:0` and `R:0` return nothing — never generate them.
+- Dates are bare integers: `2027_2_3`, never `2027_02_03`.
+- `CDF` repeats the origin code; `CDT` prefixes the destination with `A`. The asymmetry is the site's.
+- Prices are **per person**. The site's label switches from "Celková cena pro všechny osoby" at
+  1 passenger to "Průměrná cena na osobu" at 2 — same number either way for one traveller.
+- Flight numbers are **not** in the DOM (they sit behind a collapsed "Detaily letů" panel), so legs
+  are identified by carrier + times + duration + stops.
 
 ---
 
-## CLI
+## Automation and the Actions budget
+
+The repo is **private**, so GitHub Actions gives 2,000 free minutes a month.
+
+| Job | Schedule | Cost |
+|---|---|---:|
+| Deep sweep ([scrape.yml](.github/workflows/scrape.yml)) | daily 02:00 UTC | ~1,330 min/mo |
+| Volatility probe ([probe.yml](.github/workflows/probe.yml)) | every 2 h, **7 days only** | ~168 min once |
+
+That is ~75% of the tier, leaving room for manual runs. Prefer **Run locally** in the UI for
+exploring; a cloud run spends real budget.
+
+Making the repo public would give unlimited minutes on standard runners. The reason not to is
+privacy, not cost: scenario files record which airports you leave from and exactly when you are
+abroad.
+
+**Two failure modes worth knowing about, both now guarded:**
+
+1. The previous workflow died in December 2025 and went unnoticed for **8 months**, because a
+   broken scraper and a quiet day look identical. A sweep that finds nothing now posts a red
+   health alert to Discord.
+2. A blanket `data/` rule in `.gitignore` silently discarded every result — `git add` matched only
+   ignored paths and `|| true` swallowed the error. Results are now committed, and `git add` no
+   longer hides failures.
+
+Secrets do **not** transfer between repositories. Only one is needed:
 
 ```bash
-# single run for all enabled providers
-python -m src.cli scrape
-
-# restrict to a specific provider (recommended)
-python -m src.cli scrape --provider PELIKAN
-
-# use multiple specific providers
-python -m src.cli scrape --provider PELIKAN --provider LETUSKA
-
-# continuous watch mode (with day/night intervals)
-python -m src.cli watch
+gh secret set DISCORD_WEBHOOK_URL -R Band1t0o/tickets-bot
 ```
 
-### Provider Usage Notes
+---
 
-**For API-based providers (SKYSCANNER_API):**
-- Rate limits are enforced by the API provider
-- Free tier: 100 calls/month = ~3 calls/day
-- Use watch mode carefully to avoid exceeding limits
-- Recommended: scrape once or twice per day
+## Volatility probe
 
-**For web scraping providers (LETUSKA):**
-- ⚠️ **Personal use only** - do not use for commercial purposes
-- Built-in delays prevent overwhelming servers
-- May break if website structure changes
-- Selectors may need updating - inspect the site and modify `src/providers/letuska.py`
+The daily cadence is an assumption: at five months out, fares normally move over days, not hours.
+The probe measures whether that holds, sampling three fixed routes every two hours.
+
+```bash
+python -m src.cli probe          # one sample of all three routes
+python -m src.cli probe-report   # how much prices actually moved
+```
+
+**It is temporary.** After about a week, read the report and turn it off — left running it costs
+~720 min/month and will break the budget:
+
+```bash
+gh workflow disable probe.yml -R Band1t0o/tickets-bot
+```
+
+Reading it: a change rate under ~20% with moves under ~2% means daily sweeping loses nothing worth
+chasing. Frequent moves above ~5% argue for sweeping more often.
 
 ---
 
-## Discord Notifications
+## The UI
 
-Get notified in Discord whenever new flight prices are found!
+Three tabs: **Search** (scenario definition, airport picker, cost estimate before you commit),
+**Results** (cheapest same-airport and cheapest open-jaw side by side, then every itinerary,
+expandable into legs), **Prices** (cheapest total by departure date — *when* to fly; best total
+over time — *whether to book now*; and the probe table).
 
-### Setup:
-
-1. **Create a Discord webhook:**
-   - Go to your Discord server
-   - Server Settings → Integrations → Webhooks
-   - Click "New Webhook"
-   - Give it a name (e.g., "Flight Tracker") and select a channel
-   - Copy the Webhook URL
-
-2. **Add webhook to your environment:**
-   ```bash
-   # In .env.local
-   DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_TOKEN
-   ```
-
-3. **For GitHub Actions**, add as a secret:
-   - Go to repo Settings → Secrets and variables → Actions
-   - Add secret: `DISCORD_WEBHOOK_URL` with your webhook URL
-
-### What you'll get:
-
-When new prices are found, you'll receive a Discord message with:
-- **Summary** of all new offers by route
-- **Best deals** - Top 3 cheapest flights
-- **Direct links** to each offer
-
-Notifications are sent **only when new offers are found** to avoid spam.
+The design system is **ported from the Finance-planner project**
+(`src/styles/palette.css` and `theme.css` copied verbatim). It is a copy, not a shared dependency,
+so the two will drift — style fixes worth keeping should be made in both. Charts are hand-rolled
+inline SVG in [chart.js](src/web/static/chart.js); there is deliberately no Node toolchain here.
 
 ---
 
-## GitHub Actions (optional)
-
-A cron workflow runs the scraper and **commits data files** back to the repo (no DB). You must set a repo `GITHUB_TOKEN` with `contents: write` (the default token works) and any site cookies/API keys as GitHub **Secrets**.
-
----
-
-## Project structure
+## Project layout
 
 ```
+scenarios/*.json          saved searches (committed)
 src/
-  cli.py               # CLI entrypoint
-  config.py            # env/envfile loader
-  models.py            # dataclasses for offers
-  storage.py           # file I/O, CSV/JSONL, dedupe ledger
-  scheduler.py         # day/night refresh logic
+  scenario.py             schema, validation, load/save
+  sweep/planner.py        scenario -> searches
+  sweep/runner.py         concurrent execution
+  combine.py              legs -> itineraries
+  probe.py                volatility sampling and report
+  notify_discord.py       price + health alerts
   providers/
-    base.py            # BaseProvider ABC
-    __init__.py        # registry
-    demo_static.py     # offline example
-    bamboo_airways.py  # requests+bs4 example (skeleton)
-    vietnam_airlines.py# Playwright example (skeleton)
-.github/workflows/scrape.yml  # cron + commit
-Dockerfile
-docker-compose.yml
-Makefile
-.env.example
-requirements.txt
+    pelikan_url.py        deep-link builder
+    pelikan.py            search + parser
+    letuska.py            second source, legacy interface
+  web/app.py              JSON API, serves the UI
+  web/static/             the UI
+data/sweeps/<id>/<ts>/    legs.jsonl, status.json, best.json
+data/probe/               observations.jsonl
 ```
 
 ---
 
-## Legal & Ethics
+## Legal
 
-- Respect ToS and robots.txt.
-- Keep request rates low.
-- Prefer public/official APIs where possible.
-
----
-
-## Credits & inspiration
-
-- Inspired by **web-scraper-nabidek-pronajmu** by @janchaloupka.
+Respect each site's terms and robots.txt. Verified: pelikan.cz disallows only `/gf3/` and
+`/services/`; letuska.cz disallows `/searchform`, `/api/` and `/assets/`. Nothing used here is
+disallowed. Keep request rates low.
