@@ -1,0 +1,63 @@
+name: probe
+
+# TEMPORARY - measures how much prices actually move, so the sweep cadence can
+# be set from data rather than intuition. Three fixed routes, ~2 min per run.
+#
+# Seven days costs ~168 Actions minutes, keeping the total near 1,500 of the
+# 2,000-minute private tier alongside the daily deep sweep. Left running it
+# costs ~720 min/month and WILL break the budget.
+#
+# After about a week:
+#   git pull && python -m src.cli probe-report
+#   gh workflow disable probe.yml -R Band1t0o/tickets-bot
+on:
+  schedule:
+    - cron: '0 */2 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-pw-${{ hashFiles('requirements.txt') }}
+
+      - run: python -m playwright install --with-deps chromium
+
+      - run: python -m src.cli probe
+
+      - name: Commit observations
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add data/probe/
+          if git diff --staged --quiet; then
+            echo "No new observations"
+          else
+            git commit -m "chore(probe): observation $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+            # The sweep workflow commits to the same branch; rebase rather than
+            # fail when the two land close together.
+            git pull --rebase --autostash
+            git push
+          fi

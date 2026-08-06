@@ -118,7 +118,22 @@ def main():
     p_sweep.add_argument("--dry-run", action="store_true",
                          help="Print the planned search count and estimate, then exit")
 
+    sub.add_parser("probe", help="Sample the fixed volatility-probe routes once")
+    sub.add_parser("probe-report", help="Summarise how much probe prices have moved")
+
     args = parser.parse_args()
+
+    if args.cmd == "probe":
+        from .probe import run_probe
+
+        run_probe()
+        raise SystemExit(0)
+
+    if args.cmd == "probe-report":
+        from .probe import format_report, probe_report
+
+        print(format_report(probe_report()))
+        raise SystemExit(0)
 
     # Settings are loaded lazily: they require ORIGIN/DESTINATION/date env vars
     # that only the legacy scrape and watch commands still use. Loading them up
