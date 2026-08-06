@@ -60,6 +60,9 @@ class Leg:
     price_currency: str
     price_amount: float
     url: str
+    depart_time: Optional[str] = None  # "18:25" local
+    arrive_time: Optional[str] = None  # "08:00" local
+    duration_minutes: Optional[int] = None
 
     def content_hash(self) -> str:
         body = "|".join(
@@ -69,6 +72,8 @@ class Leg:
                 self.origin,
                 self.destination,
                 self.depart_date.isoformat(),
+                self.depart_time,
+                self.arrive_time,
                 self.airline,
                 self.flight_number,
                 self.stops,
