@@ -92,6 +92,13 @@ def test_round_trip_scenario_does_not_need_philippines_airports():
     ).validate()
 
 
+def test_rejects_window_too_short_for_the_minimum_stays():
+    # Otherwise the planner emits leg A only - legs B and C have no valid dates
+    # - and the sweep silently produces no itineraries at all.
+    with pytest.raises(ValueError, match="minimum stays"):
+        multi_city(window_start=date(2027, 1, 5), window_end=date(2027, 1, 12)).validate()
+
+
 def test_unknown_depth_is_rejected():
     with pytest.raises(ValueError, match="depth"):
         multi_city(depth="exhaustive").validate()

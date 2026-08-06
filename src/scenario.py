@@ -65,6 +65,18 @@ class Scenario:
                 raise ValueError(f"{label} minimum must be at least 1 day")
         if not 1 <= self.adults <= 9:
             raise ValueError(f"adults must be between 1 and 9, got {self.adults}")
+        if self.trip_type == "multi_city":
+            # Without this the planner silently emits leg A only: legs B and C
+            # have no valid departure dates, and the sweep yields no itineraries
+            # at all with nothing obviously wrong.
+            needed = self.japan_stay_days[0] + self.ph_stay_days[0]
+            available = (self.window_end - self.window_start).days
+            if available < needed:
+                raise ValueError(
+                    f"window is {available} days but the minimum stays need {needed} "
+                    f"({self.japan_stay_days[0]} in Japan + {self.ph_stay_days[0]} in the "
+                    "Philippines); widen the window or shorten the stays"
+                )
 
     @property
     def step_days(self) -> int:
