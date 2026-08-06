@@ -93,6 +93,10 @@ def run_sweep_command(scenario_id: str, depth: str | None, dry_run: bool) -> int
     print(f"[{scenario.id}] {len(result.legs)} legs, {len(result.errors)} errors → {result.directory}")
     if not result.is_healthy:
         print(f"[{scenario.id}] WARNING: sweep looks unhealthy (no legs, or majority failed)")
+
+    from .notify_discord import notify_sweep
+
+    notify_sweep(scenario, result)
     return len(result.legs)
 
 
