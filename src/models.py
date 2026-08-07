@@ -63,6 +63,11 @@ class Leg:
     depart_time: Optional[str] = None  # "18:25" local
     arrive_time: Optional[str] = None  # "08:00" local
     duration_minutes: Optional[int] = None
+    # True = checked bag included, False = explicitly excluded, None = the site
+    # only reveals it after "POKRAČOVAT" (typical of low-cost carriers).
+    # Deliberately NOT in content_hash(): baggage belongs to the fare, not the
+    # flight, and hashing it would let one flight hash two ways.
+    checked_bag: Optional[bool] = None
 
     def content_hash(self) -> str:
         body = "|".join(
@@ -115,6 +120,21 @@ class Itinerary:
         return self.total_price * adults
 
     @property
+    def legs_needing_bag(self) -> list[Leg]:
+        """Legs where a checked bag is not confirmed included."""
+        return [leg for leg in self.legs if leg.checked_bag is not True]
+
+    def total_with_bags(self, bag_estimate: float) -> float:
+        """Per-person total once an estimated bag fee is added where needed.
+
+        Ranking on the headline fare compares a low-cost carrier's bagless price
+        against a legacy carrier's bag-inclusive one, which systematically
+        flatters the former. This is an estimate and is always labelled as one -
+        the site only quotes the real fee after "POKRAČOVAT".
+        """
+        return self.total_price + bag_estimate * len(self.legs_needing_bag)
+
+    @property
     def same_airport(self) -> bool:
         """True when the trip ends where it started (not an open jaw)."""
         if not self.legs:
@@ -139,10 +159,13 @@ class Itinerary:
             return ""
         return " → ".join([self.legs[0].origin] + [leg.destination for leg in self.legs])
 
-    def to_dict(self) -> dict:
+    def to_dict(self, bag_estimate: float = 0) -> dict:
         return {
             "legs": [leg.to_dict() for leg in self.legs],
             "total_price": self.total_price,
+            "total_with_bags": self.total_with_bags(bag_estimate),
+            "bags_needed": len(self.legs_needing_bag),
+            "bag_estimate": bag_estimate,
             "currency": self.currency,
             "same_airport": self.same_airport,
             "route": self.route,

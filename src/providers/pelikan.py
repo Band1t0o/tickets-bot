@@ -152,9 +152,36 @@ def parse_results_html(html: str, origin: str, destination: str) -> list[Leg]:
                 price_currency=currency,
                 price_amount=price,
                 url="",
+                checked_bag=_checked_bag_from_card(card),
             )
         )
     return _dedupe(legs)
+
+
+def _checked_bag_from_card(card) -> bool | None:
+    """Whether a checked bag is included, from the card's baggage row.
+
+    The icon filename is the reliable signal - `checked-baggage-include.svg` vs
+    `checked-baggage-exclude.svg`. The adjacent text is "Ano"/"Ne" when known and
+    "Pro více info o zavazadlech klikněte na POKRAČOVAT" when the site will only
+    say after a click, which is the usual case for low-cost carriers. Unknown
+    stays None: recording it as included would flatter exactly the fares whose
+    real price is a bag fee higher.
+    """
+    icon = card.select_one("img.baggage-img")
+    src = (icon.get("src") or icon.get("ng-src") or "") if icon else ""
+    if "checked-baggage-include" in src:
+        return True
+    if "checked-baggage-exclude" in src:
+        return False
+
+    label = card.select_one(".fly-item-bottom-baggage-new-reservation")
+    text = label.get_text(strip=True).casefold() if label else ""
+    if text == "ano":
+        return True
+    if text == "ne":
+        return False
+    return None
 
 
 def _dedupe(legs: list[Leg]) -> list[Leg]:

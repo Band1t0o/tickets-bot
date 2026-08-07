@@ -49,7 +49,12 @@ def combine(
     else:
         itineraries = _combine_multi_city(legs, scenario)
 
-    itineraries.sort(key=lambda i: i.total_price)
+    # Rank on the bag-inclusive total: the cheapest headline fare is often a
+    # low-cost carrier whose checked bag is extra, and comparing it against a
+    # bag-inclusive fare is not a like-for-like comparison. total_price is kept
+    # intact so the headline fare is still visible alongside it.
+    bag = scenario.bag_estimate_czk
+    itineraries.sort(key=lambda i: (i.total_with_bags(bag), i.total_price))
     return itineraries if limit is None else itineraries[:limit]
 
 

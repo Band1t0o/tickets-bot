@@ -33,6 +33,9 @@ class Scenario:
     trip_length_days: tuple[int, int] = (18, 22)  # round trip only
     adults: int = 1
     depth: str = "standard"
+    # Added to any leg that does not confirm an included checked bag, so
+    # rankings compare like with like. An estimate, never a quoted fare.
+    bag_estimate_czk: int = 1500
     alert_threshold_czk: int | None = None
     enabled: bool = True
     notes: str = ""

@@ -259,7 +259,10 @@ async function renderResults() {
   const jaw = body.best_open_jaw;
   // Exactly one card is the headline. On a tie the same-airport option wins,
   // since it is the one preferred when the price is equal.
-  const headline = !same ? jaw : !jaw ? same : (jaw.total_price < same.total_price ? jaw : same);
+  // Compare on the bag-inclusive total, not the headline fare: a low-cost
+  // carrier's bagless price is not comparable to a bag-inclusive one.
+  const withBags = (i) => (i ? i.total_with_bags ?? i.total_price : Infinity);
+  const headline = !same ? jaw : !jaw ? same : (withBags(jaw) < withBags(same) ? jaw : same);
 
   for (const [label, itinerary] of [
     ['Cheapest, same airport', same],
@@ -268,13 +271,18 @@ async function renderResults() {
     const card = document.createElement('div');
     card.className = `stat${itinerary && itinerary === headline ? ' is-headline' : ''}`;
     const saving = itinerary && itinerary !== headline && headline
-      ? `<div class="stat__sub trend trend--up">${money(itinerary.total_price - headline.total_price, '')}more</div>`
+      ? `<div class="stat__sub trend trend--up">${money(withBags(itinerary) - withBags(headline), '')}more</div>`
       : '';
+    // The bookable number leads; the headline fare stays visible underneath so
+    // the estimated bag fees are never hidden inside a single figure.
+    const bagNote = itinerary && itinerary.bags_needed
+      ? `<div class="stat__sub">${money(itinerary.total_price, itinerary.currency)} fare + est. ${itinerary.bags_needed} bag(s)</div>`
+      : '<div class="stat__sub">bags included</div>';
     card.innerHTML =
       `<div class="stat__label">${label}</div>` +
       (itinerary
-        ? `<div class="stat__value">${money(itinerary.total_price, itinerary.currency)}</div>
-           <div class="stat__sub">${itinerary.route}</div>${saving}`
+        ? `<div class="stat__value">${money(withBags(itinerary), itinerary.currency)}</div>
+           <div class="stat__sub">${itinerary.route}</div>${bagNote}${saving}`
         : '<div class="stat__value muted">—</div><div class="stat__sub">none found</div>');
     $('headline').appendChild(card);
   }
@@ -288,17 +296,23 @@ async function renderResults() {
       `<td>${itinerary.legs[itinerary.legs.length - 1].depart_date}</td>` +
       `<td>${airlines}</td>` +
       `<td>${itinerary.same_airport ? '<span class="badge badge--good">same airport</span>' : '<span class="badge badge--muted">open jaw</span>'}</td>` +
-      `<td class="num">${money(itinerary.total_price, itinerary.currency)}</td>`;
+      `<td>${itinerary.bags_needed
+        ? `<span class="badge badge--warning">${itinerary.bags_needed} bag(s) extra</span>`
+        : '<span class="badge badge--good">bags included</span>'}</td>` +
+      `<td class="num">${money(withBags(itinerary), itinerary.currency)}</td>`;
 
     const detail = document.createElement('tr');
     const cell = document.createElement('td');
-    cell.colSpan = 6;
+    cell.colSpan = 7;
     cell.innerHTML =
       '<details class="disclosure"><summary class="small muted">Legs</summary>' +
       itinerary.legs.map((l) =>
         `<div class="small">${l.origin}→${l.destination} · ${l.depart_date}` +
         (l.depart_time ? ` ${l.depart_time}→${l.arrive_time}` : '') +
         ` · ${l.airline} · ${l.stops ?? '?'} stop(s) · ${money(l.price_amount, l.price_currency)}` +
+        (l.checked_bag === true
+          ? ' · <span class="badge badge--good">bag incl.</span>'
+          : ' · <span class="badge badge--warning">bag extra</span>') +
         (l.url ? ` · <a href="${l.url}" target="_blank" rel="noopener">open</a>` : '') +
         '</div>').join('') +
       '</details>';

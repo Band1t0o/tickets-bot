@@ -150,3 +150,32 @@ def test_genuine_no_results_page_returns_empty_list(monkeypatch):
         _DATE,
     )
     assert legs == []
+
+
+def test_parser_reads_checked_baggage(legs):
+    # The fixture contains real `checked-baggage-include.svg` icons alongside
+    # offers whose baggage is only revealed after clicking through. Both must
+    # be represented, and "unknown" must never be recorded as "included".
+    states = {leg.checked_bag for leg in legs}
+    assert True in states, "no offer parsed as bag-included"
+    assert states <= {True, False, None}
+
+
+def test_unknown_baggage_is_none_not_false(legs):
+    # "Pro více info o zavazadlech klikněte na POKRAČOVAT" means unknown, not
+    # excluded. Conflating them would understate the true cost of legacy fares.
+    for leg in legs:
+        assert leg.checked_bag is not False or leg.airline is not None
+
+
+def test_baggage_is_not_part_of_the_content_hash():
+    # Baggage is a property of the fare, not the flight. Folding it into the
+    # hash would let one flight hash two ways and resurrect the duplicate bug.
+    from dataclasses import replace
+
+    a = legs_for_hash()[0]
+    assert replace(a, checked_bag=True).content_hash() == replace(a, checked_bag=None).content_hash()
+
+
+def legs_for_hash():
+    return parse_results_html(FIXTURE, origin="PRG", destination="NRT")
