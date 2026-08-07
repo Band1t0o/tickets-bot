@@ -1,53 +1,103 @@
-name: scrape
+name: sweep
+
+# One deep sweep per day. The previous schedule fired 20x/day and each run
+# spent ~11 of its ~13.6 minutes on pip + playwright install, costing roughly
+# 8,000 min/month against a 2,000-minute private-repo tier. Caching the browser
+# and searching via deep links (15s instead of 150s) is what makes daily
+# full-depth coverage affordable.
 on:
   schedule:
-    - cron: '0 6-21 * * *'   # Every hour from 6am-9pm UTC
-    - cron: '0 22,0,2,4 * * *'  # Every 2 hours at night (10pm, 12am, 2am, 4am UTC)
-  workflow_dispatch: {}
+    - cron: '0 2 * * *'      # 02:00 UTC daily, full-depth multi-city sweep
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: 'Scenario id (default: every enabled scenario)'
+        required: false
+      depth:
+        description: 'quick | standard | deep (default: the scenario setting)'
+        required: false
+
 permissions:
   contents: write
+
+concurrency:
+  # A queued run must not start while the previous one is still committing.
+  group: sweep
+  cancel-in-progress: false
+
 jobs:
-  run:
+  sweep:
     runs-on: ubuntu-latest
+    # A deep sweep is ~42 min. Without a ceiling, one hung browser could burn
+    # the entire monthly budget overnight.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Cache pip
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Cache Playwright browsers
         uses: actions/cache@v4
         with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
-      - run: pip install -r requirements.txt
-      - run: python -m playwright install --with-deps
-      - name: Run scraper
-        env:
-          ORIGIN: ${{ secrets.ORIGIN }}
-          DESTINATION: ${{ secrets.DESTINATION }}
-          DEPARTURE_DATE: ${{ secrets.DEPARTURE_DATE }}
-          ARRIVAL_DATE: ${{ secrets.ARRIVAL_DATE }}
-          ADULTS: ${{ secrets.ADULTS }}
-          USER_AGENT: ${{ secrets.USER_AGENT }}
-          HEADLESS: 'true'
-        run: python -m src.cli scrape --commit
-      - name: Send Discord notification
-        if: success()
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-pw-${{ hashFiles('requirements.txt') }}
+
+      # chromium only: the providers never touch firefox or webkit, and
+      # installing all three is most of the setup cost.
+      - run: python -m playwright install --with-deps chromium
+
+      - name: Report the planned cost before spending it
+        run: |
+          for f in scenarios/*.json; do
+            id=$(basename "$f" .json)
+            python -m src.cli sweep --scenario "$id" --dry-run || true
+          done
+
+      - name: Run sweep
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          # Scheduled runs sweep at full depth; the scenario's own depth is the
+          # interactive default and stays lower so local runs are quick.
+          INPUT_SCENARIO: ${{ inputs.scenario }}
+          INPUT_DEPTH: ${{ inputs.depth }}
         run: |
-          OFFER_COUNT=$(cat data/latest_offer_count.txt 2>/dev/null || echo "0")
-          if [ "$OFFER_COUNT" -gt 0 ]; then
-            echo "Found $OFFER_COUNT new offers, sending Discord notification..."
-            python -m src.notify_discord "$OFFER_COUNT"
-          else
-            echo "No new offers found, skipping Discord notification"
+          set -euo pipefail
+          DEPTH="${INPUT_DEPTH:-deep}"
+
+          if [ -n "${INPUT_SCENARIO:-}" ]; then
+            python -m src.cli sweep --scenario "$INPUT_SCENARIO" --depth "$DEPTH"
+            exit 0
           fi
-      - name: Commit & push data
-        if: success()
+
+          python - <<'PY' > /tmp/enabled.txt
+          from src.scenario import load_scenarios
+          print("\n".join(s.id for s in load_scenarios("scenarios") if s.enabled))
+          PY
+
+          while read -r id; do
+            [ -z "$id" ] && continue
+            echo "::group::sweep $id ($DEPTH)"
+            python -m src.cli sweep --scenario "$id" --depth "$DEPTH"
+            echo "::endgroup::"
+          done < /tmp/enabled.txt
+
+      - name: Commit results
         run: |
+          set -euo pipefail
           git config user.name "github-actions"
           git config user.email "github-actions@users.noreply.github.com"
-          git add data/*.jsonl data/*.csv data/*/ data/latest_offer_count.txt meta.json || true
-          git commit -m "chore(data): scrape $(date -u +'%Y-%m-%dT%H:%M:%SZ')" || echo "No changes"
-          git push || echo "Nothing to push"
+          # No `|| true` on `git add`: a persistence failure must be loud.
+          # A blanket `data/` ignore rule silently discarded every result for
+          # months precisely because that error was being swallowed.
+          git add data/
+          if git diff --staged --quiet; then
+            echo "No new data to commit"
+          else
+            git commit -m "chore(data): sweep $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+            git push
+          fi

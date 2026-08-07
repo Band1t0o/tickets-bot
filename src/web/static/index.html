@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Flight scenario watcher</title>
+  <link rel="stylesheet" href="/styles/palette.css">
+  <link rel="stylesheet" href="/styles/theme.css">
+  <link rel="stylesheet" href="/styles/app.css">
+</head>
+<body>
+  <div class="status-strip" id="status-strip">
+    <span class="status-strip__dot"></span>
+    <span id="status-text">Idle</span>
+    <span class="spacer"></span>
+    <button class="small" id="theme-toggle" title="Toggle light / dark">◐</button>
+  </div>
+
+  <main class="main">
+    <div class="page-header">
+      <div>
+        <h1>Flight scenario watcher</h1>
+        <p class="page-header__sub">
+          Searching runs in GitHub Actions on a schedule and commits results back to the
+          repo, so it keeps working whether or not this page is open. This is the control
+          panel over it.
+        </p>
+      </div>
+      <label class="field">
+        Scenario
+        <select id="scenario-select"></select>
+      </label>
+    </div>
+
+    <div class="tabs" id="tabs">
+      <button data-tab="search" class="is-active">Search</button>
+      <button data-tab="results">Results</button>
+      <button data-tab="prices">Prices</button>
+    </div>
+
+    <!-- ------------------------------------------------------------ Search -->
+    <section data-panel="search">
+      <div class="panel">
+        <div class="panel__header"><h2>Trip</h2></div>
+        <div class="form-grid">
+          <label class="field">Trip type
+            <select id="trip-type">
+              <option value="multi_city">Japan → Philippines</option>
+              <option value="round_trip">Round trip</option>
+            </select>
+          </label>
+          <label class="field">Window opens<input type="date" id="window-start"></label>
+          <label class="field">Window closes<input type="date" id="window-end"></label>
+          <label class="field">Travellers<input type="number" id="adults" min="1" max="9"></label>
+        </div>
+        <div class="form-grid" style="margin-top:12px" id="stay-fields">
+          <label class="field">Japan stay, min days<input type="number" id="jp-min" min="1"></label>
+          <label class="field">Japan stay, max days<input type="number" id="jp-max" min="1"></label>
+          <label class="field">Philippines stay, min days<input type="number" id="ph-min" min="1"></label>
+          <label class="field">Philippines stay, max days<input type="number" id="ph-max" min="1"></label>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel__header"><h2>Airports</h2></div>
+        <p class="panel__hint">
+          Checked live against pelikan.cz on a sample January date. Airports with no
+          inventory are kept visible rather than hidden, so the finding is not lost.
+        </p>
+        <h3 class="muted small">Depart from</h3>
+        <div class="airport-grid" id="airports-europe"></div>
+        <h3 class="muted small" style="margin-top:16px">Japan</h3>
+        <div class="airport-grid" id="airports-japan"></div>
+        <h3 class="muted small" style="margin-top:16px" id="ph-heading">Philippines</h3>
+        <div class="airport-grid" id="airports-philippines"></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel__header">
+          <h2>Run</h2>
+          <span class="badge badge--muted" id="estimate">—</span>
+        </div>
+        <div class="row">
+          <label class="field">Depth
+            <select id="depth">
+              <option value="quick">Quick — a few dates</option>
+              <option value="standard">Standard — every 3rd day</option>
+              <option value="deep">Deep — every day</option>
+            </select>
+          </label>
+          <span class="spacer"></span>
+          <button id="save-btn">Save scenario</button>
+          <button id="run-local-btn" class="primary">Run locally</button>
+          <button id="run-cloud-btn">Run in cloud</button>
+        </div>
+        <p class="panel__hint" style="margin:12px 0 0" id="run-note">
+          Local runs use your machine and cost nothing. Cloud runs spend from the
+          2,000-minute monthly Actions budget — a deep sweep is about 42 minutes.
+        </p>
+        <div id="save-error" class="badge badge--error" hidden></div>
+      </div>
+    </section>
+
+    <!-- ----------------------------------------------------------- Results -->
+    <section data-panel="results" hidden>
+      <div class="panel">
+        <div class="panel__header">
+          <h2>Sweep</h2>
+          <select id="sweep-select"></select>
+        </div>
+        <div class="stat-row" id="headline"></div>
+        <div class="table-scroll">
+          <table class="data" id="results-table">
+            <thead>
+              <tr>
+                <th>Route</th><th>Departs</th><th>Returns</th>
+                <th>Airlines</th><th>Type</th><th class="num">Total</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="empty" id="results-empty">Run a sweep to see itineraries.</div>
+      </div>
+    </section>
+
+    <!-- ------------------------------------------------------------ Prices -->
+    <section data-panel="prices" hidden>
+      <div class="panel">
+        <div class="panel__header"><h2>Cheapest total by departure date</h2></div>
+        <p class="panel__hint">Which day to leave on. Lowest point is labelled.</p>
+        <div class="chart" id="chart-by-date"></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel__header"><h2>Best total over time</h2></div>
+        <p class="panel__hint">Whether to book now or wait. Fills in as sweeps accumulate.</p>
+        <div class="chart" id="chart-history"></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel__header"><h2>Volatility probe</h2></div>
+        <p class="panel__hint">
+          Three fixed routes sampled every two hours, to decide whether daily sweeping
+          is often enough. Disable the probe workflow once it has a week of data.
+        </p>
+        <div id="probe-body" class="empty">No observations yet.</div>
+      </div>
+    </section>
+  </main>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

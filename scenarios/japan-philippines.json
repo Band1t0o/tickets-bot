@@ -1,0 +1,38 @@
+{
+  "id": "japan-philippines",
+  "name": "Europe → Japan → Philippines → Europe",
+  "trip_type": "multi_city",
+  "origins": [
+    "PRG",
+    "VIE",
+    "FRA"
+  ],
+  "japan_airports": [
+    "NRT",
+    "HND",
+    "KIX"
+  ],
+  "ph_airports": [
+    "MNL",
+    "CEB"
+  ],
+  "window_start": "2027-01-05",
+  "window_end": "2027-02-08",
+  "japan_stay_days": [
+    9,
+    11
+  ],
+  "ph_stay_days": [
+    9,
+    11
+  ],
+  "trip_length_days": [
+    18,
+    22
+  ],
+  "adults": 1,
+  "depth": "standard",
+  "alert_threshold_czk": null,
+  "enabled": true,
+  "notes": "Main trip. Airports chosen from a live viability check: BRQ and BTS returned no long-haul inventory; FRA measured ~45% cheaper than PRG on a sample January date."
+}

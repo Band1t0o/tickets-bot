@@ -1,0 +1,407 @@
+/*
+ * Component styles ported from the Finance-planner project
+ * (/Users/vojtano/Projects/Finance-planner/src/styles/app.css), trimmed to the
+ * classes this UI actually uses and extended with a few flight-specific ones
+ * (.airport-grid, .chart, .status-strip).
+ *
+ * A copy, not a shared dependency: the two projects will drift. Style fixes
+ * worth keeping should be made in both.
+ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--color-pageBackground);
+  color: var(--color-pageText);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3 {
+  margin: 0;
+  font-weight: 600;
+  line-height: 1.25;
+}
+h1 { font-size: 24px; }
+h2 { font-size: 17px; }
+h3 { font-size: 14px; }
+
+p { margin: 0 0 12px; }
+a { color: var(--color-pageTextLink); }
+
+/* Prices only line up in a column with tabular numerals. */
+.tnum,
+table.data td.num,
+table.data th.num,
+.stat__value {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum';
+}
+
+/* ------------------------------------------------------------------ layout */
+
+.main {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 28px 32px 64px;
+}
+
+.page-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+}
+
+.page-header__sub {
+  margin: 4px 0 0;
+  color: var(--color-pageTextLight);
+  max-width: 70ch;
+}
+
+.panel {
+  background: var(--color-panelBackground);
+  border: 1px solid var(--color-tableBorder);
+  border-radius: 10px;
+  padding: 18px 20px;
+  margin-bottom: 20px;
+}
+
+.panel__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+
+.panel__hint {
+  margin: -6px 0 14px;
+  color: var(--color-pageTextLight);
+  font-size: 13px;
+}
+
+.row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.spacer { flex: 1; }
+.stack { display: flex; flex-direction: column; gap: 12px; }
+.muted { color: var(--color-pageTextLight); }
+.small { font-size: 12px; }
+
+.empty {
+  padding: 28px 8px;
+  text-align: center;
+  color: var(--color-pageTextLight);
+}
+
+/* -------------------------------------------------------------------- tabs */
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 18px;
+  border-bottom: 1px solid var(--color-tableBorder);
+}
+
+.tabs button {
+  border: none;
+  background: none;
+  border-radius: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--color-pageTextLight);
+  padding: 8px 14px;
+  font-weight: 500;
+}
+
+.tabs button:hover:not(:disabled) {
+  background: none;
+  color: var(--color-pageText);
+}
+
+.tabs button.is-active {
+  color: var(--color-accentText);
+  border-bottom-color: var(--color-accent);
+  font-weight: 600;
+}
+
+/* ------------------------------------------------------------------ tables */
+
+.table-scroll {
+  overflow-x: auto;
+  margin: 0 -20px;
+  padding: 0 20px;
+}
+
+table.data {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+table.data th,
+table.data td {
+  padding: 8px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--color-tableBorder);
+  white-space: nowrap;
+}
+
+table.data th {
+  color: var(--color-tableHeaderText);
+  font-weight: 600;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+table.data td.num,
+table.data th.num { text-align: right; }
+
+table.data tbody tr:hover { background: var(--color-tableRowHover); }
+
+/* ----------------------------------------------------------------- badges */
+
+/* An element carrying both [hidden] and a class that sets `display` stays
+   visible without this - `display: inline-block` outranks the attribute. */
+[hidden] { display: none !important; }
+
+.badge {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  background: var(--color-accentSubtle);
+  color: var(--color-accentText);
+  white-space: nowrap;
+}
+
+.badge--warning { background: var(--color-warningBackground); color: var(--color-warningText); }
+.badge--muted   { background: var(--color-tableRowAlternate); color: var(--color-pageTextLight); }
+.badge--error   { background: var(--color-errorBackground); color: var(--color-errorText); }
+.badge--good    { background: var(--color-noticeBackground); color: var(--color-noticeText); }
+
+/* ------------------------------------------------------------------- forms */
+
+button {
+  font: inherit;
+  cursor: pointer;
+  border-radius: 6px;
+  border: 1px solid var(--color-buttonNormalBorder);
+  background: var(--color-buttonNormalBackground);
+  color: var(--color-buttonNormalText);
+  padding: 6px 12px;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+button:hover:not(:disabled) { background: var(--color-buttonNormalBackgroundHover); }
+button:disabled { opacity: 0.5; cursor: default; }
+
+button.primary {
+  background: var(--color-buttonPrimaryBackground);
+  border-color: var(--color-buttonPrimaryBackground);
+  color: var(--color-buttonPrimaryText);
+}
+
+button.primary:hover:not(:disabled) {
+  background: var(--color-buttonPrimaryBackgroundHover);
+  border-color: var(--color-buttonPrimaryBackgroundHover);
+}
+
+input, select, textarea {
+  font: inherit;
+  color: var(--color-formInputText);
+  background: var(--color-formInputBackground);
+  border: 1px solid var(--color-formInputBorder);
+  border-radius: 6px;
+  padding: 6px 9px;
+  min-width: 0;
+}
+
+input:focus, select:focus, textarea:focus {
+  outline: none;
+  border-color: var(--color-formInputBorderSelected);
+  box-shadow: 0 0 0 2px var(--color-accentSubtle);
+}
+
+label.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-formLabelText);
+}
+
+label.field > input,
+label.field > select { font-weight: 400; color: var(--color-formInputText); }
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+}
+
+/* ------------------------------------------------------------------- cards */
+
+.stat-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.stat {
+  background: var(--color-panelBackground);
+  border: 1px solid var(--color-tableBorder);
+  border-radius: 10px;
+  padding: 14px 16px;
+}
+
+.stat__label {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--color-pageTextLight);
+  margin-bottom: 6px;
+}
+
+.stat__value { font-size: 22px; font-weight: 600; }
+.stat__sub { margin-top: 4px; font-size: 12px; color: var(--color-pageTextLight); }
+
+.stat.is-headline {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 1px var(--color-accent);
+}
+
+.stat.is-headline .stat__value { font-size: 26px; }
+
+/* --------------------------------------------------------- airport picker */
+
+.airport-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 8px;
+}
+
+.airport {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 9px 11px;
+  border: 1px solid var(--color-tableBorder);
+  border-radius: 8px;
+  background: var(--color-panelBackground);
+  cursor: pointer;
+}
+
+.airport:hover { border-color: var(--color-tableBorderStrong); }
+
+.airport.is-unavailable {
+  opacity: 0.6;
+  cursor: not-allowed;
+  background: var(--color-tableRowAlternate);
+}
+
+.airport__body { min-width: 0; }
+.airport__code { font-weight: 600; }
+.airport__note {
+  font-size: 11px;
+  color: var(--color-pageTextLight);
+  white-space: normal;
+}
+
+/* ------------------------------------------------------------------ charts */
+
+.chart { width: 100%; overflow-x: auto; }
+.chart svg { display: block; max-width: 100%; height: auto; }
+
+.chart__tooltip {
+  position: absolute;
+  pointer-events: none;
+  background: var(--color-panelBackground);
+  border: 1px solid var(--color-tableBorderStrong);
+  border-radius: 6px;
+  padding: 6px 9px;
+  font-size: 12px;
+  box-shadow: 0 4px 14px var(--color-shadow);
+  white-space: nowrap;
+  z-index: 5;
+}
+
+.chart-wrap { position: relative; }
+
+/* ------------------------------------------------------------ status strip */
+
+/* Mirrors Finance-planner's sidebar save-state readout: the thing you glance at
+   to know whether work is happening. */
+.status-strip {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 32px;
+  background: var(--color-panelBackground);
+  border-bottom: 1px solid var(--color-tableBorder);
+  font-size: 13px;
+}
+
+.status-strip__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-pageTextSubdued);
+  flex: none;
+}
+
+.status-strip.is-running .status-strip__dot { background: var(--color-accent); }
+.status-strip.is-error .status-strip__dot { background: var(--color-errorText); }
+
+/* -------------------------------------------------------------- disclosure */
+
+.disclosure > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.disclosure > summary::-webkit-details-marker { display: none; }
+
+.disclosure > summary::before {
+  content: '›';
+  color: var(--color-pageTextLight);
+  font-size: 16px;
+  line-height: 1;
+  transition: transform 0.12s ease;
+}
+
+.disclosure[open] > summary::before { transform: rotate(90deg); }
+
+/* ------------------------------------------------------------------ trends */
+
+.trend { font-size: 12px; font-weight: 600; }
+.trend--down { color: var(--color-numberPositive); }  /* cheaper is good */
+.trend--up { color: var(--color-numberNegative); }
+
+@media (max-width: 720px) {
+  .main { padding: 20px 16px 48px; }
+  .status-strip { padding: 8px 16px; }
+}

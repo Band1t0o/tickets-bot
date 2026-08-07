@@ -1,0 +1,175 @@
+/*
+ * Ported verbatim from the Finance-planner project
+ * (/Users/vojtano/Projects/Finance-planner/src/styles/theme.css).
+ *
+ * This is a copy, not a shared dependency, so the two projects will drift.
+ * Style fixes worth keeping should be made in both. The chart hues in
+ * theme.css were checked for lightness band, chroma floor, contrast against
+ * the surface, and colour-blind separation - do not re-derive them by eye.
+ */
+/*
+ * Semantic tokens, in the spirit of Actual's themes/light.css + dark.css but
+ * trimmed to the handful this app actually uses. Raw values come from
+ * palette.css, which is copied verbatim from Actual.
+ */
+
+:root {
+  color-scheme: light;
+
+  --color-pageBackground: var(--palette-navy50);
+  --color-panelBackground: var(--palette-white);
+  --color-pageText: #272630;
+  --color-pageTextLight: var(--palette-navy500);
+  --color-pageTextSubdued: var(--palette-navy300);
+  --color-pageTextLink: var(--palette-blue600);
+
+  --color-tableBackground: var(--palette-white);
+  --color-tableRowHover: var(--palette-navy50);
+  --color-tableRowAlternate: var(--palette-gray50);
+  --color-tableHeaderText: var(--palette-navy600);
+  --color-tableBorder: var(--palette-navy100);
+  --color-tableBorderStrong: var(--palette-navy150);
+
+  --color-numberPositive: var(--palette-green700);
+  --color-numberNegative: var(--palette-red500);
+
+  --color-accent: var(--palette-purple500);
+  --color-accentText: var(--palette-purple600);
+  --color-accentSubtle: var(--palette-purple100);
+
+  --color-buttonPrimaryText: var(--palette-white);
+  --color-buttonPrimaryBackground: var(--palette-purple500);
+  --color-buttonPrimaryBackgroundHover: var(--palette-purple400);
+  --color-buttonNormalText: var(--palette-navy900);
+  --color-buttonNormalBackground: var(--palette-white);
+  --color-buttonNormalBackgroundHover: var(--palette-navy50);
+  --color-buttonNormalBorder: var(--palette-navy150);
+  --color-buttonDangerText: var(--palette-red700);
+
+  --color-formInputBackground: var(--palette-white);
+  --color-formInputBorder: var(--palette-navy150);
+  --color-formInputBorderSelected: var(--palette-purple500);
+  --color-formInputText: var(--palette-navy900);
+  --color-formInputPlaceholder: var(--palette-navy300);
+  --color-formLabelText: var(--palette-navy600);
+
+  --color-noticeBackground: var(--palette-green100);
+  --color-noticeText: var(--palette-green700);
+  --color-noticeBorder: var(--palette-green500);
+  --color-warningBackground: var(--palette-orange100);
+  --color-warningText: var(--palette-orange700);
+  --color-warningBorder: var(--palette-orange500);
+  --color-errorBackground: var(--palette-red100);
+  --color-errorText: var(--palette-red500);
+  --color-errorBorder: var(--palette-red500);
+
+  --color-sidebarBackground: var(--palette-navy900);
+  --color-sidebarItemText: var(--palette-navy150);
+  --color-sidebarItemTextSelected: var(--palette-purple200);
+  --color-sidebarItemBackgroundHover: var(--palette-navy800);
+
+  /*
+   * Categorical series colours, assigned in this fixed order and never cycled.
+   *
+   * Actual's own chartQual ramp is built for pale fills on a white card and
+   * fails as a categorical set — several steps read as grey, and its red and
+   * orange are indistinguishable to a deuteranope. This set is stepped from the
+   * ramps below instead and checked per theme: every colour sits in the
+   * lightness band, clears the chroma floor, holds 3:1 against the surface, and
+   * no neighbouring pair collapses under simulated colour blindness.
+   *
+   * Order matters twice over: it is the order slices are handed out in, and it
+   * is what the adjacent-pair check was run against. Reordering means
+   * re-checking. Red and green sit late on purpose — this app spends them on
+   * "over" and "under", and a category should not borrow that meaning.
+   *
+   * A seventh category does not get a seventh hue; the tail folds into Other.
+   */
+  --color-chart1: var(--palette-blue600);
+  --color-chart2: var(--palette-orange700);
+  --color-chart3: #a61e73;
+  --color-chart4: var(--palette-purple600);
+  --color-chart5: var(--palette-green600);
+  --color-chart6: var(--palette-red600);
+  --color-chartOther: var(--palette-navy500);
+
+  --color-chartGrid: var(--palette-navy100);
+  --color-chartAxis: var(--palette-navy400);
+
+  --color-overlayBackground: rgba(0, 0, 0, 0.35);
+  --color-shadow: rgba(0, 0, 0, 0.12);
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --color-pageBackground: var(--palette-navy900);
+  --color-panelBackground: var(--palette-navy800);
+  --color-pageText: var(--palette-navy100);
+  --color-pageTextLight: var(--palette-navy300);
+  --color-pageTextSubdued: var(--palette-navy500);
+  --color-pageTextLink: var(--palette-purple400);
+
+  --color-tableBackground: var(--palette-navy800);
+  --color-tableRowHover: var(--palette-navy700);
+  --color-tableRowAlternate: var(--palette-navy700);
+  --color-tableHeaderText: var(--palette-navy300);
+  --color-tableBorder: var(--palette-navy700);
+  --color-tableBorderStrong: var(--palette-navy600);
+
+  --color-numberPositive: var(--palette-green400);
+  --color-numberNegative: var(--palette-red300);
+
+  --color-accent: var(--palette-purple400);
+  --color-accentText: var(--palette-purple300);
+  --color-accentSubtle: var(--palette-navy700);
+
+  --color-buttonPrimaryText: var(--palette-white);
+  --color-buttonPrimaryBackground: var(--palette-purple500);
+  --color-buttonPrimaryBackgroundHover: var(--palette-purple400);
+  --color-buttonNormalText: var(--palette-navy100);
+  --color-buttonNormalBackground: var(--palette-navy800);
+  --color-buttonNormalBackgroundHover: var(--palette-navy700);
+  --color-buttonNormalBorder: var(--palette-navy600);
+  --color-buttonDangerText: var(--palette-red300);
+
+  --color-formInputBackground: var(--palette-navy900);
+  --color-formInputBorder: var(--palette-navy600);
+  --color-formInputBorderSelected: var(--palette-purple400);
+  --color-formInputText: var(--palette-navy100);
+  --color-formInputPlaceholder: var(--palette-navy500);
+  --color-formLabelText: var(--palette-navy300);
+
+  --color-noticeBackground: var(--palette-green900);
+  --color-noticeText: var(--palette-green300);
+  --color-noticeBorder: var(--palette-green500);
+  --color-warningBackground: var(--palette-orange900);
+  --color-warningText: var(--palette-orange300);
+  --color-warningBorder: var(--palette-orange500);
+  --color-errorBackground: var(--palette-red900);
+  --color-errorText: var(--palette-red300);
+  --color-errorBorder: var(--palette-red500);
+
+  --color-sidebarBackground: var(--palette-navy900);
+  --color-sidebarItemText: var(--palette-navy200);
+  --color-sidebarItemTextSelected: var(--palette-purple300);
+  --color-sidebarItemBackgroundHover: var(--palette-navy800);
+
+  /* The same six hues, re-stepped for the dark surface rather than reused from
+   * the light theme. Lighter steps of the same ramps, checked against
+   * --color-panelBackground here, so a category keeps its identity across the
+   * theme toggle while staying legible on navy. */
+  --color-chart1: var(--palette-blue500);
+  --color-chart2: var(--palette-orange700);
+  --color-chart3: #e0559f;
+  --color-chart4: var(--palette-purple300);
+  --color-chart5: var(--palette-green500);
+  --color-chart6: var(--palette-red400);
+  --color-chartOther: var(--palette-navy400);
+
+  --color-chartGrid: var(--palette-navy700);
+  --color-chartAxis: var(--palette-navy400);
+
+  --color-overlayBackground: rgba(0, 0, 0, 0.6);
+  --color-shadow: rgba(0, 0, 0, 0.4);
+}

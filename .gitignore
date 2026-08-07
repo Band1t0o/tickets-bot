@@ -32,4 +32,11 @@ debug_*.png
 .DS_Store
 Thumbs.db
 
-data/
+# Sweep results and price history under data/ ARE committed - that is how
+# cloud runs get their findings back to you. A blanket `data/` rule used to
+# sit here, which made the workflow's `git add data/...` a silent no-op
+# (the trailing `|| true` swallowed the "paths are ignored" error), so every
+# scheduled run threw its results away.
+data/**/*.png
+data/latest_offer_count.txt
+data/20*-*-*/

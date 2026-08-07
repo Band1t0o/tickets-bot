@@ -1,0 +1,13 @@
+{
+  "scenario_id": "japan-philippines",
+  "state": "done",
+  "total": 20,
+  "completed": 20,
+  "current": "",
+  "legs_found": 152,
+  "errors": [],
+  "error_count": 0,
+  "started_at": "2026-08-06T18:08:34+00:00",
+  "finished_at": "2026-08-06T18:12:07+00:00",
+  "depth": "quick"
+}

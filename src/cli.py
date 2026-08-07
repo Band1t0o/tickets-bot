@@ -1,5 +1,6 @@
 from __future__ import annotations
 import argparse
+from dataclasses import replace
 from pathlib import Path
 from .config import get_settings
 from .models import Offer
@@ -55,19 +56,91 @@ def run_once(providers: list[str]) -> int:
 
     return len(all_offers)
 
+def run_sweep_command(scenario_id: str, depth: str | None, dry_run: bool) -> int:
+    """Run one scenario's sweep. Returns the number of legs found."""
+    from .scenario import load_scenario
+    from .sweep.planner import estimate_minutes, plan_searches
+    from .sweep.runner import run_sweep
+
+    path = Path("scenarios") / f"{scenario_id}.json"
+    if not path.exists():
+        print(f"No scenario named {scenario_id!r} in scenarios/")
+        raise SystemExit(2)
+
+    scenario = load_scenario(path)
+    if depth:
+        scenario = replace(scenario, depth=depth)
+    scenario.validate()
+
+    searches = plan_searches(scenario)
+    minutes = estimate_minutes(searches)
+    print(f"[{scenario.id}] depth={scenario.depth} → {len(searches)} searches, ~{minutes} min")
+
+    if dry_run:
+        # Deliberately exits before launching a browser, so the Actions budget
+        # can be checked without spending any of it.
+        for leg_index in sorted({s.leg_index for s in searches}):
+            count = sum(1 for s in searches if s.leg_index == leg_index)
+            print(f"  leg {leg_index}: {count} searches")
+        raise SystemExit(0)
+
+    result = run_sweep(
+        scenario,
+        on_progress=lambda done, total, label: (
+            print(f"  [{done}/{total}] {label}", flush=True) if done % 10 == 0 else None
+        ),
+    )
+    print(f"[{scenario.id}] {len(result.legs)} legs, {len(result.errors)} errors → {result.directory}")
+    if not result.is_healthy:
+        print(f"[{scenario.id}] WARNING: sweep looks unhealthy (no legs, or majority failed)")
+
+    from .notify_discord import notify_sweep
+
+    notify_sweep(scenario, result)
+    return len(result.legs)
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Vietnam Tickets Scraper")
+    parser = argparse.ArgumentParser(description="Flight scenario watcher")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    p_scrape = sub.add_parser("scrape", help="Run a single scrape")
+    p_scrape = sub.add_parser("scrape", help="Legacy single round-trip scrape")
     p_scrape.add_argument("--provider", action="append", choices=list(REGISTRY.keys()))
     p_scrape.add_argument("--commit", action="store_true", help="Used by CI: exit 0 even if no data")
 
     p_watch = sub.add_parser("watch", help="Run forever with day/night intervals")
     p_watch.add_argument("--provider", action="append", choices=list(REGISTRY.keys()))
 
+    p_sweep = sub.add_parser("sweep", help="Run a sweep for one scenario")
+    p_sweep.add_argument("--scenario", required=True)
+    p_sweep.add_argument("--depth", choices=["quick", "standard", "deep"],
+                         help="Override the scenario's depth")
+    p_sweep.add_argument("--dry-run", action="store_true",
+                         help="Print the planned search count and estimate, then exit")
+
+    sub.add_parser("probe", help="Sample the fixed volatility-probe routes once")
+    sub.add_parser("probe-report", help="Summarise how much probe prices have moved")
+
     args = parser.parse_args()
-    settings = get_settings()
+
+    if args.cmd == "probe":
+        from .probe import run_probe
+
+        run_probe()
+        raise SystemExit(0)
+
+    if args.cmd == "probe-report":
+        from .probe import format_report, probe_report
+
+        print(format_report(probe_report()))
+        raise SystemExit(0)
+
+    # Settings are loaded lazily: they require ORIGIN/DESTINATION/date env vars
+    # that only the legacy scrape and watch commands still use. Loading them up
+    # front would make `sweep` fail in CI, where those secrets no longer exist.
+    if args.cmd == "sweep":
+        run_sweep_command(args.scenario, args.depth, args.dry_run)
+        raise SystemExit(0)
 
     providers = args.provider or list(REGISTRY.keys())
 
@@ -79,6 +152,7 @@ def main():
         raise SystemExit(0 if new_count >= 0 else 1)
 
     if args.cmd == "watch":
+        settings = get_settings()
         for _ in loop(settings.REFRESH_INTERVAL_DAYTIME_MINUTES, settings.REFRESH_INTERVAL_NIGHTTIME_MINUTES):
             run_once(providers)
 
