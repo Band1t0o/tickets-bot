@@ -1,0 +1,42 @@
+{
+  "scenario_id": "japan-philippines",
+  "state": "unhealthy",
+  "total": 93,
+  "completed": 93,
+  "current": "",
+  "legs_found": 343,
+  "errors": [
+    "HND\u2192CEB 2027-02-03: HND->CEB 2027-02-03: no results and no 'no flights' message within 75s",
+    "HND\u2192MNL 2027-02-03: HND->MNL 2027-02-03: no results and no 'no flights' message within 75s",
+    "MNL\u2192FRA 2027-01-21: MNL->FRA 2027-01-21: no results and no 'no flights' message within 75s",
+    "MNL\u2192VIE 2027-01-21: MNL->VIE 2027-01-21: no results and no 'no flights' message within 75s",
+    "MNL\u2192PRG 2027-01-21: MNL->PRG 2027-01-21: no results and no 'no flights' message within 75s",
+    "MNL\u2192PRG 2027-01-28: MNL->PRG 2027-01-28: no results and no 'no flights' message within 75s",
+    "CEB\u2192FRA 2027-01-21: CEB->FRA 2027-01-21: no results and no 'no flights' message within 75s",
+    "CEB\u2192VIE 2027-01-21: CEB->VIE 2027-01-21: no results and no 'no flights' message within 75s",
+    "CEB\u2192VIE 2027-01-28: CEB->VIE 2027-01-28: no results and no 'no flights' message within 75s",
+    "CEB\u2192PRG 2027-01-28: CEB->PRG 2027-01-28: no results and no 'no flights' message within 75s",
+    "MNL\u2192FRA 2027-01-28: MNL->FRA 2027-01-28: no results and no 'no flights' message within 75s",
+    "MNL\u2192FRA 2027-02-04: MNL->FRA 2027-02-04: no results and no 'no flights' message within 75s",
+    "MNL\u2192VIE 2027-02-04: MNL->VIE 2027-02-04: no results and no 'no flights' message within 75s",
+    "MNL\u2192PRG 2027-02-04: MNL->PRG 2027-02-04: no results and no 'no flights' message within 75s",
+    "MNL\u2192PRG 2027-02-11: MNL->PRG 2027-02-11: no results and no 'no flights' message within 75s",
+    "CEB\u2192FRA 2027-02-04: CEB->FRA 2027-02-04: no results and no 'no flights' message within 75s",
+    "CEB\u2192VIE 2027-02-04: CEB->VIE 2027-02-04: no results and no 'no flights' message within 75s",
+    "CEB\u2192VIE 2027-02-11: CEB->VIE 2027-02-11: no results and no 'no flights' message within 75s",
+    "CEB\u2192PRG 2027-02-11: CEB->PRG 2027-02-11: no results and no 'no flights' message within 75s",
+    "MNL\u2192FRA 2027-02-11: MNL->FRA 2027-02-11: no results and no 'no flights' message within 75s"
+  ],
+  "error_count": 58,
+  "routes_with_no_results": [
+    "CEB->VIE",
+    "HND->MNL",
+    "KIX->MNL",
+    "MNL->FRA",
+    "MNL->PRG",
+    "NRT->MNL"
+  ],
+  "started_at": "2026-08-07T13:17:07+00:00",
+  "finished_at": "2026-08-07T14:09:46+00:00",
+  "depth": "quick"
+}
