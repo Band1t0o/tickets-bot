@@ -25,8 +25,20 @@ from ..scenario import Scenario
 from .planner import LegSearch, plan_searches
 
 # Politeness delay between searches on the same worker.
-SEARCH_DELAY_S = 1.5
-DEFAULT_WORKERS = 4
+#
+# Raised from 1.5s/4 workers after the first sweep that could actually report
+# failures: 58 of 93 searches timed out. The same rate was present before and
+# invisible - the previous "0 errors" sweep averaged 2.9 legs per search where a
+# healthy search returns ~10, so roughly 70% of it was already failing silently.
+#
+# Whether the cause is concurrency or IP-level throttling is not established:
+# after a day of probing, even sequential single searches from this machine went
+# from ~14s to over 6 minutes, which is consistent with the site throttling the
+# client rather than with load per se. Both readings point the same way, so
+# these settings are deliberately gentler than measured need, and the daily
+# scheduled run is what should validate them - not more hammering.
+SEARCH_DELAY_S = 4.0
+DEFAULT_WORKERS = 2
 
 ProgressFn = Callable[[int, int, str], None]
 

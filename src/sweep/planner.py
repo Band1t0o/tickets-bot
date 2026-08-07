@@ -15,9 +15,10 @@ from datetime import date, timedelta
 
 from ..scenario import Scenario
 
-# Wall-clock seconds for one search, measured live against pelikan.cz deep
-# links (10-15s to first results, plus settle and politeness delay).
-SECONDS_PER_SEARCH = 17.0
+# Wall-clock seconds for one search: ~15s to first results plus the 4s
+# politeness delay. Under sweep conditions a sizeable share instead run to the
+# 120s timeout and are retried once, so treat this as a floor, not an average.
+SECONDS_PER_SEARCH = 19.0
 
 # The site substitutes nearby dates, so the final leg is searched past the end
 # of the window - otherwise the latest valid itineraries are never seen.
@@ -102,7 +103,7 @@ def _plan_multi_city(scenario: Scenario) -> list[LegSearch]:
     return searches
 
 
-def estimate_minutes(searches: list[LegSearch], workers: int = 4) -> float:
+def estimate_minutes(searches: list[LegSearch], workers: int = 2) -> float:
     """Wall-clock estimate for running `searches` across `workers` browsers."""
     if not searches:
         return 0.0

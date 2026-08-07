@@ -22,7 +22,8 @@ from .base import BaseProvider
 from .pelikan_url import build_search_url
 
 CARD_SELECTOR = "div[id^='flight-']"
-RESULT_TIMEOUT_S = 75
+# 75s was enough for a fast local search (~14s) but not under sweep conditions.
+RESULT_TIMEOUT_S = 120
 POLL_INTERVAL_S = 5
 
 # The site's own wording when a route genuinely has no inventory, verified live

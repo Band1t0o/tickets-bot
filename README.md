@@ -58,11 +58,11 @@ estimate is always shown as an estimate; the site only quotes the real fee after
 
 ### Depth
 
-| Depth | Date step | Searches | Time |
+| Depth | Date step | Searches | Time (2 workers) |
 |---|---|---:|---:|
-| `quick` | every 7 days | 87 | ~6 min |
-| `standard` | every 3 days | 204 | ~14 min |
-| `deep` | every day | 597 | ~42 min |
+| `quick` | every 7 days | 93 | ~15 min |
+| `standard` | every 3 days | 210 | ~33 min |
+| `deep` | every day | 615 | ~97 min |
 
 ---
 
@@ -149,11 +149,31 @@ The repo is **private**, so GitHub Actions gives 2,000 free minutes a month.
 
 | Job | Schedule | Cost |
 |---|---|---:|
-| Deep sweep ([scrape.yml](.github/workflows/scrape.yml)) | daily 02:00 UTC | ~1,330 min/mo |
+| Standard sweep ([scrape.yml](.github/workflows/scrape.yml)) | daily 02:00 UTC | ~1,000 min/mo |
 | Volatility probe ([probe.yml](.github/workflows/probe.yml)) | every 2 h, **7 days only** | ~168 min once |
 
-That is ~75% of the tier, leaving room for manual runs. Prefer **Run locally** in the UI for
+That is ~50% of the tier, leaving room for manual runs. Prefer **Run locally** in the UI for
 exploring; a cloud run spends real budget.
+
+Scheduled runs use **standard** depth, not deep. At 2 workers a deep sweep is ~97 min, over both
+the job timeout and the monthly tier — and a standard sweep that mostly succeeds beats a deep one
+where most searches time out.
+
+| Depth | Searches | Estimate (2 workers) |
+|---|---:|---:|
+| `quick` | 93 | ~15 min |
+| `standard` | 210 | ~33 min |
+| `deep` | 615 | ~97 min (manual only) |
+
+### Concurrency is deliberately low
+
+2 workers and a 4 s delay, down from 4 and 1.5 s. The first sweep that could report failures showed
+**58 of 93 searches timing out**, and the same rate was there before and invisible: the previous
+"0 errors" sweep averaged 2.9 legs per search where a healthy one returns ~10. Whether the cause is
+concurrency or IP-level throttling is unresolved — after a day of probing, sequential single
+searches from one machine went from ~14 s to over 6 minutes, which looks like client throttling
+rather than load. Both readings argue for going gentler, so these settings are below measured need.
+**Validate them from the scheduled run's `error_count`, not by hammering the site.**
 
 Making the repo public would give unlimited minutes on standard runners. The reason not to is
 privacy, not cost: scenario files record which airports you leave from and exactly when you are
