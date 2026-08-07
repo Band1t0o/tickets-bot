@@ -227,7 +227,14 @@ function populateSweepSelect() {
   for (const sweep of state.sweeps) {
     const option = document.createElement('option');
     option.value = sweep.stamp;
-    option.textContent = `${sweep.stamp.replace('T', ' ').replace('Z', '')} (${sweep.legs_found ?? 0} flights)`;
+    // Depth and search count are part of the label because a 20-search smoke
+    // test and a 204-search real sweep are otherwise indistinguishable here -
+    // and reading the wrong one produced a headline price 7,000 Kč too high.
+    const dark = (sweep.routes_with_no_results || []).length;
+    option.textContent =
+      `${sweep.stamp.replace('T', ' ').replace('Z', '')} · ` +
+      `${sweep.depth ?? '?'} · ${sweep.total ?? 0} searches · ${sweep.legs_found ?? 0} flights` +
+      (dark ? ` · ⚠ ${dark} dead route(s)` : '');
     select.appendChild(option);
   }
   if (!state.stamp && state.sweeps.length) state.stamp = state.sweeps[0].stamp;
