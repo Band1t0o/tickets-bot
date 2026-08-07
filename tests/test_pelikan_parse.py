@@ -7,11 +7,14 @@ flights today".
 """
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 import pytest
 
 from src.providers.pelikan import parse_results_html
+
+_DATE = date(2027, 1, 28)
 
 FIXTURE = (Path(__file__).parent / "fixtures" / "pelikan_results.html").read_text(
     encoding="utf-8"
@@ -88,3 +91,62 @@ def test_parser_sets_route_from_arguments(legs):
 
 def test_empty_page_yields_no_legs():
     assert parse_results_html("<html><body></body></html>", "PRG", "NRT") == []
+
+
+class _StubPage:
+    """Minimal stand-in for a Playwright page.
+
+    `cards` is how many offer cards eventually appear; `body` is the page text
+    the no-results marker is read from.
+    """
+
+    def __init__(self, cards: int = 0, body: str = ""):
+        self._cards = cards
+        self._body = body
+        self.url = None
+
+    def goto(self, url, **_kwargs):
+        self.url = url
+
+    def locator(self, _selector):
+        page = self
+
+        class _Loc:
+            def count(self):
+                return page._cards
+
+        return _Loc()
+
+    def inner_text(self, _selector):
+        return self._body
+
+    def content(self):
+        return FIXTURE
+
+
+def test_timeout_raises_instead_of_returning_empty(monkeypatch):
+    # The defect this guards: a search that timed out returned [], which the
+    # runner recorded as success. Three whole return routes vanished from a
+    # sweep that reported error_count: 0.
+    from src.providers import pelikan as mod
+
+    monkeypatch.setattr(mod.time, "sleep", lambda _s: None)
+    with pytest.raises(mod.SearchTimeout):
+        mod.PelikanProvider().search_leg(
+            _StubPage(cards=0, body="still loading"), "MNL", "VIE", _DATE
+        )
+
+
+def test_genuine_no_results_page_returns_empty_list(monkeypatch):
+    # A route the site really has no inventory for (verified live with BRQ->NRT)
+    # renders this message. That is data, not breakage.
+    from src.providers import pelikan as mod
+
+    monkeypatch.setattr(mod.time, "sleep", lambda _s: None)
+    legs = mod.PelikanProvider().search_leg(
+        _StubPage(cards=0, body="Hups! Nenašli jsme žádny let, zkuste vyhledat"),
+        "BRQ",
+        "NRT",
+        _DATE,
+    )
+    assert legs == []

@@ -25,6 +25,20 @@ CARD_SELECTOR = "div[id^='flight-']"
 RESULT_TIMEOUT_S = 75
 POLL_INTERVAL_S = 5
 
+# The site's own wording when a route genuinely has no inventory, verified live
+# against BRQ->NRT: "Hups! Nenašli jsme žádny let, zkuste vyhledat ješte jednou".
+# (Their copy mixes Czech and Slovak; match only the stable prefix.)
+NO_RESULTS_MARKER = "Nenašli jsme žádn"
+
+
+class SearchTimeout(RuntimeError):
+    """Results never rendered - the search failed, it did not come back empty.
+
+    Returning [] here instead of raising is how three whole return routes
+    (MNL->VIE, CEB->PRG, CEB->FRA) disappeared from a sweep that still reported
+    error_count: 0. An empty route and a broken search must never look alike.
+    """
+
 # Stop counts are conveyed by an icon alt attribute as well as Czech text.
 _STOP_ALT = {"direct": 0, "non-stop": 0, "one-stop": 1, "two-stops": 2, "three-stops": 3}
 
@@ -182,12 +196,20 @@ class PelikanProvider(BaseProvider):
         url = build_search_url(origin, destination, depart, ret, adults)
         page.goto(url, wait_until="domcontentloaded", timeout=45000)
 
+        # Race the offer cards against the site's explicit "no flights" message.
+        # Whichever appears first is the answer; if neither does, the search
+        # failed and must say so rather than masquerading as an empty route.
         for _ in range(0, RESULT_TIMEOUT_S, POLL_INTERVAL_S):
             time.sleep(POLL_INTERVAL_S)
             if page.locator(CARD_SELECTOR).count():
                 break
+            if NO_RESULTS_MARKER in page.inner_text("body"):
+                return []
         else:
-            return []
+            raise SearchTimeout(
+                f"{origin}->{destination} {depart}: no results and no "
+                f"'no flights' message within {RESULT_TIMEOUT_S}s"
+            )
 
         # Let the last few cards settle before snapshotting the DOM.
         time.sleep(2)
