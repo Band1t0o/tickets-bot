@@ -1,7 +1,7 @@
 import { lineChart } from '/chart.js';
 
 const $ = (id) => document.getElementById(id);
-const state = { scenario: null, airports: null, sweeps: [], stamp: null };
+const state = { scenario: null, viability: null, sweeps: [], stamp: null };
 
 const api = async (path, options) => {
   const response = await fetch(path, options);
@@ -40,81 +40,332 @@ $('tabs').onclick = (event) => {
   if (button.dataset.tab === 'prices') renderPrices();
 };
 
-/* --------------------------------------------------------------- airports */
+/* --------------------------------------------------------- route editor --
+   A trip is an ordered chain of stops, so the form is generated from the
+   scenario rather than hardcoded. The previous version had `jp-min`/`ph-max`
+   inputs and a ['europe','japan','philippines'] loop, which is why adding a
+   third destination meant editing HTML, JS, a Pydantic model and the schema.
 
-function renderAirports() {
-  const selected = {
-    europe: new Set(state.scenario.origins),
-    japan: new Set(state.scenario.japan_airports),
-    philippines: new Set(state.scenario.ph_airports),
+   Airports are chosen through a typeahead over the whole catalogue. A checkbox
+   grid was fine for nine hardcoded European airports; there are now ~4,000 with
+   scheduled service.
+*/
+
+const escapeHtml = (value) =>
+  String(value ?? '').replace(/[&<>"']/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+
+// Everything below `route` is the editable trip; `state.scenario` stays the
+// last saved version so an unsaved edit can be discarded by reloading.
+const route = { origins: [], stops: [], returnTo: null, oneWay: false };
+
+const airportCache = new Map();
+const cacheAirports = (list) => {
+  for (const airport of list) airportCache.set(airport.iata, airport);
+  return list;
+};
+
+function airportLabel(code) {
+  const airport = airportCache.get(code);
+  return airport ? `${airport.city || airport.name}` : '';
+}
+
+function viabilityOf(code) {
+  const stats = state.viability?.airports?.[code];
+  if (!stats) return null;
+  if (stats.verdict === 'no_inventory' || stats.verdict === 'no_return') return stats;
+  return null;
+}
+
+/* ------------------------------------------------------------- typeahead -- */
+
+function typeahead(onPick) {
+  const wrap = document.createElement('span');
+  wrap.className = 'typeahead';
+
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.placeholder = '+ airport or city';
+  input.autocomplete = 'off';
+
+  const menu = document.createElement('div');
+  menu.className = 'typeahead__menu';
+  menu.hidden = true;
+
+  let items = [];
+  let active = -1;
+  let timer;
+
+  const close = () => { menu.hidden = true; active = -1; };
+
+  const highlight = () => {
+    for (const [index, button] of [...menu.children].entries()) {
+      button.classList.toggle('is-active', index === active);
+    }
   };
 
-  for (const group of ['europe', 'japan', 'philippines']) {
-    const host = $(`airports-${group}`);
-    host.innerHTML = '';
-    for (const airport of state.airports[group]) {
-      const label = document.createElement('label');
-      label.className = `airport${airport.available ? '' : ' is-unavailable'}`;
+  const pick = (airport) => {
+    if (!airport) return;
+    cacheAirports([airport]);
+    onPick(airport.iata);
+    input.value = '';
+    close();
+  };
 
-      const box = document.createElement('input');
-      box.type = 'checkbox';
-      box.value = airport.iata;
-      box.dataset.group = group;
-      box.checked = selected[group].has(airport.iata);
-      box.disabled = !airport.available;
-      box.onchange = scheduleEstimate;
-
-      const body = document.createElement('div');
-      body.className = 'airport__body';
-      body.innerHTML =
-        `<div class="airport__code">${airport.iata} <span class="muted">${airport.city}</span></div>` +
-        (airport.note ? `<div class="airport__note">${airport.note}</div>` : '') +
-        (airport.available ? '' : '<div class="airport__note"><span class="badge badge--muted">unavailable</span></div>');
-
-      label.append(box, body);
-      host.appendChild(label);
+  const render = (results) => {
+    items = results;
+    menu.innerHTML = '';
+    for (const airport of results) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'typeahead__item';
+      // Catalogue text is third-party data; never interpolate it raw.
+      button.innerHTML =
+        `<strong>${escapeHtml(airport.iata)}</strong>` +
+        `<span class="muted">${escapeHtml(airport.city || airport.name)}` +
+        `${airport.country ? ', ' + escapeHtml(airport.country) : ''}</span>`;
+      button.onmousedown = (event) => { event.preventDefault(); pick(airport); };
+      menu.appendChild(button);
     }
+    menu.hidden = results.length === 0;
+    active = results.length ? 0 : -1;
+    highlight();
+  };
+
+  input.oninput = () => {
+    clearTimeout(timer);
+    const query = input.value.trim();
+    if (query.length < 2) { close(); return; }
+    timer = setTimeout(async () => {
+      try {
+        render(cacheAirports(await api(`/api/airports/search?q=${encodeURIComponent(query)}`)));
+      } catch { close(); }
+    }, 160);
+  };
+
+  input.onkeydown = (event) => {
+    if (menu.hidden) return;
+    if (event.key === 'ArrowDown') { event.preventDefault(); active = Math.min(active + 1, items.length - 1); highlight(); }
+    else if (event.key === 'ArrowUp') { event.preventDefault(); active = Math.max(active - 1, 0); highlight(); }
+    else if (event.key === 'Enter') { event.preventDefault(); pick(items[active]); }
+    else if (event.key === 'Escape') close();
+  };
+
+  input.onblur = () => setTimeout(close, 120);
+
+  wrap.append(input, menu);
+  return wrap;
+}
+
+/* ----------------------------------------------------------------- chips -- */
+
+function renderChips(host, codes, onChange) {
+  host.innerHTML = '';
+  for (const code of codes) {
+    const dead = viabilityOf(code);
+    const chip = document.createElement('span');
+    chip.className = `chip${dead ? ' chip--dead' : ''}`;
+    if (dead) chip.title = dead.note || `No inventory found on ${dead.dead_routes.join(', ')}`;
+
+    const city = airportLabel(code);
+    chip.innerHTML =
+      `<span class="chip__code">${escapeHtml(code)}</span>` +
+      (city ? `<span class="chip__city">${escapeHtml(city)}</span>` : '') +
+      (dead ? '<span class="badge badge--warning">no inventory</span>' : '');
+
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'chip__remove';
+    remove.textContent = '×';
+    remove.title = `Remove ${code}`;
+    remove.onclick = () => onChange(codes.filter((c) => c !== code));
+    chip.appendChild(remove);
+    host.appendChild(chip);
+  }
+  host.appendChild(typeahead((code) => {
+    if (!codes.includes(code)) onChange([...codes, code]);
+  }));
+}
+
+/* ----------------------------------------------------------------- stops -- */
+
+function renderStops() {
+  const host = $('stops');
+  host.innerHTML = '';
+
+  route.stops.forEach((stop, index) => {
+    const card = document.createElement('div');
+    card.className = 'stop';
+
+    const head = document.createElement('div');
+    head.className = 'stop__head';
+
+    const badge = document.createElement('span');
+    badge.className = 'stop__index';
+    badge.textContent = index + 1;
+
+    const label = document.createElement('input');
+    label.className = 'stop__label';
+    label.value = stop.label || '';
+    label.placeholder = `Stop ${index + 1}`;
+    label.oninput = () => { stop.label = label.value; };
+
+    const stay = document.createElement('span');
+    stay.className = 'stop__stay';
+    stay.innerHTML = '<span class="muted">stay</span>';
+    const [min, max] = [0, 1].map((slot) => {
+      const field = document.createElement('input');
+      field.type = 'number';
+      field.min = '1';
+      field.value = stop.stay_days[slot];
+      field.onchange = () => {
+        stop.stay_days[slot] = Number(field.value);
+        scheduleEstimate();
+      };
+      return field;
+    });
+    const dash = document.createElement('span');
+    dash.className = 'muted';
+    dash.textContent = '–';
+    const days = document.createElement('span');
+    days.className = 'muted';
+    days.textContent = 'days';
+    stay.append(min, dash, max, days);
+
+    const up = document.createElement('button');
+    up.className = 'small';
+    up.textContent = '↑';
+    up.title = 'Move earlier';
+    up.disabled = index === 0;
+    up.onclick = () => moveStop(index, -1);
+
+    const down = document.createElement('button');
+    down.className = 'small';
+    down.textContent = '↓';
+    down.title = 'Move later';
+    down.disabled = index === route.stops.length - 1;
+    down.onclick = () => moveStop(index, 1);
+
+    const remove = document.createElement('button');
+    remove.className = 'small';
+    remove.textContent = 'Remove';
+    remove.disabled = route.stops.length === 1;
+    remove.title = route.stops.length === 1 ? 'A trip needs at least one stop' : '';
+    remove.onclick = () => {
+      route.stops.splice(index, 1);
+      renderStops();
+      scheduleEstimate();
+    };
+
+    head.append(badge, label, stay, up, down, remove);
+
+    const chips = document.createElement('div');
+    chips.className = 'chips';
+    renderChips(chips, stop.airports, (codes) => {
+      stop.airports = codes;
+      renderStops();
+      scheduleEstimate();
+    });
+
+    card.append(head, chips);
+    host.appendChild(card);
+  });
+}
+
+function moveStop(index, delta) {
+  const target = index + delta;
+  if (target < 0 || target >= route.stops.length) return;
+  [route.stops[index], route.stops[target]] = [route.stops[target], route.stops[index]];
+  renderStops();
+  scheduleEstimate();
+}
+
+$('add-stop-btn').onclick = () => {
+  const previous = route.stops[route.stops.length - 1];
+  route.stops.push({ label: '', airports: [], stay_days: [...(previous?.stay_days ?? [7, 10])] });
+  renderStops();
+  scheduleEstimate();
+};
+
+$('one-way').onchange = () => {
+  route.oneWay = $('one-way').checked;
+  // Nowhere to return to when there is no leg home.
+  $('open-jaw').disabled = route.oneWay;
+  renderReturn();
+  scheduleEstimate();
+};
+
+$('open-jaw').onchange = () => {
+  route.returnTo = $('open-jaw').checked ? [...(route.returnTo ?? route.origins)] : null;
+  renderReturn();
+  scheduleEstimate();
+};
+
+function renderReturn() {
+  const on = !route.oneWay && route.returnTo !== null;
+  $('return-block').hidden = !on;
+  if (on) {
+    renderChips($('return-to'), route.returnTo, (codes) => {
+      route.returnTo = codes;
+      renderReturn();
+      scheduleEstimate();
+    });
   }
 }
 
-const chosen = (group) =>
-  [...document.querySelectorAll(`input[data-group="${group}"]:checked`)].map((b) => b.value);
+function renderOrigins() {
+  renderChips($('origins'), route.origins, (codes) => {
+    route.origins = codes;
+    renderOrigins();
+    scheduleEstimate();
+  });
+}
+
+function renderRoute() {
+  renderOrigins();
+  renderStops();
+  renderReturn();
+}
 
 /* -------------------------------------------------------------- scenarios */
 
 function fillForm(scenario) {
-  $('trip-type').value = scenario.trip_type;
+  route.origins = [...scenario.origins];
+  route.stops = scenario.stops.map((stop) => ({
+    label: stop.label,
+    airports: [...stop.airports],
+    stay_days: [...stop.stay_days],
+  }));
+  route.returnTo = scenario.return_to ? [...scenario.return_to] : null;
+  route.oneWay = Boolean(scenario.one_way);
+
   $('window-start').value = scenario.window_start;
   $('window-end').value = scenario.window_end;
   $('adults').value = scenario.adults;
-  $('jp-min').value = scenario.japan_stay_days[0];
-  $('jp-max').value = scenario.japan_stay_days[1];
-  $('ph-min').value = scenario.ph_stay_days[0];
-  $('ph-max').value = scenario.ph_stay_days[1];
+  $('currency').value = scenario.currency ?? 'CZK';
   $('depth').value = scenario.depth;
-  toggleTripFields();
-}
+  $('one-way').checked = route.oneWay;
+  $('open-jaw').checked = route.returnTo !== null;
+  $('open-jaw').disabled = route.oneWay;
 
-function toggleTripFields() {
-  const isMulti = $('trip-type').value === 'multi_city';
-  $('ph-heading').hidden = !isMulti;
-  $('airports-philippines').hidden = !isMulti;
-  $('ph-min').closest('label').hidden = !isMulti;
-  $('ph-max').closest('label').hidden = !isMulti;
+  renderRoute();
 }
 
 function formToScenario() {
   return {
     ...state.scenario,
-    trip_type: $('trip-type').value,
-    origins: chosen('europe'),
-    japan_airports: chosen('japan'),
-    ph_airports: $('trip-type').value === 'multi_city' ? chosen('philippines') : [],
+    origins: route.origins,
+    stops: route.stops.map((stop) => ({
+      label: stop.label,
+      airports: stop.airports,
+      stay_days: stop.stay_days,
+    })),
+    return_to: route.oneWay ? null : route.returnTo,
+    one_way: route.oneWay,
     window_start: $('window-start').value,
     window_end: $('window-end').value,
     adults: Number($('adults').value),
-    japan_stay_days: [Number($('jp-min').value), Number($('jp-max').value)],
-    ph_stay_days: [Number($('ph-min').value), Number($('ph-max').value)],
+    currency: ($('currency').value || 'CZK').toUpperCase(),
     depth: $('depth').value,
   };
 }
@@ -124,24 +375,37 @@ function formToScenario() {
 let estimateTimer;
 const scheduleEstimate = () => {
   clearTimeout(estimateTimer);
-  estimateTimer = setTimeout(refreshEstimate, 250);
+  estimateTimer = setTimeout(refreshEstimate, 300);
 };
 
 async function refreshEstimate() {
+  // The estimate is served for the *saved* scenario, so an unsaved edit shows
+  // the last saved cost. Say so rather than implying the number is live.
+  const dirty = JSON.stringify(formToScenario()) !== JSON.stringify(state.scenario);
   try {
     const body = await api(
       `/api/scenarios/${state.scenario.id}/estimate?depth=${$('depth').value}`,
       { method: 'POST' },
     );
-    $('estimate').textContent = `${body.searches} searches · ~${body.minutes} min`;
+    $('estimate').textContent =
+      `${body.searches} searches · ~${body.minutes} min` + (dirty ? ' (saved version)' : '');
     $('estimate').className = 'badge badge--muted';
+    $('leg-breakdown').innerHTML = (body.leg_labels ?? [])
+      .map((label, index) => `${escapeHtml(label)} — ${body.per_leg[index] ?? 0} searches`)
+      .join('<br>');
   } catch (error) {
     $('estimate').textContent = error.message;
     $('estimate').className = 'badge badge--error';
+    $('leg-breakdown').textContent = '';
   }
 }
 
 /* -------------------------------------------------------------- save/run */
+
+const showError = (message) => {
+  $('save-error').textContent = message;
+  $('save-error').hidden = false;
+};
 
 $('save-btn').onclick = async () => {
   $('save-error').hidden = true;
@@ -152,38 +416,37 @@ $('save-btn').onclick = async () => {
       body: JSON.stringify(formToScenario()),
     });
     state.scenario = saved;
+    fillForm(saved);
     await refreshEstimate();
     $('save-btn').textContent = 'Saved';
     setTimeout(() => ($('save-btn').textContent = 'Save scenario'), 1500);
   } catch (error) {
-    $('save-error').textContent = error.message;
-    $('save-error').hidden = false;
+    showError(error.message);
   }
 };
 
 $('run-local-btn').onclick = async () => {
+  $('save-error').hidden = true;
   try {
     await api(`/api/scenarios/${state.scenario.id}/run?depth=${$('depth').value}`, { method: 'POST' });
     pollStatus();
   } catch (error) {
-    $('save-error').textContent = error.message;
-    $('save-error').hidden = false;
+    showError(error.message);
   }
 };
 
 $('run-cloud-btn').onclick = async () => {
+  $('save-error').hidden = true;
   try {
     await api(`/api/scenarios/${state.scenario.id}/run-cloud?depth=${$('depth').value}`, { method: 'POST' });
     $('status-text').textContent = 'Dispatched to GitHub Actions';
   } catch (error) {
-    $('save-error').textContent = error.message;
-    $('save-error').hidden = false;
+    showError(error.message);
   }
 };
 
-$('trip-type').onchange = () => { toggleTripFields(); scheduleEstimate(); };
 $('depth').onchange = scheduleEstimate;
-for (const id of ['window-start', 'window-end', 'jp-min', 'jp-max', 'ph-min', 'ph-max', 'adults']) {
+for (const id of ['window-start', 'window-end', 'adults', 'currency']) {
   $(id).onchange = scheduleEstimate;
 }
 
@@ -195,6 +458,15 @@ async function pollStatus() {
     const body = await api(`/api/sweeps/${state.scenario.id}`);
     state.sweeps = body.sweeps;
     const latest = body.sweeps[0];
+
+    // A sweep thread that died has no status.json to show, so without this the
+    // strip would sit on "No sweeps yet" forever after a failed launch.
+    if (body.error) {
+      strip.className = 'status-strip is-error';
+      $('status-text').textContent = `Sweep failed — ${body.error}`;
+      populateSweepSelect();
+      return;
+    }
 
     if (body.running && latest) {
       // Pace constants come from the server. Keeping local copies is how the
@@ -261,11 +533,24 @@ async function renderResults() {
 
   if (!state.stamp) {
     $('results-empty').hidden = false;
+    $('results-empty').textContent = 'Run a sweep to see itineraries.';
     return;
   }
 
-  const body = await api(`/api/sweeps/${state.scenario.id}/${state.stamp}/results`);
+  // Every other call site catches; these two did not, so a 500 left a blank
+  // table and an explanation only in the browser console.
+  let body;
+  try {
+    body = await api(`/api/sweeps/${state.scenario.id}/${state.stamp}/results`);
+  } catch (error) {
+    $('results-empty').hidden = false;
+    $('results-empty').textContent = `Could not load results — ${error.message}`;
+    return;
+  }
   $('results-empty').hidden = body.itineraries.length > 0;
+  $('results-empty').textContent = body.legs_found
+    ? 'This sweep found flights, but none of them chain into a complete trip.'
+    : 'Run a sweep to see itineraries.';
 
   const same = body.best_same_airport;
   const jaw = body.best_open_jaw;
@@ -299,37 +584,54 @@ async function renderResults() {
     $('headline').appendChild(card);
   }
 
+  // Airline codes, routes and URLs are all scraped from a third-party page, so
+  // every one of them is escaped before it reaches innerHTML. A link is built
+  // as a node with .href so a `javascript:` URL cannot be injected either.
   for (const itinerary of body.itineraries) {
     const row = document.createElement('tr');
-    const airlines = [...new Set(itinerary.legs.map((l) => l.airline))].join(', ');
+    const airlines = [...new Set(itinerary.legs.map((l) => l.airline))].filter(Boolean).join(', ');
     row.innerHTML =
-      `<td>${itinerary.route}</td>` +
-      `<td>${itinerary.legs[0].depart_date}</td>` +
-      `<td>${itinerary.legs[itinerary.legs.length - 1].depart_date}</td>` +
-      `<td>${airlines}</td>` +
+      `<td>${escapeHtml(itinerary.route)}</td>` +
+      `<td>${escapeHtml(itinerary.legs[0].depart_date)}</td>` +
+      `<td>${escapeHtml(itinerary.legs[itinerary.legs.length - 1].depart_date)}</td>` +
+      `<td>${escapeHtml(airlines)}</td>` +
       `<td>${itinerary.same_airport ? '<span class="badge badge--good">same airport</span>' : '<span class="badge badge--muted">open jaw</span>'}</td>` +
       `<td>${itinerary.bags_needed
-        ? `<span class="badge badge--warning">${itinerary.bags_needed} bag(s) extra</span>`
+        ? `<span class="badge badge--warning">${Number(itinerary.bags_needed)} bag(s) extra</span>`
         : '<span class="badge badge--good">bags included</span>'}</td>` +
       `<td class="num">${money(withBags(itinerary), itinerary.currency)}</td>`;
 
     const detail = document.createElement('tr');
     const cell = document.createElement('td');
     cell.colSpan = 7;
-    cell.innerHTML =
-      '<details class="disclosure"><summary class="small muted">Legs</summary>' +
-      itinerary.legs.map((l) =>
-        `<div class="small">${l.origin}→${l.destination} · ${l.depart_date}` +
-        (l.depart_time ? ` ${l.depart_time}→${l.arrive_time}` : '') +
-        ` · ${l.airline} · ${l.stops ?? '?'} stop(s) · ${money(l.price_amount, l.price_currency)}` +
-        (l.checked_bag === true
-          ? ' · <span class="badge badge--good">bag incl.</span>'
-          : ' · <span class="badge badge--warning">bag extra</span>') +
-        (l.url ? ` · <a href="${l.url}" target="_blank" rel="noopener">open</a>` : '') +
-        '</div>').join('') +
-      '</details>';
-    detail.appendChild(cell);
+    const disclosure = document.createElement('details');
+    disclosure.className = 'disclosure';
+    disclosure.innerHTML = '<summary class="small muted">Legs</summary>';
 
+    for (const leg of itinerary.legs) {
+      const line = document.createElement('div');
+      line.className = 'small';
+      line.innerHTML =
+        `${escapeHtml(leg.origin)}→${escapeHtml(leg.destination)} · ${escapeHtml(leg.depart_date)}` +
+        (leg.depart_time ? ` ${escapeHtml(leg.depart_time)}→${escapeHtml(leg.arrive_time)}` : '') +
+        ` · ${escapeHtml(leg.airline)} · ${leg.stops ?? '?'} stop(s) · ` +
+        `${money(leg.price_amount, leg.price_currency)}` +
+        (leg.checked_bag === true
+          ? ' · <span class="badge badge--good">bag incl.</span>'
+          : ' · <span class="badge badge--warning">bag extra</span>');
+      if (leg.url && /^https?:\/\//i.test(leg.url)) {
+        const link = document.createElement('a');
+        link.href = leg.url;
+        link.target = '_blank';
+        link.rel = 'noopener';
+        link.textContent = 'open';
+        line.append(' · ', link);
+      }
+      disclosure.appendChild(line);
+    }
+
+    cell.appendChild(disclosure);
+    detail.appendChild(cell);
     tbody.append(row, detail);
   }
 }
@@ -339,29 +641,43 @@ async function renderResults() {
 async function renderPrices() {
   if (!state.stamp) return;
 
-  const byDate = await api(`/api/sweeps/${state.scenario.id}/${state.stamp}/by-date`);
+  // Independent endpoints, fetched together. Awaiting them one after another
+  // made the Prices tab about three round trips slower than it needed to be.
+  // `allSettled` so one failing panel does not blank the other two.
+  const [byDateResult, historyResult, probeResult] = await Promise.allSettled([
+    api(`/api/sweeps/${state.scenario.id}/${state.stamp}/by-date`),
+    api(`/api/history/${state.scenario.id}`),
+    api('/api/probe'),
+  ]);
+
+  // The chart used to hardcode " CZK" regardless of what the legs were priced
+  // in. The scenario says what the currency is.
+  const suffix = ` ${state.scenario.currency ?? 'CZK'}`;
+  const byDate = byDateResult.status === 'fulfilled' ? byDateResult.value : [];
+  const history = historyResult.status === 'fulfilled' ? historyResult.value : [];
+
   const byDateHost = $('chart-by-date');
   const width = Math.max(420, byDateHost.clientWidth - 4);
   byDateHost.innerHTML = '';
   byDateHost.appendChild(lineChart(
     byDate.map((row) => ({ label: row.depart_date, value: row.cheapest_total, note: row.route })),
-    { width, valueSuffix: ' CZK', ariaLabel: 'Cheapest total by departure date',
-      emptyText: 'No itineraries in this sweep yet.' },
+    { width, valueSuffix: suffix, ariaLabel: 'Cheapest total by departure date',
+      emptyText: byDateResult.status === 'rejected'
+        ? `Could not load — ${byDateResult.reason.message}`
+        : 'No itineraries in this sweep yet.' },
   ));
-
-  const history = await api(`/api/history/${state.scenario.id}`);
   $('chart-history').innerHTML = '';
   // One point is not a trend. Say so rather than drawing a lone dot that
   // implies a flat line.
   $('chart-history').appendChild(lineChart(
     history.length >= 2 ? history.map((row) => ({ label: row.swept_at.slice(0, 10), value: row.best_total })) : [],
-    { width, valueSuffix: ' CZK', ariaLabel: 'Best total over time',
+    { width, valueSuffix: suffix, ariaLabel: 'Best total over time',
       emptyText: history.length === 1
         ? 'Only one sweep so far — a trend needs at least two.'
         : 'Needs a few sweeps before a trend means anything.' },
   ));
 
-  const probe = await api('/api/probe');
+  const probe = probeResult.status === 'fulfilled' ? probeResult.value : { routes: {}, recommendation: '' };
   const routes = Object.entries(probe.routes);
   $('probe-body').className = routes.length ? '' : 'empty';
   $('probe-body').innerHTML = routes.length
@@ -369,41 +685,66 @@ async function renderPrices() {
       '<th>Route</th><th class="num">Observations</th><th class="num">Changed</th>' +
       '<th class="num">Median move</th><th class="num">Biggest drop</th></tr></thead><tbody>' +
       routes.map(([name, r]) =>
-        `<tr><td>${name}</td><td class="num">${r.n_observations}</td>` +
+        `<tr><td>${escapeHtml(name)}</td><td class="num">${Number(r.n_observations)}</td>` +
         `<td class="num">${Math.round(r.change_rate * 100)}%</td>` +
         `<td class="num">${Math.round(r.median_change).toLocaleString()}</td>` +
         `<td class="num">${Math.round(r.largest_drop).toLocaleString()}</td></tr>`).join('') +
-      `</tbody></table></div><p class="panel__hint" style="margin-top:12px">${probe.recommendation}</p>`
+      '</tbody></table></div>' +
+      `<p class="panel__hint" style="margin-top:12px">${escapeHtml(probe.recommendation)}</p>`
     : 'No observations yet.';
 }
 
 /* -------------------------------------------------------------------- init */
 
-async function init() {
-  state.airports = await api('/api/airports');
-  const scenarios = await api('/api/scenarios');
+async function loadScenario(id) {
+  state.scenario = await api(`/api/scenarios/${id}`);
+  // Cache the labels for every airport the scenario names, so chips read
+  // "PRG Prague" on first paint instead of filling in after a search.
+  const codes = [...new Set([
+    ...state.scenario.origins,
+    ...state.scenario.stops.flatMap((stop) => stop.airports),
+    ...(state.scenario.return_to ?? []),
+  ])];
+  await Promise.allSettled(codes.map(async (code) => {
+    if (!airportCache.has(code)) cacheAirports([await api(`/api/airports/${code}`)]);
+  }));
+  fillForm(state.scenario);
+}
 
-  const select = $('scenario-select');
-  for (const scenario of scenarios) {
-    const option = document.createElement('option');
-    option.value = scenario.id;
-    option.textContent = scenario.name;
-    select.appendChild(option);
-  }
-  select.onchange = async () => {
-    state.scenario = await api(`/api/scenarios/${select.value}`);
-    state.stamp = null;
-    fillForm(state.scenario);
-    renderAirports();
+async function init() {
+  try {
+    const [scenarios, viability] = await Promise.all([
+      api('/api/scenarios'),
+      api('/api/viability').catch(() => ({ airports: {} })),
+    ]);
+    state.viability = viability;
+
+    if (!scenarios.length) {
+      $('status-text').textContent = 'No scenarios yet — add one under scenarios/';
+      return;
+    }
+
+    const select = $('scenario-select');
+    for (const scenario of scenarios) {
+      const option = document.createElement('option');
+      option.value = scenario.id;
+      option.textContent = scenario.name;
+      select.appendChild(option);
+    }
+    select.onchange = async () => {
+      state.stamp = null;
+      await loadScenario(select.value);
+      await refreshEstimate();
+      await pollStatus();
+    };
+
+    await loadScenario(scenarios[0].id);
     await refreshEstimate();
     await pollStatus();
-  };
-
-  state.scenario = scenarios[0];
-  fillForm(state.scenario);
-  renderAirports();
-  await refreshEstimate();
-  await pollStatus();
+  } catch (error) {
+    $('status-strip').className = 'status-strip is-error';
+    $('status-text').textContent = `Could not start — ${error.message}`;
+  }
 }
 
 init();

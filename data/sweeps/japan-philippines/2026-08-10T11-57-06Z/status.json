@@ -1,14 +1,14 @@
 {
   "scenario_id": "japan-philippines",
-  "state": "running",
+  "state": "done",
   "total": 93,
-  "completed": 90,
-  "current": "CEB\u2192FRA 2027-02-04",
-  "legs_found": 874,
+  "completed": 93,
+  "current": "",
+  "legs_found": 903,
   "errors": [],
   "error_count": 0,
   "routes_with_no_results": [],
   "started_at": "2026-08-10T11:57:06+00:00",
-  "finished_at": "",
+  "finished_at": "2026-08-10T12:16:06+00:00",
   "depth": "quick"
 }

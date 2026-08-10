@@ -41,38 +41,43 @@
     <!-- ------------------------------------------------------------ Search -->
     <section data-panel="search">
       <div class="panel">
-        <div class="panel__header"><h2>Trip</h2></div>
+        <div class="panel__header"><h2>When</h2></div>
         <div class="form-grid">
-          <label class="field">Trip type
-            <select id="trip-type">
-              <option value="multi_city">Japan → Philippines</option>
-              <option value="round_trip">Round trip</option>
-            </select>
-          </label>
           <label class="field">Window opens<input type="date" id="window-start"></label>
           <label class="field">Window closes<input type="date" id="window-end"></label>
           <label class="field">Travellers<input type="number" id="adults" min="1" max="9"></label>
-        </div>
-        <div class="form-grid" style="margin-top:12px" id="stay-fields">
-          <label class="field">Japan stay, min days<input type="number" id="jp-min" min="1"></label>
-          <label class="field">Japan stay, max days<input type="number" id="jp-max" min="1"></label>
-          <label class="field">Philippines stay, min days<input type="number" id="ph-min" min="1"></label>
-          <label class="field">Philippines stay, max days<input type="number" id="ph-max" min="1"></label>
+          <label class="field">Currency<input type="text" id="currency" maxlength="3"></label>
         </div>
       </div>
 
       <div class="panel">
-        <div class="panel__header"><h2>Airports</h2></div>
+        <div class="panel__header"><h2>Route</h2></div>
         <p class="panel__hint">
-          Checked live against pelikan.cz on a sample January date. Airports with no
-          inventory are kept visible rather than hidden, so the finding is not lost.
+          A trip is a chain of stops. Add as many as you like — search cost grows with
+          the number of legs, not with the number of date combinations. Badges come from
+          your own sweep history; airports nothing has ever been found for are flagged.
         </p>
+
         <h3 class="muted small">Depart from</h3>
-        <div class="airport-grid" id="airports-europe"></div>
-        <h3 class="muted small" style="margin-top:16px">Japan</h3>
-        <div class="airport-grid" id="airports-japan"></div>
-        <h3 class="muted small" style="margin-top:16px" id="ph-heading">Philippines</h3>
-        <div class="airport-grid" id="airports-philippines"></div>
+        <div class="chips" id="origins"></div>
+
+        <div id="stops"></div>
+
+        <div class="row" style="margin-top:16px">
+          <button class="small" id="add-stop-btn">+ Add stop</button>
+          <span class="spacer"></span>
+          <label class="check small">
+            <input type="checkbox" id="one-way"> One-way — no leg home
+          </label>
+          <label class="check small">
+            <input type="checkbox" id="open-jaw"> Return somewhere else
+          </label>
+        </div>
+
+        <div id="return-block" hidden>
+          <h3 class="muted small" style="margin-top:16px">Return to</h3>
+          <div class="chips" id="return-to"></div>
+        </div>
       </div>
 
       <div class="panel">
@@ -93,9 +98,11 @@
           <button id="run-local-btn" class="primary">Run locally</button>
           <button id="run-cloud-btn">Run in cloud</button>
         </div>
+        <div id="leg-breakdown" class="small muted" style="margin-top:12px"></div>
         <p class="panel__hint" style="margin:12px 0 0" id="run-note">
           Local runs use your machine and cost nothing. Cloud runs spend from the
-          2,000-minute monthly Actions budget — a deep sweep is about 42 minutes.
+          2,000-minute monthly Actions budget. The estimate above is measured at the
+          current pace, so it moves when the sweep settings do.
         </p>
         <div id="save-error" class="badge badge--error" hidden></div>
       </div>
@@ -142,7 +149,8 @@
         <div class="panel__header"><h2>Volatility probe</h2></div>
         <p class="panel__hint">
           Three fixed routes sampled every two hours, to decide whether daily sweeping
-          is often enough. Disable the probe workflow once it has a week of data.
+          is often enough. Disable the probe workflow once it has a week of data —
+          left running it costs roughly 720 Actions minutes a month.
         </p>
         <div id="probe-body" class="empty">No observations yet.</div>
       </div>

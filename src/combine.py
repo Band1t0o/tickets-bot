@@ -57,6 +57,9 @@ class CombineResult:
     best_by_date: dict[str, Itinerary] = field(default_factory=dict)
     best_same_airport: Itinerary | None = None
     best_open_jaw: Itinerary | None = None
+    # How many legs went in, so a caller that holds only the result can still
+    # report it without re-reading legs.jsonl.
+    legs_in: int = 0
     considered: int = 0
     truncated: bool = False
 
@@ -90,7 +93,7 @@ def combine_all(
     legs: list[Leg], scenario: Scenario, limit: int | None = MAX_RESULTS
 ) -> CombineResult:
     """Walk every valid itinerary in `legs`, keeping what callers need."""
-    result = CombineResult()
+    result = CombineResult(legs_in=len(legs))
     pools = scenario.airport_pools
     leg_count = len(pools) - 1
     if not legs or leg_count < 1:
