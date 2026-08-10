@@ -28,8 +28,9 @@ concurrency:
 jobs:
   sweep:
     runs-on: ubuntu-latest
-    # A deep sweep is ~42 min. Without a ceiling, one hung browser could burn
-    # the entire monthly budget overnight.
+    # A standard sweep is ~28 min at 2 workers (deep would be ~97, which is why
+    # the run step below caps scheduled runs at standard). Without a ceiling,
+    # one hung browser could burn the entire monthly budget overnight.
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -101,7 +102,21 @@ jobs:
           git add data/
           if git diff --staged --quiet; then
             echo "No new data to commit"
-          else
-            git commit -m "chore(data): sweep $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-            git push
+            exit 0
           fi
+          git commit -m "chore(data): sweep $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+
+          # Rebase before pushing. probe.yml runs `0 */2 * * *`, which includes
+          # the 02:00 slot this workflow fires on, and pushes to the same branch.
+          # The two concurrency groups differ, so nothing serialises them: a
+          # rejected push would throw away a sweep that already spent ~40 minutes
+          # of the monthly budget. Retried because the probe may land twice.
+          for attempt in 1 2 3; do
+            if git push; then
+              exit 0
+            fi
+            echo "push rejected (attempt $attempt), rebasing onto origin"
+            git pull --rebase --autostash
+          done
+          echo "::error::could not push sweep results after 3 attempts"
+          exit 1

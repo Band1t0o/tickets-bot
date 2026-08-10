@@ -1,5 +1,6 @@
 from __future__ import annotations
 import argparse
+import sys
 from dataclasses import replace
 from pathlib import Path
 from .config import get_settings
@@ -100,7 +101,21 @@ def run_sweep_command(scenario_id: str, depth: str | None, dry_run: bool) -> int
     return len(result.legs)
 
 
+def _force_utf8_output() -> None:
+    """Print UTF-8 regardless of the console's codepage.
+
+    Windows consoles default to a legacy codepage - cp1250 on a Czech install -
+    which cannot encode the arrows in route labels or the Czech text scraped
+    from pelikan. `probe-report` died with UnicodeEncodeError on the first "→"
+    rather than printing a report that had already been computed.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
 def main():
+    _force_utf8_output()
     parser = argparse.ArgumentParser(description="Flight scenario watcher")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
