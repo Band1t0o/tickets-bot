@@ -9,26 +9,24 @@ import json
 from datetime import date
 
 from src.models import Leg
-from src.scenario import Scenario
+from src.scenario import Scenario, Stop
 from src.sweep.runner import run_sweep
+from tests.conftest import make_scenario
 
 
 def scenario(**overrides) -> Scenario:
     defaults = dict(
         id="test-scenario",
         name="Test",
-        trip_type="multi_city",
         origins=["PRG"],
-        japan_airports=["NRT"],
-        ph_airports=["MNL"],
-        window_start=date(2027, 1, 5),
-        window_end=date(2027, 2, 8),
-        japan_stay_days=(9, 11),
-        ph_stay_days=(9, 11),
+        stops=[
+            Stop(airports=["NRT"], stay_days=(9, 11), label="Japan"),
+            Stop(airports=["MNL"], stay_days=(9, 11), label="Philippines"),
+        ],
         depth="quick",
     )
     defaults.update(overrides)
-    return Scenario(**defaults)
+    return make_scenario(**defaults)
 
 
 class FakeProvider:

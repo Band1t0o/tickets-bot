@@ -3,12 +3,72 @@
 Tests here must never touch the network or launch a browser: the scrapers are
 slow (~15s per real search) and the sites are third-party. Provider behaviour is
 tested against saved HTML fixtures instead.
+
+The scenario builders live here rather than in each test module because they
+used to be copied into four files, and every schema change meant finding all
+four. A test that wants a different shape passes overrides.
 """
 from __future__ import annotations
 
 from datetime import date
 
 import pytest
+
+from src.scenario import Scenario, Stop
+
+WINDOW_START = date(2027, 1, 5)
+WINDOW_END = date(2027, 2, 8)
+
+
+def make_scenario(**overrides) -> Scenario:
+    """A two-stop trip: origins -> stop 1 -> stop 2 -> home."""
+    defaults = dict(
+        id="japan-philippines",
+        name="Japan then Philippines",
+        origins=["PRG", "VIE", "FRA"],
+        stops=[
+            Stop(airports=["NRT", "HND", "KIX"], stay_days=(9, 11), label="Japan"),
+            Stop(airports=["MNL", "CEB"], stay_days=(9, 11), label="Philippines"),
+        ],
+        window_start=WINDOW_START,
+        window_end=WINDOW_END,
+    )
+    defaults.update(overrides)
+    return Scenario(**defaults)
+
+
+def make_round_trip(**overrides) -> Scenario:
+    """One stop and back: the shape that could never produce an itinerary."""
+    defaults = dict(
+        id="tokyo",
+        name="Tokyo return",
+        origins=["PRG"],
+        stops=[Stop(airports=["NRT"], stay_days=(18, 20), label="Japan")],
+        window_start=WINDOW_START,
+        window_end=WINDOW_END,
+        depth="quick",
+    )
+    defaults.update(overrides)
+    return Scenario(**defaults)
+
+
+def make_three_stop(**overrides) -> Scenario:
+    """A shape the old three-block planner could not express at all."""
+    defaults = dict(
+        id="grand-tour",
+        name="Three stops",
+        origins=["PRG"],
+        stops=[
+            Stop(airports=["NRT"], stay_days=(7, 9), label="Japan"),
+            Stop(airports=["MNL"], stay_days=(7, 9), label="Philippines"),
+            Stop(airports=["BKK"], stay_days=(5, 7), label="Thailand"),
+        ],
+        window_start=WINDOW_START,
+        window_end=date(2027, 3, 15),
+        depth="quick",
+    )
+    defaults.update(overrides)
+    return Scenario(**defaults)
 
 
 @pytest.fixture
@@ -28,6 +88,7 @@ def make_leg():
         price_currency: str = "CZK",
         url: str = "https://www.pelikan.cz/cs/letenky/example/",
         provider: str = "PELIKAN",
+        checked_bag: bool | None = None,
     ) -> Leg:
         return Leg(
             provider=provider,
@@ -40,6 +101,7 @@ def make_leg():
             price_currency=price_currency,
             price_amount=price_amount,
             url=url,
+            checked_bag=checked_bag,
         )
 
     return _make

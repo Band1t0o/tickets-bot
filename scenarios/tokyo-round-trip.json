@@ -1,34 +1,33 @@
 {
   "id": "tokyo-round-trip",
   "name": "Tokyo round trip",
-  "trip_type": "round_trip",
   "origins": [
     "PRG",
     "VIE",
     "FRA"
   ],
-  "japan_airports": [
-    "NRT",
-    "HND"
+  "stops": [
+    {
+      "label": "Japan",
+      "airports": [
+        "NRT",
+        "HND"
+      ],
+      "stay_days": [
+        18,
+        22
+      ]
+    }
   ],
-  "ph_airports": [],
   "window_start": "2027-01-05",
   "window_end": "2027-02-08",
-  "japan_stay_days": [
-    9,
-    11
-  ],
-  "ph_stay_days": [
-    9,
-    11
-  ],
-  "trip_length_days": [
-    18,
-    22
-  ],
+  "return_to": null,
+  "one_way": false,
   "adults": 1,
   "depth": "quick",
-  "alert_threshold_czk": null,
+  "currency": "CZK",
+  "alert_threshold": null,
+  "bag_estimate": 1500,
   "enabled": false,
   "notes": "Simpler comparison case: straight return to Japan, no Philippines leg."
 }

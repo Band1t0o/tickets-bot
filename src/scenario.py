@@ -3,112 +3,237 @@
 A scenario is a saved search: which airports, which date window, how long to
 stay where. Scenarios live as JSON files under `scenarios/` and are committed,
 so the scheduled cloud sweep and the local UI read the same definitions.
+
+A trip is an ordered chain of stops, and nothing here names a country. The
+previous schema had `japan_airports`, `ph_airports`, `japan_stay_days` and
+`ph_stay_days` as literal field names, restated in a Pydantic mirror, an HTML
+form and a JS mapper - so a different trip meant editing code in six files.
+
+The chain also removes a whole bug shape rather than fixing an instance of it.
+`trip_type` used to select between a two-leg round trip and a three-leg
+multi-city, each with its own hand-written planner and combiner branch. The
+round-trip branch planned only outbound searches while its combiner branch
+required a leg departing the destination, so it could never yield a single
+itinerary. Here every leg - including the one home - is emitted by the same
+loop, so the two halves cannot disagree about what a trip is.
 """
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass
 from datetime import date
 from pathlib import Path
 
-TRIP_TYPES = ("round_trip", "multi_city")
 DEPTHS = ("quick", "standard", "deep")
 
 # Days between searched departure dates, per depth.
 DEPTH_STEP_DAYS = {"quick": 7, "standard": 3, "deep": 1}
+
+# Airports are typed by hand now that any destination is reachable, and a typo
+# would otherwise become a search that quietly finds nothing.
+IATA_RE = re.compile(r"^[A-Z]{3}$")
+
+
+@dataclass(frozen=True)
+class Stop:
+    """One place the trip stays before flying on.
+
+    `airports` are alternatives, not a sequence: any of them satisfies this
+    stop, and the combiner may arrive at one only if it also departs from that
+    same one - landing in Tokyo cannot be followed by departing Osaka.
+    """
+
+    airports: list[str]
+    stay_days: tuple[int, int]
+    label: str = ""
+
+    def describe(self, index: int) -> str:
+        """Human name for error messages; falls back to a position."""
+        return self.label or f"stop {index + 1}"
 
 
 @dataclass
 class Scenario:
     id: str
     name: str
-    trip_type: str
     origins: list[str]
-    japan_airports: list[str]
-    ph_airports: list[str]
+    stops: list[Stop]
     window_start: date
     window_end: date
-    japan_stay_days: tuple[int, int] = (9, 11)
-    ph_stay_days: tuple[int, int] = (9, 11)
-    trip_length_days: tuple[int, int] = (18, 22)  # round trip only
+    # None means "back where you started". A different list is an open jaw by
+    # construction - fly home to somewhere other than the departure airport.
+    return_to: list[str] | None = None
+    # True drops the final leg entirely: a one-way chain that just ends.
+    one_way: bool = False
     adults: int = 1
     depth: str = "standard"
-    # Added to any leg that does not confirm an included checked bag, so
-    # rankings compare like with like. An estimate, never a quoted fare.
-    bag_estimate_czk: int = 1500
-    alert_threshold_czk: int | None = None
+    currency: str = "CZK"
+    alert_threshold: int | None = None
+    bag_estimate: int = 1500
     enabled: bool = True
     notes: str = ""
 
-    def validate(self) -> None:
-        """Raise ValueError with a message the UI can show verbatim."""
-        if self.trip_type not in TRIP_TYPES:
-            raise ValueError(f"trip_type must be one of {TRIP_TYPES}, got {self.trip_type!r}")
-        if self.depth not in DEPTHS:
-            raise ValueError(f"depth must be one of {DEPTHS}, got {self.depth!r}")
-        if not self.origins:
-            raise ValueError("origins must list at least one departure airport")
-        if not self.japan_airports:
-            raise ValueError("japan_airports must list at least one arrival airport")
-        if self.trip_type == "multi_city" and not self.ph_airports:
-            raise ValueError("ph_airports is required for a multi_city trip")
-        if self.window_end < self.window_start:
-            raise ValueError(
-                f"window_end ({self.window_end}) must not precede window_start ({self.window_start})"
-            )
-        for label, span in (
-            ("japan_stay_days", self.japan_stay_days),
-            ("ph_stay_days", self.ph_stay_days),
-            ("trip_length_days", self.trip_length_days),
-        ):
-            low, high = span
-            if low > high:
-                raise ValueError(f"{label} minimum ({low}) exceeds maximum ({high})")
-            if low < 1:
-                raise ValueError(f"{label} minimum must be at least 1 day")
-        if not 1 <= self.adults <= 9:
-            raise ValueError(f"adults must be between 1 and 9, got {self.adults}")
-        if self.trip_type == "multi_city":
-            # Without this the planner silently emits leg A only: legs B and C
-            # have no valid departure dates, and the sweep yields no itineraries
-            # at all with nothing obviously wrong.
-            needed = self.japan_stay_days[0] + self.ph_stay_days[0]
-            available = (self.window_end - self.window_start).days
-            if available < needed:
-                raise ValueError(
-                    f"window is {available} days but the minimum stays need {needed} "
-                    f"({self.japan_stay_days[0]} in Japan + {self.ph_stay_days[0]} in the "
-                    "Philippines); widen the window or shorten the stays"
-                )
+    # ------------------------------------------------------------------ shape
+
+    @property
+    def airport_pools(self) -> list[list[str]]:
+        """Candidate airports at each point of the chain, in travel order.
+
+        The single source of truth for the trip's shape: the planner walks
+        consecutive pairs to emit searches, and the combiner walks the same
+        pairs to chain legs. They cannot drift apart because they read this.
+        """
+        pools = [self.origins] + [stop.airports for stop in self.stops]
+        if not self.one_way:
+            pools.append(self.return_to or self.origins)
+        return pools
+
+    @property
+    def leg_count(self) -> int:
+        return len(self.airport_pools) - 1
 
     @property
     def step_days(self) -> int:
         return DEPTH_STEP_DAYS[self.depth]
 
+    def earliest_departure(self, leg_index: int) -> int:
+        """Days after `window_start` that leg `leg_index` may first depart.
+
+        Leg 0 leaves on day zero; every later leg must wait out the minimum
+        stays of every stop before it.
+        """
+        return sum(stop.stay_days[0] for stop in self.stops[:leg_index])
+
+    @property
+    def min_trip_days(self) -> int:
+        return sum(stop.stay_days[0] for stop in self.stops)
+
+    # ------------------------------------------------------------- validation
+
+    def validate(self) -> None:
+        """Raise ValueError with a message the UI can show verbatim."""
+        if self.depth not in DEPTHS:
+            raise ValueError(f"depth must be one of {DEPTHS}, got {self.depth!r}")
+        if not self.origins:
+            raise ValueError("origins must list at least one departure airport")
+        if not self.stops:
+            raise ValueError("a trip needs at least one destination")
+
+        groups = [("origins", self.origins)]
+        groups += [(stop.describe(i), stop.airports) for i, stop in enumerate(self.stops)]
+        if self.return_to is not None:
+            groups.append(("return_to", self.return_to))
+
+        for label, codes in groups:
+            if not codes:
+                raise ValueError(f"{label} must list at least one airport")
+            for code in codes:
+                if not IATA_RE.match(code):
+                    raise ValueError(f"{label}: {code!r} is not a 3-letter IATA airport code")
+
+        for index, stop in enumerate(self.stops):
+            low, high = stop.stay_days
+            name = stop.describe(index)
+            if low > high:
+                raise ValueError(f"{name}: minimum stay ({low}) exceeds maximum ({high})")
+            if low < 1:
+                raise ValueError(f"{name}: minimum stay must be at least 1 day")
+
+        if self.window_end < self.window_start:
+            raise ValueError(
+                f"window_end ({self.window_end}) must not precede "
+                f"window_start ({self.window_start})"
+            )
+        if not 1 <= self.adults <= 9:
+            raise ValueError(f"adults must be between 1 and 9, got {self.adults}")
+
+        # Without this the planner emits the first leg and nothing else: the
+        # later legs have no valid departure dates, so the sweep yields no
+        # itineraries at all with nothing obviously wrong.
+        available = (self.window_end - self.window_start).days
+        if available < self.min_trip_days:
+            breakdown = " + ".join(
+                f"{stop.stay_days[0]} at {stop.describe(i)}" for i, stop in enumerate(self.stops)
+            )
+            raise ValueError(
+                f"window is {available} days but the minimum stays need "
+                f"{self.min_trip_days} ({breakdown}); widen the window or shorten the stays"
+            )
+
+    # ---------------------------------------------------------- serialisation
+
     def to_dict(self) -> dict:
         data = asdict(self)
         data["window_start"] = self.window_start.isoformat()
         data["window_end"] = self.window_end.isoformat()
-        for key in ("japan_stay_days", "ph_stay_days", "trip_length_days"):
-            data[key] = list(getattr(self, key))
+        data["stops"] = [
+            {"label": s.label, "airports": list(s.airports), "stay_days": list(s.stay_days)}
+            for s in self.stops
+        ]
         return data
 
     @classmethod
     def from_dict(cls, data: dict) -> Scenario:
-        payload = dict(data)
+        payload = _migrate(dict(data))
         payload["window_start"] = date.fromisoformat(payload["window_start"])
         payload["window_end"] = date.fromisoformat(payload["window_end"])
-        for key in ("japan_stay_days", "ph_stay_days", "trip_length_days"):
-            if key in payload and payload[key] is not None:
-                payload[key] = tuple(payload[key])
+        payload["stops"] = [
+            Stop(
+                airports=list(s["airports"]),
+                stay_days=tuple(s["stay_days"]),
+                label=s.get("label", ""),
+            )
+            for s in payload["stops"]
+        ]
+        unknown = set(payload) - set(cls.__dataclass_fields__)
+        if unknown:
+            raise ValueError(f"unknown scenario fields: {', '.join(sorted(unknown))}")
         return cls(**payload)
+
+
+def _migrate(payload: dict) -> dict:
+    """Translate a pre-chain scenario file into the current shape.
+
+    Kept rather than one-shot converting the files and deleting this: a
+    scenario hand-edited from an old example should load, not fail with a schema
+    error naming fields the person never typed.
+    """
+    if "japan_airports" not in payload:
+        return payload
+
+    trip_type = payload.pop("trip_type", "multi_city")
+    japan = payload.pop("japan_airports", [])
+    ph = payload.pop("ph_airports", []) or []
+    japan_stay = list(payload.pop("japan_stay_days", (9, 11)))
+    ph_stay = list(payload.pop("ph_stay_days", (9, 11)))
+    trip_length = list(payload.pop("trip_length_days", (18, 22)))
+
+    if trip_type == "round_trip":
+        # The single stop's stay *is* the old trip length: days away from home.
+        payload["stops"] = [{"label": "", "airports": japan, "stay_days": trip_length}]
+    else:
+        payload["stops"] = [
+            {"label": "", "airports": japan, "stay_days": japan_stay},
+            {"label": "", "airports": ph, "stay_days": ph_stay},
+        ]
+
+    # Currency moved out of the field names, so a non-CZK provider does not have
+    # to rename the schema to be usable.
+    if "alert_threshold_czk" in payload:
+        payload["alert_threshold"] = payload.pop("alert_threshold_czk")
+    if "bag_estimate_czk" in payload:
+        payload["bag_estimate"] = payload.pop("bag_estimate_czk")
+    return payload
 
 
 def save_scenario(scenario: Scenario, directory: Path) -> Path:
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"{scenario.id}.json"
-    path.write_text(json.dumps(scenario.to_dict(), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(scenario.to_dict(), indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
     return path
 
 

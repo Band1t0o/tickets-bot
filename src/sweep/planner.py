@@ -3,10 +3,15 @@
 Pure and browser-free, so the combinatorics can be checked in tests and the UI
 can show a cost estimate before anyone commits to a 45-minute sweep.
 
-The multi-city trip is planned as three independent leg groups rather than as
-whole itineraries. That keeps cost additive (~700 searches) instead of
-multiplicative (every date combination), because each leg is searched once and
-then reused across every itinerary the combiner builds from it.
+Legs are planned as independent groups rather than as whole itineraries. That
+keeps cost additive instead of multiplicative - each leg is searched once and
+then reused across every itinerary the combiner builds from it. A three-leg
+trip is ~200 searches this way and tens of thousands the other.
+
+Every leg, including the one home, comes out of the same loop over
+`scenario.airport_pools`. The previous version had a hand-written block per leg
+plus a separate round-trip branch that emitted outbound searches only, which no
+combiner could ever close into a trip.
 """
 from __future__ import annotations
 
@@ -30,8 +35,14 @@ class LegSearch:
     origin: str
     destination: str
     depart_date: date
+    # Always None today: every leg is searched as a one-way so it can be reused
+    # across itineraries. Kept because a round-trip search prices a through-fare
+    # the leg chain cannot express - measured 33% cheaper on PRG<->NRT but 19%
+    # worse on FRA<->NRT + NRT<->MNL, so it belongs as an extra candidate rather
+    # than as a replacement.
     ret_date: date | None
-    leg_index: int  # 0 = Europe->Japan, 1 = Japan->Philippines, 2 = ->Europe
+    # Position in the chain: 0 is the first hop out, the last is the way home.
+    leg_index: int
 
 
 def _date_range(start: date, end: date, step_days: int) -> list[date]:
@@ -43,64 +54,29 @@ def _date_range(start: date, end: date, step_days: int) -> list[date]:
 
 def plan_searches(scenario: Scenario) -> list[LegSearch]:
     """Every search needed to evaluate `scenario`, deduplicated."""
-    if scenario.trip_type == "round_trip":
-        searches = _plan_round_trip(scenario)
-    else:
-        searches = _plan_multi_city(scenario)
+    pools = scenario.airport_pools
+    step = scenario.step_days
+    final_leg = len(pools) - 2
+
+    searches: list[LegSearch] = []
+    for leg_index in range(len(pools) - 1):
+        start = scenario.window_start + timedelta(days=scenario.earliest_departure(leg_index))
+        end = scenario.window_end
+        if leg_index == final_leg:
+            end += timedelta(days=RETURN_SLACK_DAYS)
+
+        for depart in _date_range(start, end, step):
+            for origin in pools[leg_index]:
+                for destination in pools[leg_index + 1]:
+                    # Pools may overlap once any airport can appear anywhere - a
+                    # trip returning to its own departure list would otherwise
+                    # generate PRG->PRG, which no site will price.
+                    if origin == destination:
+                        continue
+                    searches.append(LegSearch(origin, destination, depart, None, leg_index))
 
     # Different date arithmetic can land on the same search; run each once.
     return list(dict.fromkeys(searches))
-
-
-def _plan_round_trip(scenario: Scenario) -> list[LegSearch]:
-    step = scenario.step_days
-    length_min, length_max = scenario.trip_length_days
-    # Step through trip lengths too, so "quick" does not explode on a wide range.
-    lengths = list(range(length_min, length_max + 1, max(1, step)))
-    if length_max not in lengths:
-        lengths.append(length_max)
-
-    searches = []
-    for depart in _date_range(scenario.window_start, scenario.window_end, step):
-        for length in lengths:
-            for origin in scenario.origins:
-                for destination in scenario.japan_airports:
-                    searches.append(
-                        LegSearch(origin, destination, depart, depart + timedelta(days=length), 0)
-                    )
-    return searches
-
-
-def _plan_multi_city(scenario: Scenario) -> list[LegSearch]:
-    step = scenario.step_days
-    japan_min = scenario.japan_stay_days[0]
-    ph_min = scenario.ph_stay_days[0]
-
-    searches: list[LegSearch] = []
-
-    # Leg A: Europe -> Japan, anywhere in the window.
-    for depart in _date_range(scenario.window_start, scenario.window_end, step):
-        for origin in scenario.origins:
-            for destination in scenario.japan_airports:
-                searches.append(LegSearch(origin, destination, depart, None, 0))
-
-    # Leg B: Japan -> Philippines, no earlier than the shortest Japan stay.
-    leg_b_start = scenario.window_start + timedelta(days=japan_min)
-    for depart in _date_range(leg_b_start, scenario.window_end, step):
-        for origin in scenario.japan_airports:
-            for destination in scenario.ph_airports:
-                searches.append(LegSearch(origin, destination, depart, None, 1))
-
-    # Leg C: Philippines -> Europe, after both minimum stays, with slack past
-    # the window end so the latest itineraries are still reachable.
-    leg_c_start = scenario.window_start + timedelta(days=japan_min + ph_min)
-    leg_c_end = scenario.window_end + timedelta(days=RETURN_SLACK_DAYS)
-    for depart in _date_range(leg_c_start, leg_c_end, step):
-        for origin in scenario.ph_airports:
-            for destination in scenario.origins:
-                searches.append(LegSearch(origin, destination, depart, None, 2))
-
-    return searches
 
 
 def estimate_minutes(searches: list[LegSearch], workers: int = 2) -> float:

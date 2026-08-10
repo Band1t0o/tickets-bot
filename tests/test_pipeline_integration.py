@@ -12,52 +12,19 @@ the scraper's.
 """
 from __future__ import annotations
 
-from datetime import date
-
 import pytest
 
-from src.combine import combine
+from src.combine import combine, combine_all
 from src.models import Leg
 from src.scenario import Scenario
 from src.sweep.planner import LegSearch, plan_searches
+from tests.conftest import WINDOW_START, make_round_trip, make_scenario, make_three_stop
 
-WINDOW_START = date(2027, 1, 5)
-WINDOW_END = date(2027, 2, 8)
-
-
-def multi_city(**overrides) -> Scenario:
-    defaults = dict(
-        id="jp-ph",
-        name="Japan then Philippines",
-        trip_type="multi_city",
-        origins=["PRG", "VIE"],
-        japan_airports=["NRT", "KIX"],
-        ph_airports=["MNL"],
-        window_start=WINDOW_START,
-        window_end=WINDOW_END,
-        japan_stay_days=(9, 11),
-        ph_stay_days=(9, 11),
-        depth="standard",
-    )
-    defaults.update(overrides)
-    return Scenario(**defaults)
-
-
-def round_trip(**overrides) -> Scenario:
-    defaults = dict(
-        id="tokyo",
-        name="Tokyo return",
-        trip_type="round_trip",
-        origins=["PRG"],
-        japan_airports=["NRT"],
-        ph_airports=[],
-        window_start=WINDOW_START,
-        window_end=WINDOW_END,
-        trip_length_days=(18, 20),
-        depth="quick",
-    )
-    defaults.update(overrides)
-    return Scenario(**defaults)
+SHAPES = {
+    "round_trip": make_round_trip,
+    "two_stop": make_scenario,
+    "three_stop": make_three_stop,
+}
 
 
 def _leg_for(search: LegSearch) -> Leg:
@@ -97,31 +64,35 @@ def legs_from_plan(scenario: Scenario) -> list[Leg]:
 # --------------------------------------------------------------- the loop closes
 
 
-def test_multi_city_plan_produces_itineraries():
-    scenario = multi_city()
-    itineraries = combine(legs_from_plan(scenario), scenario)
-    assert itineraries, "planner and combiner disagree: no itinerary from a full plan"
-
-
-def test_round_trip_plan_produces_itineraries():
+@pytest.mark.parametrize("shape", list(SHAPES), ids=list(SHAPES))
+def test_a_full_plan_produces_itineraries(shape):
     """The bug this file exists for.
 
-    The planner emits only outbound searches, so no leg ever departs the
-    destination; the combiner requires exactly such a leg to close the trip.
-    Every scenario of this shape yields zero itineraries, and only
-    `"enabled": false` on tokyo-round-trip.json keeps it from running daily.
+    The old planner had a round-trip branch that emitted outbound searches only,
+    so no leg ever departed the destination while its combiner branch required
+    exactly such a leg. Every scenario of that shape yielded zero itineraries,
+    and only `"enabled": false` on tokyo-round-trip.json kept it off the daily
+    schedule. Three stops could not be expressed at all.
     """
-    scenario = round_trip()
+    scenario = SHAPES[shape]()
     itineraries = combine(legs_from_plan(scenario), scenario)
     assert itineraries, "planner and combiner disagree: no itinerary from a full plan"
+
+
+@pytest.mark.parametrize("shape", list(SHAPES), ids=list(SHAPES))
+def test_itineraries_have_one_leg_per_hop(shape):
+    scenario = SHAPES[shape]()
+    for itinerary in combine(legs_from_plan(scenario), scenario):
+        assert len(itinerary.legs) == scenario.leg_count
 
 
 # ------------------------------------------------------------------- invariants
 
 
-@pytest.mark.parametrize("scenario", [multi_city(), round_trip()], ids=["multi_city", "round_trip"])
-def test_every_itinerary_chains_end_to_end(scenario):
+@pytest.mark.parametrize("shape", list(SHAPES), ids=list(SHAPES))
+def test_every_itinerary_chains_end_to_end(shape):
     """Leg i must land where leg i+1 departs - no teleporting between airports."""
+    scenario = SHAPES[shape]()
     itineraries = combine(legs_from_plan(scenario), scenario)
     assert itineraries
     for itinerary in itineraries:
@@ -129,8 +100,9 @@ def test_every_itinerary_chains_end_to_end(scenario):
             assert earlier.destination == later.origin
 
 
-@pytest.mark.parametrize("scenario", [multi_city(), round_trip()], ids=["multi_city", "round_trip"])
-def test_every_itinerary_travels_forward_in_time(scenario):
+@pytest.mark.parametrize("shape", list(SHAPES), ids=list(SHAPES))
+def test_every_itinerary_travels_forward_in_time(shape):
+    scenario = SHAPES[shape]()
     itineraries = combine(legs_from_plan(scenario), scenario)
     assert itineraries
     for itinerary in itineraries:
@@ -138,39 +110,96 @@ def test_every_itinerary_travels_forward_in_time(scenario):
         assert dates == sorted(dates)
 
 
-def test_multi_city_itineraries_respect_the_configured_stays():
-    scenario = multi_city()
-    for itinerary in combine(legs_from_plan(scenario), scenario):
-        leg_a, leg_b, leg_c = itinerary.legs
-        assert (
-            scenario.japan_stay_days[0]
-            <= (leg_b.depart_date - leg_a.depart_date).days
-            <= scenario.japan_stay_days[1]
-        )
-        assert (
-            scenario.ph_stay_days[0]
-            <= (leg_c.depart_date - leg_b.depart_date).days
-            <= scenario.ph_stay_days[1]
-        )
+@pytest.mark.parametrize("shape", list(SHAPES), ids=list(SHAPES))
+def test_every_stay_falls_inside_its_configured_range(shape):
+    """Checked against the dates on the legs, never the dates requested."""
+    scenario = SHAPES[shape]()
+    itineraries = combine(legs_from_plan(scenario), scenario)
+    assert itineraries
+    for itinerary in itineraries:
+        for index, stop in enumerate(scenario.stops):
+            arrived = itinerary.legs[index]
+            departed = itinerary.legs[index + 1]
+            stayed = (departed.depart_date - arrived.depart_date).days
+            low, high = stop.stay_days
+            assert low <= stayed <= high, f"{stop.describe(index)}: {stayed} days"
 
 
-def test_itineraries_only_use_legs_the_planner_actually_searched():
+@pytest.mark.parametrize("shape", list(SHAPES), ids=list(SHAPES))
+def test_itineraries_only_use_legs_the_planner_actually_searched(shape):
     """Guards against the combiner inventing a route no sweep would ever price."""
-    scenario = multi_city()
+    scenario = SHAPES[shape]()
     planned = {(s.origin, s.destination, s.depart_date) for s in plan_searches(scenario)}
     for itinerary in combine(legs_from_plan(scenario), scenario):
         for leg in itinerary.legs:
             assert (leg.origin, leg.destination, leg.depart_date) in planned
 
 
-def test_itineraries_start_at_an_origin_and_end_at_one():
-    scenario = multi_city()
+@pytest.mark.parametrize("shape", list(SHAPES), ids=list(SHAPES))
+def test_itineraries_start_and_end_where_the_scenario_says(shape):
+    scenario = SHAPES[shape]()
+    pools = scenario.airport_pools
     for itinerary in combine(legs_from_plan(scenario), scenario):
-        assert itinerary.legs[0].origin in scenario.origins
-        assert itinerary.legs[-1].destination in scenario.origins
+        assert itinerary.legs[0].origin in pools[0]
+        assert itinerary.legs[-1].destination in pools[-1]
+
+
+def test_a_one_way_trip_ends_at_the_last_stop():
+    scenario = make_three_stop(one_way=True)
+    itineraries = combine(legs_from_plan(scenario), scenario)
+    assert itineraries
+    for itinerary in itineraries:
+        assert itinerary.legs[-1].destination == "BKK"
+
+
+def test_an_open_jaw_returns_to_the_configured_airport():
+    scenario = make_round_trip(return_to=["BER"])
+    itineraries = combine(legs_from_plan(scenario), scenario)
+    assert itineraries
+    for itinerary in itineraries:
+        assert itinerary.legs[-1].destination == "BER"
+        assert itinerary.same_airport is False
+
+
+# -------------------------------------------------------------------- ranking
 
 
 def test_results_are_sorted_cheapest_first():
-    scenario = multi_city()
+    scenario = make_scenario()
     totals = [i.total_price for i in combine(legs_from_plan(scenario), scenario)]
     assert totals == sorted(totals)
+
+
+def test_pruning_finds_the_same_cheapest_as_an_exhaustive_search():
+    """The prune bound must be admissible - never discarding a cheaper trip.
+
+    Compared against the unbounded traversal, which explores everything.
+    """
+    scenario = make_scenario()
+    legs = legs_from_plan(scenario)
+    bounded = combine_all(legs, scenario, limit=5)
+    exhaustive = combine_all(legs, scenario, limit=None)
+    assert bounded.top[0].total_price == exhaustive.top[0].total_price
+    assert len(bounded.top) == 5
+
+
+def test_the_by_date_series_keeps_expensive_dates():
+    """Pruning on the top-N alone would drop them, implying they were never searched."""
+    scenario = make_scenario()
+    legs = legs_from_plan(scenario)
+    bounded = combine_all(legs, scenario, limit=5)
+    exhaustive = combine_all(legs, scenario, limit=None)
+    assert set(bounded.best_by_date) == set(exhaustive.best_by_date)
+    for key, itinerary in exhaustive.best_by_date.items():
+        assert bounded.best_by_date[key].total_price == itinerary.total_price
+
+
+def test_the_cheapest_open_jaw_survives_pruning():
+    """It can sit far below the top-N cut when closed trips are cheaper."""
+    scenario = make_scenario(return_to=["BER", "PRG"])
+    legs = legs_from_plan(scenario)
+    bounded = combine_all(legs, scenario, limit=1)
+    exhaustive = combine_all(legs, scenario, limit=None)
+    assert bounded.best_open_jaw is not None
+    assert bounded.best_open_jaw.total_price == exhaustive.best_open_jaw.total_price
+    assert bounded.best_same_airport.total_price == exhaustive.best_same_airport.total_price
