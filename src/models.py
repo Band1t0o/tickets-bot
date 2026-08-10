@@ -6,35 +6,6 @@ from datetime import date
 
 
 @dataclass
-class Offer:
-    """Legacy round-trip offer.
-
-    Retained so the existing `scrape`/`watch` CLI paths keep working while the
-    scenario platform is built around Leg/Itinerary. New code should use Leg.
-    """
-
-    provider: str
-    origin: str
-    destination: str
-    departure_date: str  # YYYY-MM-DD
-    return_date: str | None  # YYYY-MM-DD
-    airline: str | None
-    flight_number: str | None
-    cabin: str | None
-    fare_class: str | None
-    price_currency: str
-    price_amount: float
-    url: str
-
-    def content_hash(self) -> str:
-        body = f"{self.provider}|{self.origin}|{self.destination}|{self.departure_date}|{self.airline}|{self.flight_number}|{self.cabin}|{self.fare_class}|{self.price_currency}|{self.price_amount}|{self.url}"
-        return hashlib.sha256(body.encode("utf-8")).hexdigest()
-
-    def to_dict(self) -> dict:
-        return asdict(self)
-
-
-@dataclass
 class Leg:
     """A single one-way flight between two airports on one date.
 
@@ -44,7 +15,7 @@ class Leg:
     `Itinerary.total_for_party()` to price a group.
 
     `content_hash()` deliberately includes airline, flight_number and stops.
-    The old Offer model hardcoded the first two to "Unknown", which made every
+    The Offer model this replaced hardcoded the first two to "Unknown", which made every
     result on a page hash identically - ten distinct flights collapsed to one
     hash, and the notifier reported ten "new offers" for a single flight.
     """
@@ -52,7 +23,11 @@ class Leg:
     provider: str
     origin: str
     destination: str
-    depart_date: date
+    # None when the card's date could not be parsed. The parser has three paths
+    # that produce it, and _dedupe hashes every leg before anything checks - so
+    # one tweak to the site's date markup used to turn every search into an
+    # AttributeError rather than into one skipped card.
+    depart_date: date | None
     airline: str | None
     flight_number: str | None
     stops: int | None
@@ -75,7 +50,7 @@ class Leg:
                 self.provider,
                 self.origin,
                 self.destination,
-                self.depart_date.isoformat(),
+                self.depart_date.isoformat() if self.depart_date else "",
                 self.depart_time,
                 self.arrive_time,
                 self.airline,
@@ -89,13 +64,14 @@ class Leg:
 
     def to_dict(self) -> dict:
         data = asdict(self)
-        data["depart_date"] = self.depart_date.isoformat()
+        data["depart_date"] = self.depart_date.isoformat() if self.depart_date else None
         return data
 
     @classmethod
     def from_dict(cls, data: dict) -> Leg:
         payload = dict(data)
-        payload["depart_date"] = date.fromisoformat(payload["depart_date"])
+        raw = payload.get("depart_date")
+        payload["depart_date"] = date.fromisoformat(raw) if raw else None
         return cls(**payload)
 
 
@@ -110,8 +86,24 @@ class Itinerary:
     legs: list[Leg] = field(default_factory=list)
 
     @property
+    def currencies(self) -> set[str]:
+        return {leg.price_currency for leg in self.legs}
+
+    @property
     def total_price(self) -> float:
-        """Per-person total across all legs."""
+        """Per-person total across all legs.
+
+        Refuses to add across currencies. This used to sum raw floats, so a
+        10,000 CZK leg and a 400 EUR leg produced 10,400 of nothing - and the
+        pelikan parser made EUR the fallback for *anything* it could not
+        recognise, so one odd card was all it took. There is no FX rate here
+        and inventing one would hide the problem rather than fix it.
+        """
+        currencies = self.currencies
+        if len(currencies) > 1:
+            raise ValueError(
+                f"cannot total an itinerary mixing currencies: {', '.join(sorted(currencies))}"
+            )
         return sum(leg.price_amount for leg in self.legs)
 
     def total_for_party(self, adults: int) -> float:
@@ -142,7 +134,14 @@ class Itinerary:
 
     @property
     def currency(self) -> str:
-        return self.legs[0].price_currency if self.legs else "CZK"
+        if not self.legs:
+            return "CZK"
+        currencies = self.currencies
+        if len(currencies) > 1:
+            raise ValueError(
+                f"itinerary mixes currencies: {', '.join(sorted(currencies))}"
+            )
+        return next(iter(currencies))
 
     @property
     def departure_date(self) -> date | None:

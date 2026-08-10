@@ -39,7 +39,18 @@ def load_best(directory: Path | str) -> float | None:
 
 
 def save_best(directory: Path | str, best_total: float, currency: str) -> None:
+    """Record a new best, but only when it really is one.
+
+    This used to be called unconditionally whenever an alert was sent. With
+    `alert_threshold` set, an alert fires on any total under the threshold -
+    including one *worse* than the recorded best - and the recorded best then
+    walked upward, quietly destroying the "only alert on genuine improvement"
+    guarantee for every later run.
+    """
     directory = Path(directory)
+    previous = load_best(directory)
+    if previous is not None and best_total >= previous:
+        return
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "best.json").write_text(
         json.dumps(
@@ -122,12 +133,23 @@ def build_health_alert(
     errors: int,
     total: int,
     dark_routes: list[str] | None = None,
+    itineraries: int | None = None,
 ) -> dict | None:
     """A red embed when the sweep looks broken, otherwise None."""
     if total == 0:
         reason = "the sweep planned no searches at all"
     elif legs_found == 0:
         reason = f"all {total} searches completed but returned no flights"
+    elif itineraries == 0:
+        # Distinct from "no flights", and it used to be reported as that because
+        # this call site passed a hardcoded legs_found=0. It sent you to debug
+        # the scraper when the scraper had worked perfectly and the trip shape
+        # was what could not be satisfied.
+        reason = (
+            f"{legs_found} flights were found but none of them chain into a "
+            "complete trip — check the stay ranges and the date window rather "
+            "than the scraper"
+        )
     elif errors > total / 2:
         reason = f"{errors} of {total} searches failed"
     elif dark_routes:
@@ -143,8 +165,8 @@ def build_health_alert(
     return {
         "title": f"⚠️ {scenario_name}: sweep looks broken",
         "description": (
-            f"The scraper {reason}. This usually means pelikan.cz changed its markup. "
-            "Silence would otherwise look identical to 'no cheap flights today'."
+            f"{reason}. Silence would otherwise look identical to "
+            "'no cheap flights today'."
         ),
         "color": COLOR_ALERT,
         "timestamp": datetime.now(UTC).isoformat(),
@@ -170,7 +192,7 @@ def post(webhook_url: str, embeds: list[dict]) -> bool:
 
 def notify_sweep(scenario, result, webhook_url: str | None = None) -> bool:
     """Evaluate a finished sweep and post whatever it warrants."""
-    from .combine import best_open_jaw, best_same_airport, combine
+    from .combine import combine_all
 
     webhook_url = webhook_url or os.getenv("DISCORD_WEBHOOK_URL")
     if not webhook_url:
@@ -187,28 +209,42 @@ def notify_sweep(scenario, result, webhook_url: str | None = None) -> bool:
     if health is not None:
         return post(webhook_url, [health])
 
-    itineraries = combine(result.legs, scenario)
-    if not itineraries:
+    combined = combine_all(result.legs, scenario)
+    if not combined.top:
         return post(
             webhook_url,
-            [build_health_alert(scenario.name, 0, len(result.errors), result.total)],
+            [
+                build_health_alert(
+                    scenario.name,
+                    len(result.legs),
+                    len(result.errors),
+                    result.total,
+                    itineraries=0,
+                )
+            ],
         )
 
-    best_same = best_same_airport(itineraries)
-    best_jaw = best_open_jaw(itineraries)
+    best_same = combined.best_same_airport
+    best_jaw = combined.best_open_jaw
     totals = [i.total_price for i in (best_same, best_jaw) if i is not None]
     best_total = min(totals)
 
     state_dir = result.directory.parent
     previous_best = load_best(state_dir)
 
-    if not should_alert(best_total, previous_best, scenario.alert_threshold_czk):
+    if not should_alert(best_total, previous_best, scenario.alert_threshold):
         print(f"[Discord] best total {best_total:,.0f} is no better than {previous_best}; staying quiet")
         return False
 
     sent = post(webhook_url, [build_price_embed(scenario.name, best_same, best_jaw, previous_best)])
     if sent:
-        save_best(state_dir, best_total, itineraries[0].currency)
+        # The currency of whichever itinerary produced best_total - not of the
+        # cheapest overall, which need not be either of the two reported.
+        cheapest = min(
+            (i for i in (best_same, best_jaw) if i is not None),
+            key=lambda i: i.total_price,
+        )
+        save_best(state_dir, best_total, cheapest.currency)
     return sent
 
 

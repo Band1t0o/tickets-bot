@@ -12,12 +12,11 @@ from __future__ import annotations
 
 import re
 import time
-from collections.abc import Iterable
-from datetime import date, datetime
+from datetime import date
 
 from bs4 import BeautifulSoup
 
-from ..models import Leg, Offer
+from ..models import Leg
 from .base import BaseProvider
 from .pelikan_url import build_search_url
 
@@ -68,13 +67,30 @@ def _stops_from_card(card) -> int | None:
     return None
 
 
-def _price_from_card(card) -> tuple[float | None, str]:
+# Symbols the site actually prints, mapped to the code stored on a Leg. Anything
+# else is unknown and must stay unknown: the previous `"CZK" if "Kč" in text
+# else "EUR"` made EUR the fallback for *every* unrecognised string, so a single
+# odd card silently entered the leg set labelled as euros and then got summed
+# against crowns.
+_CURRENCY_MARKERS = (("Kč", "CZK"), ("€", "EUR"), ("EUR", "EUR"), ("$", "USD"), ("£", "GBP"))
+
+
+def _price_from_card(card) -> tuple[float | None, str | None]:
     node = card.select_one(".fly-search-price-info-wrapp")
     if node is None:
-        return None, "CZK"
+        return None, None
     text = node.get_text(" ", strip=True)
-    currency = "CZK" if "Kč" in text else "EUR"
-    digits = re.sub(r"[^\d]", "", text.split("Kč")[0] if "Kč" in text else text)
+
+    for marker, code in _CURRENCY_MARKERS:
+        if marker in text:
+            currency = code
+            # Only the digits before the symbol: the block also carries badges
+            # and passenger counts, and concatenating those inflated the price.
+            digits = re.sub(r"[^\d]", "", text.split(marker)[0])
+            break
+    else:
+        return None, None
+
     if not digits:
         return None, currency
     return float(digits), currency
@@ -247,46 +263,3 @@ class PelikanProvider(BaseProvider):
             if leg.depart_date is None:
                 leg.depart_date = depart
         return legs
-
-    def scrape(
-        self,
-        origin: str,
-        destination: str,
-        departure_date: str,
-        adults: int,
-        arrival_date: str,
-    ) -> Iterable[Offer]:
-        """Legacy round-trip entry point, kept for the `scrape`/`watch` CLI."""
-        from playwright.sync_api import sync_playwright
-
-        depart = datetime.strptime(departure_date, "%Y-%m-%d").date()
-        ret = datetime.strptime(arrival_date, "%Y-%m-%d").date()
-        offers: list[Offer] = []
-
-        with sync_playwright() as pw:
-            browser = pw.chromium.launch(headless=True)
-            page = browser.new_context(
-                locale="cs-CZ", viewport={"width": 1600, "height": 1000}
-            ).new_page()
-            try:
-                legs = self.search_leg(page, origin, destination, depart, ret, adults)
-                offers = [
-                    Offer(
-                        provider=self.NAME,
-                        origin=leg.origin,
-                        destination=leg.destination,
-                        departure_date=leg.depart_date.isoformat(),
-                        return_date=arrival_date,
-                        airline=leg.airline,
-                        flight_number=leg.flight_number,
-                        cabin="Economy",
-                        fare_class=None,
-                        price_currency=leg.price_currency,
-                        price_amount=leg.price_amount,
-                        url=leg.url,
-                    )
-                    for leg in legs
-                ]
-            finally:
-                browser.close()
-        return offers

@@ -1,7 +1,16 @@
+# The control panel, reading the committed scenarios and sweep results.
+#
+# `env_file: .env.local` used to be required here and pointed at a gitignored
+# file with no example, so `docker compose up` failed on a fresh clone. Nothing
+# needs configuring any more except the Discord webhook, and only for runs
+# launched from inside the container.
 services:
-  scraper:
+  ui:
     build: .
-    env_file: .env.local
+    ports:
+      - "8000:8000"
     volumes:
-      - ./:/app
-    command: ["python", "-m", "src.cli", "watch"]
+      - ./scenarios:/app/scenarios
+      - ./data:/app/data
+    environment:
+      DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL:-}

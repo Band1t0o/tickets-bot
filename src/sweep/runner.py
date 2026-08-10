@@ -123,6 +123,33 @@ def _search_with_retry(provider, page, search: LegSearch, adults: int, delay_s: 
     return []
 
 
+def _chunk(searches: list[LegSearch], workers: int) -> list[list[LegSearch]]:
+    """Split into contiguous runs, one per worker.
+
+    Two bugs lived in the one-liner this replaces, `searches[i::workers]`:
+
+    - `workers=0` produced an empty list, so a sweep reported itself complete
+      having run nothing at all.
+    - Striding interleaves. The planner emits searches grouped by route, so
+      every worker started on the *same* origin-destination pair at the same
+      moment - the worst possible pattern against a per-route throttle, and a
+      plausible contributor to the timeouts that made 58 of 93 searches fail.
+      Contiguous runs spread the workers across different routes instead.
+    """
+    workers = max(1, workers)
+    if not searches:
+        return []
+    size, extra = divmod(len(searches), workers)
+    chunks: list[list[LegSearch]] = []
+    start = 0
+    for index in range(workers):
+        end = start + size + (1 if index < extra else 0)
+        if start < end:
+            chunks.append(searches[start:end])
+        start = end
+    return chunks
+
+
 def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
@@ -186,7 +213,7 @@ def run_sweep(
 
     # Each chunk is handled start-to-finish by one worker, so one browser is
     # launched per worker rather than per search.
-    chunks: list[list[LegSearch]] = [searches[i::workers] for i in range(workers)]
+    chunks = _chunk(searches, workers)
 
     def record(search: LegSearch, legs: list[Leg], error: str | None) -> None:
         label = f"{search.origin}→{search.destination} {search.depart_date}"
@@ -255,6 +282,7 @@ class _browser_page:
         self.provider = provider
         self._pw = None
         self._browser = None
+        self._context = None
 
     def __enter__(self):
         # Providers that never touch `page` (the fake in tests, DemoStatic) do
@@ -263,16 +291,33 @@ class _browser_page:
             return _NullPage()
         from playwright.sync_api import sync_playwright
 
+        # If launch() raises after start() succeeds, __exit__ never runs and the
+        # driver subprocess is left behind - once per worker, every sweep.
         self._pw = sync_playwright().start()
-        self._browser = self._pw.chromium.launch(headless=True)
-        context = self._browser.new_context(
-            locale="cs-CZ", viewport={"width": 1600, "height": 1000}
-        )
-        return context.new_page()
+        try:
+            self._browser = self._pw.chromium.launch(headless=True)
+            self._context = self._browser.new_context(
+                locale="cs-CZ", viewport={"width": 1600, "height": 1000}
+            )
+            return self._context.new_page()
+        except BaseException:
+            self.__exit__(None, None, None)
+            raise
 
     def __exit__(self, *exc_info):
-        if self._browser:
-            self._browser.close()
-        if self._pw:
-            self._pw.stop()
+        # Each step is independent: a context that refuses to close must not
+        # strand the browser, and a browser that refuses to close must not
+        # strand the driver process.
+        for close in (
+            getattr(self._context, "close", None),
+            getattr(self._browser, "close", None),
+            getattr(self._pw, "stop", None),
+        ):
+            if close is None:
+                continue
+            try:
+                close()
+            except Exception as exc:  # noqa: BLE001 - teardown, nothing left to do
+                print(f"[sweep] browser teardown: {type(exc).__name__}: {exc}")
+        self._context = self._browser = self._pw = None
         return False

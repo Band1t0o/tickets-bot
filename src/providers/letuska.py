@@ -1,15 +1,38 @@
+"""letuska.cz - a second opinion on one itinerary, never a sweep source.
+
+Spiked and rejected for sweeping: unlike pelikan.cz there is **no deep-link
+grammar**. Every plausible shape (/letenky/PRG/NRT/<date>, ?from=&to=&date=, a
+hash route) returns 404, and the search is an Angular form whose results render
+in place. Driving it costs a cookie banner, autocomplete typing, a Czech-month
+calendar reached through two nested shadow roots, and a wait for results - where
+pelikan answers in ~14s from a constructed URL. That difference is the entire
+reason a 200-search sweep is affordable, so this provider stays out of
+`run_sweep` and exists to sanity-check a single fare by hand.
+
+robots.txt disallows /searchform, /assets/ and /api/. Nothing here touches them:
+the search runs on the public homepage and the results render into it.
+"""
 from __future__ import annotations
 
 import os
 import re
 import time
-from collections.abc import Iterable
+from datetime import date, datetime
 
 from playwright.sync_api import Page, sync_playwright
-from playwright.sync_api import TimeoutError as PlaywrightTimeout
+from playwright.sync_api import TimeoutError as PlaywrightTimeout  # noqa: F401
 
-from ..models import Offer
-from .base import BaseProvider
+from ..models import Leg
+
+
+class LetuskaSearchFailed(RuntimeError):
+    """The search did not complete.
+
+    Every failure path here used to end in `return offers` with an empty list,
+    so a broken selector, a timeout and a genuinely sold-out route were
+    indistinguishable - the same bug that let a sweep report "0 errors" while
+    most of it was failing.
+    """
 
 CZECH_MONTHS = {
     1: "Leden", 2: "Únor", 3: "Březen", 4: "Duben",
@@ -18,14 +41,24 @@ CZECH_MONTHS = {
 }
 
 
-class LetuskaProvider(BaseProvider):
+class LetuskaProvider:
     NAME = "LETUSKA"
     BASE_URL = "https://www.letuska.cz"
 
-    def scrape(self, origin: str, destination: str, departure_date: str, adults: int, arrival_date: str) -> Iterable[Offer]:
+    def check_price(
+        self,
+        origin: str,
+        destination: str,
+        depart: date,
+        ret: date | None = None,
+        adults: int = 1,
+    ) -> list[Leg]:
+        """Price one route by hand. Raises rather than returning [] on failure."""
         headless = os.getenv("HEADLESS", "true").lower() == "true"
-        ua = os.getenv("USER_AGENT", "Mozilla/5.0 (compatible; VietnamTicketsScraper/1.0)")
-        offers: list[Offer] = []
+        ua = os.getenv("USER_AGENT", "Mozilla/5.0 (compatible; tickets-bot/1.0)")
+        departure_date = depart.isoformat()
+        arrival_date = (ret or depart).isoformat()
+        offers: list[Leg] = []
 
         try:
             with sync_playwright() as pw:
@@ -55,22 +88,26 @@ class LetuskaProvider(BaseProvider):
                     print(f"[{self.NAME}] Parsing results...")
                     offers = self._parse_results(page, origin, destination, departure_date)
 
-                except (PlaywrightTimeout, Exception) as e:
-                    print(f"[{self.NAME}] Error: {e}")
+                except Exception as exc:
                     try:
                         path = f"debug_letuska_{int(time.time())}.png"
                         page.screenshot(path=path, full_page=False)
                         print(f"[{self.NAME}] Debug screenshot saved to {path}")
                     except Exception:
                         pass
+                    raise LetuskaSearchFailed(
+                        f"{origin}->{destination} {departure_date}: "
+                        f"{type(exc).__name__}: {exc}"
+                    ) from exc
 
                 ctx.close()
                 browser.close()
 
-        except Exception as e:
-            print(f"[{self.NAME}] Failed to scrape: {e}")
+        except LetuskaSearchFailed:
+            raise
+        except Exception as exc:
+            raise LetuskaSearchFailed(f"could not drive the search form: {exc}") from exc
 
-        time.sleep(5.0)
         return offers
 
     def _accept_cookies(self, page: Page):
@@ -84,8 +121,9 @@ class LetuskaProvider(BaseProvider):
             pass
 
     def _fill_origin(self, page: Page, origin: str):
-        if origin.upper() == "PRG":
-            return
+        # This used to return early for PRG, on the theory that it is the site's
+        # prefilled default. That is the site's choice to change, and a silent
+        # skip would search from Prague while reporting the requested origin.
         print(f"[{self.NAME}] Setting origin to {origin}...")
         departure_btn = page.locator("button.text-dark-blue:nth-child(2) > div:nth-child(1)")
         departure_btn.click()
@@ -225,8 +263,10 @@ class LetuskaProvider(BaseProvider):
             }
         }""")
 
-    def _parse_results(self, page: Page, origin: str, destination: str, departure_date: str) -> list[Offer]:
-        offers = []
+    def _parse_results(
+        self, page: Page, origin: str, destination: str, departure_date: str
+    ) -> list[Leg]:
+        offers: list[Leg] = []
         result_cards = page.locator("app-flight-offer-box.ng-star-inserted").all()
         print(f"[{self.NAME}] Found {len(result_cards)} flight offers")
         result_cards = result_cards[:10]
@@ -241,7 +281,14 @@ class LetuskaProvider(BaseProvider):
                 if not price_match:
                     continue
                 price_amount = float(price_match.group(1))
-                currency = "CZK" if "Kč" in currency_text else "EUR"
+                # Unknown must stay unknown; defaulting to EUR is how a
+                # mislabelled leg got summed against crowns.
+                if "Kč" in currency_text:
+                    currency = "CZK"
+                elif "€" in currency_text or "EUR" in currency_text.upper():
+                    currency = "EUR"
+                else:
+                    continue
 
                 date_elements = card.locator("div[id='d-date'].flight-date-date").all()
                 if len(date_elements) >= 2:
@@ -259,16 +306,17 @@ class LetuskaProvider(BaseProvider):
                 if origin_iata != origin or destination_iata != destination:
                     continue
 
-                offers.append(Offer(
+                offers.append(Leg(
                     provider=self.NAME,
                     origin=origin,
                     destination=destination,
-                    departure_date=departure_date_text,
-                    return_date=return_date_text,
-                    airline="Unknown",
+                    # Parsed, not the raw scraped Czech text. Writing "12. led"
+                    # into a field documented as YYYY-MM-DD made letuska rows
+                    # incomparable with every other provider's.
+                    depart_date=_parse_card_date(departure_date_text, departure_date),
+                    airline=None,
                     flight_number=None,
-                    cabin="Economy",
-                    fare_class=None,
+                    stops=None,
                     price_currency=currency,
                     price_amount=price_amount,
                     url=page.url,
@@ -280,3 +328,23 @@ class LetuskaProvider(BaseProvider):
                 continue
 
         return offers
+
+
+def _parse_card_date(text: str, fallback_iso: str) -> date | None:
+    """Read a card's date, falling back to the searched one when unreadable.
+
+    The site prints "12. 1. 2027" or "12. led". Only the unambiguous numeric
+    form is trusted; a Czech month abbreviation is left to the fallback rather
+    than guessed at.
+    """
+    match = re.search(r"(\d{1,2})\s*\.\s*(\d{1,2})\s*\.\s*(\d{4})", text or "")
+    if match:
+        day, month, year = (int(part) for part in match.groups())
+        try:
+            return date(year, month, day)
+        except ValueError:
+            return None
+    try:
+        return datetime.strptime(fallback_iso, "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None
