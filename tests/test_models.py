@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import date
 
-from src.models import Itinerary, Leg
+from src.models import Itinerary
 
 
 def test_legs_differing_only_by_flight_number_have_different_hashes(make_leg):

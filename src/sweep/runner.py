@@ -14,11 +14,12 @@ from __future__ import annotations
 import json
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable, Protocol
+from typing import Protocol
 
 from ..models import Leg
 from ..scenario import Scenario
@@ -123,7 +124,7 @@ def _search_with_retry(provider, page, search: LegSearch, adults: int, delay_s: 
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def _write_status(directory: Path, payload: dict) -> None:
@@ -152,7 +153,7 @@ def run_sweep(
         provider = PelikanProvider()
 
     searches = plan_searches(scenario)
-    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
+    stamp = datetime.now(UTC).strftime("%Y-%m-%dT%H-%M-%SZ")
     directory = Path(data_dir) / "sweeps" / scenario.id / stamp
     directory.mkdir(parents=True, exist_ok=True)
 

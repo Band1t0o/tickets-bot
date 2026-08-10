@@ -1,9 +1,13 @@
 from __future__ import annotations
-from typing import Iterable
+
 import os
 import re
 import time
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout, Page
+from collections.abc import Iterable
+
+from playwright.sync_api import Page, sync_playwright
+from playwright.sync_api import TimeoutError as PlaywrightTimeout
+
 from ..models import Offer
 from .base import BaseProvider
 

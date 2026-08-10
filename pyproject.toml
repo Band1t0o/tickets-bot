@@ -1,0 +1,25 @@
+# Ruff is the only linter here, and CI runs `ruff check .`. The rule set is
+# deliberately small: enough to catch dead imports and obvious mistakes without
+# turning a personal project into a style argument. `make fmt` sorts imports.
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+exclude = [".venv", "data", "docs"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes - undefined names, unused imports
+    "I",    # import sorting, matching `make fmt`
+    "UP",   # pyupgrade - flags e.g. datetime.utcnow patterns as they modernise
+    "B",    # bugbear - mutable defaults, loop-variable capture
+]
+ignore = [
+    "E501",  # line length is reported by the formatter, not worth failing CI over
+    "B008",  # FastAPI's Depends() in defaults is idiomatic
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests build deliberately odd inputs and shadow names for readability.
+"tests/*" = ["B011"]

@@ -26,8 +26,8 @@ from ..combine import (
     combine,
 )
 from ..scenario import Scenario, load_scenario, load_scenarios, save_scenario
-from ..sweep.planner import estimate_minutes, plan_searches
-from ..sweep.runner import load_legs, run_sweep
+from ..sweep.planner import SECONDS_PER_SEARCH, estimate_minutes, plan_searches
+from ..sweep.runner import DEFAULT_WORKERS, load_legs, run_sweep
 from .airports import catalogue
 
 SCENARIO_DIR = Path(os.getenv("SCENARIO_DIR", "scenarios"))
@@ -167,6 +167,11 @@ def list_sweeps(scenario_id: str) -> dict:
     return {
         "scenario_id": scenario_id,
         "running": scenario_id in _running and _running[scenario_id].is_alive(),
+        # The countdown used to recompute this from its own copies of the pace
+        # constants. They were halved and re-measured without the UI following,
+        # leaving "minutes left" reading roughly half the real wait.
+        "seconds_per_search": SECONDS_PER_SEARCH,
+        "workers": DEFAULT_WORKERS,
         "sweeps": [
             {"stamp": d.name, **_read_status(d)} for d in directories[:30]
         ],

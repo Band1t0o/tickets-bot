@@ -1,0 +1,37 @@
+name: test
+
+# Nothing gated a broken commit before this. The sweep workflow runs the code
+# nightly against a live site and commits the results, so a bug that ships is a
+# bug that quietly poisons the data directory until someone reads a chart and
+# disbelieves it.
+#
+# No browser is installed here on purpose: every test is pure or uses a fake
+# provider, which is what keeps this job under a minute.
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - run: pip install -r requirements-dev.txt
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Test
+        run: pytest -q

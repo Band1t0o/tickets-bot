@@ -8,6 +8,8 @@ env/
 venv/
 ENV/
 .venv
+.pytest_cache/
+.ruff_cache/
 
 # Environment
 .env.local

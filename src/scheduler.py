@@ -1,6 +1,8 @@
 from __future__ import annotations
+
 import time
 from datetime import datetime
+
 
 def is_night_hour(now: datetime) -> bool:
     return now.hour >= 22 or now.hour < 6

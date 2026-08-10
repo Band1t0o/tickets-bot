@@ -1,12 +1,17 @@
-python-dotenv
-pydantic
-pydantic-settings
-beautifulsoup4
-requests
-lxml
-playwright
-pandas
-fastapi
-uvicorn[standard]
-pytest
-httpx
+# Pinned deliberately. The scheduled sweep installs fresh on every run, so an
+# unpinned major bump in pydantic, fastapi or playwright breaks the nightly job
+# with no commit in this repo to explain it. The Playwright browser cache in
+# scrape.yml is keyed on hashFiles('requirements.txt'), which only means
+# anything once the version here is real.
+#
+# Test-only dependencies live in requirements-dev.txt so the Docker image and
+# the scheduled run do not ship the test stack.
+
+pydantic==2.13.4
+pydantic-settings==2.15.0
+beautifulsoup4==4.15.0
+lxml==6.1.1
+requests==2.34.2
+playwright==1.62.0
+fastapi==0.141.1
+uvicorn[standard]==0.52.1

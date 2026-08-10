@@ -1,0 +1,14 @@
+{
+  "scenario_id": "japan-philippines",
+  "state": "running",
+  "total": 93,
+  "completed": 20,
+  "current": "VIE\u2192NRT 2027-01-12",
+  "legs_found": 185,
+  "errors": [],
+  "error_count": 0,
+  "routes_with_no_results": [],
+  "started_at": "2026-08-10T11:57:06+00:00",
+  "finished_at": "",
+  "depth": "quick"
+}

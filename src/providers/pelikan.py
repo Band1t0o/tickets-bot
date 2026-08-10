@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import re
 import time
+from collections.abc import Iterable
 from datetime import date, datetime
-from typing import Iterable, Optional
 
 from bs4 import BeautifulSoup
 
@@ -44,7 +44,7 @@ class SearchTimeout(RuntimeError):
 _STOP_ALT = {"direct": 0, "non-stop": 0, "one-stop": 1, "two-stops": 2, "three-stops": 3}
 
 
-def _airline_from_card(card) -> Optional[str]:
+def _airline_from_card(card) -> str | None:
     """Carrier IATA code, taken from the logo URL (…/carriers/VJ-sq.svg)."""
     for img in card.find_all("img"):
         for attr in ("ng-src", "src", "imagecheck"):
@@ -55,7 +55,7 @@ def _airline_from_card(card) -> Optional[str]:
     return None
 
 
-def _stops_from_card(card) -> Optional[int]:
+def _stops_from_card(card) -> int | None:
     for img in card.find_all("img"):
         alt = (img.get("alt") or "").strip().lower()
         if alt in _STOP_ALT:
@@ -68,7 +68,7 @@ def _stops_from_card(card) -> Optional[int]:
     return None
 
 
-def _price_from_card(card) -> tuple[Optional[float], str]:
+def _price_from_card(card) -> tuple[float | None, str]:
     node = card.select_one(".fly-search-price-info-wrapp")
     if node is None:
         return None, "CZK"
@@ -80,7 +80,7 @@ def _price_from_card(card) -> tuple[Optional[float], str]:
     return float(digits), currency
 
 
-def _depart_date_from_card(card) -> Optional[date]:
+def _depart_date_from_card(card) -> date | None:
     """Read the date printed on the card.
 
     The site substitutes nearby dates (asking for 22 Jan can return 23 Jan), so
@@ -99,7 +99,7 @@ def _depart_date_from_card(card) -> Optional[date]:
         return None
 
 
-def _times_from_card(card) -> tuple[Optional[str], Optional[str]]:
+def _times_from_card(card) -> tuple[str | None, str | None]:
     times = [
         node.get_text(" ", strip=True)
         for node in card.select(".fly-item-time-new-reservation")
@@ -110,7 +110,7 @@ def _times_from_card(card) -> tuple[Optional[str], Optional[str]]:
     return times[0], (times[1] if len(times) > 1 else None)
 
 
-def _duration_from_card(card) -> Optional[int]:
+def _duration_from_card(card) -> int | None:
     text = card.get_text(" ", strip=True)
     match = re.search(r"(?:(\d+)d\s*)?(\d+)h\s*(\d+)m", text)
     if not match:

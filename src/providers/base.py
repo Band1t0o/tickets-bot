@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 from abc import ABC
+from collections.abc import Iterable
 from datetime import date
-from typing import Iterable
 
 from ..models import Leg, Offer
 
 
-class BaseProvider(ABC):
+class BaseProvider(ABC):  # noqa: B024 - see below: neither method is abstract by design
     """Interface shared by flight sources.
 
     Two entry points exist during the migration to the scenario platform:

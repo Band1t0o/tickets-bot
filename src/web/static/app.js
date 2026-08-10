@@ -197,8 +197,13 @@ async function pollStatus() {
     const latest = body.sweeps[0];
 
     if (body.running && latest) {
+      // Pace constants come from the server. Keeping local copies is how the
+      // countdown ended up claiming half the real wait after the sweep was
+      // slowed from 4 workers to 2.
+      const perSearch = body.seconds_per_search ?? 19;
+      const workers = body.workers ?? 2;
       const left = latest.total
-        ? Math.max(0, Math.round(((latest.total - latest.completed) * 17) / 4 / 60))
+        ? Math.max(0, Math.round(((latest.total - latest.completed) * perSearch) / workers / 60))
         : '?';
       strip.className = 'status-strip is-running';
       $('status-text').textContent =

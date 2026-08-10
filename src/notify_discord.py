@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import requests
@@ -46,7 +46,7 @@ def save_best(directory: Path | str, best_total: float, currency: str) -> None:
             {
                 "best_total": best_total,
                 "currency": currency,
-                "recorded_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "recorded_at": datetime.now(UTC).isoformat(timespec="seconds"),
             },
             indent=2,
         ),
@@ -111,7 +111,7 @@ def build_price_embed(
         "description": description,
         "color": COLOR_GOOD,
         "fields": fields,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "footer": {"text": "Flight scenario watcher"},
     }
 
@@ -147,7 +147,7 @@ def build_health_alert(
             "Silence would otherwise look identical to 'no cheap flights today'."
         ),
         "color": COLOR_ALERT,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "footer": {"text": "Flight scenario watcher — health check"},
     }
 

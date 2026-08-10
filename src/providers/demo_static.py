@@ -1,8 +1,11 @@
 from __future__ import annotations
+
+from collections.abc import Iterable
 from datetime import date
-from typing import Iterable
+
 from ..models import Leg, Offer
 from .base import BaseProvider
+
 
 class DemoStaticProvider(BaseProvider):
     NAME = "DEMO_STATIC"

@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 from dataclasses import asdict, dataclass, field
 from datetime import date
-from typing import Optional
 
 
 @dataclass
@@ -18,11 +17,11 @@ class Offer:
     origin: str
     destination: str
     departure_date: str  # YYYY-MM-DD
-    return_date: Optional[str]  # YYYY-MM-DD
-    airline: Optional[str]
-    flight_number: Optional[str]
-    cabin: Optional[str]
-    fare_class: Optional[str]
+    return_date: str | None  # YYYY-MM-DD
+    airline: str | None
+    flight_number: str | None
+    cabin: str | None
+    fare_class: str | None
     price_currency: str
     price_amount: float
     url: str
@@ -54,20 +53,20 @@ class Leg:
     origin: str
     destination: str
     depart_date: date
-    airline: Optional[str]
-    flight_number: Optional[str]
-    stops: Optional[int]
+    airline: str | None
+    flight_number: str | None
+    stops: int | None
     price_currency: str
     price_amount: float
     url: str
-    depart_time: Optional[str] = None  # "18:25" local
-    arrive_time: Optional[str] = None  # "08:00" local
-    duration_minutes: Optional[int] = None
+    depart_time: str | None = None  # "18:25" local
+    arrive_time: str | None = None  # "08:00" local
+    duration_minutes: int | None = None
     # True = checked bag included, False = explicitly excluded, None = the site
     # only reveals it after "POKRAČOVAT" (typical of low-cost carriers).
     # Deliberately NOT in content_hash(): baggage belongs to the fare, not the
     # flight, and hashing it would let one flight hash two ways.
-    checked_bag: Optional[bool] = None
+    checked_bag: bool | None = None
 
     def content_hash(self) -> str:
         body = "|".join(
@@ -94,7 +93,7 @@ class Leg:
         return data
 
     @classmethod
-    def from_dict(cls, data: dict) -> "Leg":
+    def from_dict(cls, data: dict) -> Leg:
         payload = dict(data)
         payload["depart_date"] = date.fromisoformat(payload["depart_date"])
         return cls(**payload)

@@ -7,7 +7,7 @@ so the scheduled cloud sweep and the local UI read the same definitions.
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import date
 from pathlib import Path
 
@@ -94,7 +94,7 @@ class Scenario:
         return data
 
     @classmethod
-    def from_dict(cls, data: dict) -> "Scenario":
+    def from_dict(cls, data: dict) -> Scenario:
         payload = dict(data)
         payload["window_start"] = date.fromisoformat(payload["window_start"])
         payload["window_end"] = date.fromisoformat(payload["window_end"])

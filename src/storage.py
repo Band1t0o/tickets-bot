@@ -1,8 +1,13 @@
 from __future__ import annotations
-import csv, json, pathlib
+
+import csv
+import json
+import pathlib
+from collections.abc import Iterable
 from datetime import datetime
-from typing import Iterable
+
 from .models import Offer
+
 
 class Storage:
     def __init__(self, data_dir: str, seen_file: str):

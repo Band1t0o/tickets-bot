@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import statistics
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from .models import Leg
@@ -91,7 +91,7 @@ def record_observation(
 
     prices = [leg.price_amount for leg in legs if leg.price_amount]
     record = {
-        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "ts": datetime.now(UTC).isoformat(timespec="seconds"),
         "origin": origin,
         "destination": destination,
         "depart_date": depart.isoformat(),
@@ -125,7 +125,7 @@ def probe_report(directory: Path | str = DEFAULT_PROBE_DIR) -> ProbeStats:
     stats = ProbeStats()
     for route, prices in series.items():
         entry = RouteStats(route=route, n_observations=len(prices))
-        deltas = [b - a for a, b in zip(prices, prices[1:])]
+        deltas = [b - a for a, b in zip(prices, prices[1:], strict=False)]
         changes = [d for d in deltas if d != 0]
         entry.n_changes = len(changes)
         if changes:

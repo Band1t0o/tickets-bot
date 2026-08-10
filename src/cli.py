@@ -1,13 +1,16 @@
 from __future__ import annotations
+
 import argparse
 import sys
 from dataclasses import replace
 from pathlib import Path
+
 from .config import get_settings
 from .models import Offer
-from .storage import Storage
 from .providers import REGISTRY
 from .scheduler import loop
+from .storage import Storage
+
 
 def run_once(providers: list[str]) -> int:
     settings = get_settings()
