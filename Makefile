@@ -1,4 +1,4 @@
-.PHONY: install run watch fmt lint pw-install test ui sweep dry-run probe probe-report
+.PHONY: install run watch fmt lint pw-install test test-ui ui sweep dry-run probe probe-report
 
 # 3.10+ is the real floor: models use `str | None`, which pydantic evaluates at
 # runtime and 3.9 cannot parse. CI pins 3.12; the suite passes on 3.11.
@@ -16,7 +16,11 @@ pw-install:
 	$(PYTHON) -m playwright install --with-deps chromium
 
 test:
-	$(PYTHON) -m pytest -q
+	$(PYTHON) -m pytest -q -m "not slow"
+
+# Drives the route editor in a real browser. Needs `make pw-install`.
+test-ui:
+	$(PYTHON) -m pytest -q -m slow
 
 lint:
 	$(PYTHON) -m ruff check .

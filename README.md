@@ -6,7 +6,7 @@ like — and watches the price until you book.
 - **Scenarios** are committed JSON files: which airports, which date window, how long to stay where
 - **GitHub Actions does the searching** on a schedule and commits results back, so it works whether or not your machine is on
 - **Discord** pings you only when the best total actually improves
-- **A local web UI** (`make ui`) to define scenarios, launch sweeps and read results
+- **A local web UI** (`make ui`, or the desktop shortcut) to build trips, launch sweeps and read results
 - No database — everything is files under `data/` and `scenarios/`
 
 > Personal, non-commercial use. Keep the politeness delays in place.
@@ -96,8 +96,23 @@ Counts are for the `japan-philippines` scenario; they scale with airports × dat
 Any airport with scheduled service — 4,161 of them, filtered from the
 [OurAirports](https://ourairports.com/data/) public-domain dataset into `data/airports.json` by
 [scripts/build_airports.py](scripts/build_airports.py). The output is committed, so runtime never
-touches the network and there is no key or quota to acquire. The UI searches it by code, city or
-name.
+touches the network and there is no key or quota to acquire.
+
+Search matches **code, city, alias or country**, in that order of strength, and three of those were
+added because the obvious query returned nothing:
+
+| Type this | What it used to do | What fixed it |
+|---|---|---|
+| `Japan` | nothing at all | the dataset stores `JP`; `countries.csv` supplies the name |
+| `Tokyo` | Haneda only | Narita's municipality is *Narita*; `keywords` carries "Tokyo" |
+| `Bali` | **Krakow** | Kraków's municipality really is *Balice*, and Denpasar says "Bali" only in `keywords` — so an exact alias has to outrank a city prefix |
+
+Within a band, airports are ordered by **longest runway**. It is a proxy, but it is the only size
+signal in the dataset: `type` alone tags 28 Japanese airports `large_airport`, and ordering those
+alphabetically put Narita 22nd, behind Aomori and Saga. By runway, NRT/KIX/NGO/HND come first.
+
+Airports you already use appear as one-click chips beside the picker, split by direction — derived
+from your saved trips and `airport_notes.json`, not hardcoded, so it follows you somewhere new.
 
 **Whether an airport is worth using is derived from your own sweeps**, not hand-written:
 [src/viability.py](src/viability.py) reads sweep history and flags routes that were searched
@@ -223,11 +238,27 @@ chasing. Frequent moves above ~5% argue for sweeping more often.
 
 ## The UI
 
-Three tabs: **Search** (stops you can add, remove, reorder and label, each with a typeahead airport
-picker and a stay range; cost estimate before you commit), **Results** (cheapest same-airport and
-cheapest open-jaw side by side, then every itinerary, expandable into legs), **Prices** (cheapest
-total by departure date — *when* to fly; best total over time — *whether to book now*; and the probe
-table).
+`make ui`, or the **Flight watcher** desktop shortcut ([start-ui.bat](start-ui.bat)).
+
+Three tabs: **Search** (build a trip), **Results** (cheapest same-airport and cheapest open-jaw side
+by side, then every itinerary, expandable into legs), **Prices** (cheapest total by departure date —
+*when* to fly; best total over time — *whether to book now*; and the probe table).
+
+**+ New trip** creates one; the dropdown beside it is a list of saved trips, not a mode selector. A
+trip's name is derived from its route unless you give it one, and its id is the slug of that name —
+so `POST /api/scenarios` answers **409** rather than overwriting a trip you named similarly. New
+trips start out of the nightly cloud sweep until you tick them in.
+
+The route reads top to bottom: **Depart from → stops → Return to**. There is no one-way or open-jaw
+checkbox; leave the Return row matching the origins for a round trip, change it for an open jaw,
+empty it for a one-way. The stored `one_way` / `return_to` fields are derived from the row.
+
+Type a city, code or country and press **Enter**. That sentence is the whole point of
+[tests/test_ui_flow.py](tests/test_ui_flow.py): Enter used to be a no-op at human typing speed,
+because the key handler began `if (menu.hidden) return` while the menu was still waiting on a 160 ms
+debounce and a round trip. Typing three letters takes about 200 ms, so Enter always landed in the
+gap — no chip, no message, nothing in the console. Those tests are marked `slow` and run a real
+browser (`make test-ui`); CI runs `pytest -m "not slow"`.
 
 The design system is **ported from the Finance-planner project** (`src/styles/palette.css` and
 `theme.css` copied verbatim). It is a copy, not a shared dependency, so the two will drift. Charts
@@ -239,8 +270,9 @@ toolchain here.
 ## Project layout
 
 ```
-scenarios/*.json          saved searches (committed)
-scripts/build_airports.py regenerates data/airports.json from OurAirports
+scenarios/*.json          saved trips (committed)
+start-ui.bat              what the desktop shortcut runs
+scripts/build_airports.py regenerates the airport catalogue from OurAirports
 src/
   scenario.py             schema, validation, load/save, migration
   airports.py             catalogue lookup and search
@@ -256,7 +288,8 @@ src/
     letuska.py            on-demand second opinion, not sweepable
   web/app.py              JSON API, serves the UI
   web/static/             the UI
-data/airports.json        4,161 airports with scheduled service
+data/airports.json        4,161 airports: code, city, country, size, aliases
+data/countries.json       ISO code -> country name, so "Japan" is searchable
 data/airport_notes.json   hand-measured findings no sweep can reproduce
 data/sweeps/<id>/<ts>/    legs.jsonl, status.json, best.json
 data/probe/               observations.jsonl

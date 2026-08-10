@@ -1,7 +1,16 @@
 import { lineChart } from '/chart.js';
 
 const $ = (id) => document.getElementById(id);
-const state = { scenario: null, viability: null, sweeps: [], stamp: null };
+const state = {
+  scenario: null,
+  viability: null,
+  sweeps: [],
+  stamp: null,
+  frequent: { origins: [], destinations: [] },
+  // A trip being created has no file behind it yet, so Save must POST and the
+  // sweep buttons have nothing to run against until it does.
+  isNew: false,
+};
 
 const api = async (path, options) => {
   const response = await fetch(path, options);
@@ -57,7 +66,7 @@ const escapeHtml = (value) =>
 
 // Everything below `route` is the editable trip; `state.scenario` stays the
 // last saved version so an unsaved edit can be discarded by reloading.
-const route = { origins: [], stops: [], returnTo: null, oneWay: false };
+const route = { origins: [], stops: [], returnTo: [] };
 
 const airportCache = new Map();
 const cacheAirports = (list) => {
@@ -70,6 +79,11 @@ function airportLabel(code) {
   return airport ? `${airport.city || airport.name}` : '';
 }
 
+function describeAirport(airport) {
+  const where = [airport.city || airport.name, airport.country_name].filter(Boolean).join(', ');
+  return where ? `${airport.iata} — ${where}` : airport.iata;
+}
+
 function viabilityOf(code) {
   const stats = state.viability?.airports?.[code];
   if (!stats) return null;
@@ -77,16 +91,28 @@ function viabilityOf(code) {
   return null;
 }
 
-/* ------------------------------------------------------------- typeahead -- */
+/* ------------------------------------------------------------- typeahead --
 
-function typeahead(onPick) {
+   Enter used to be a no-op at human typing speed. `onkeydown` opened with
+   `if (menu.hidden) return`, and the menu needs a debounce plus a round trip,
+   so typing "BCN" (~200 ms) and pressing Enter did nothing at all: no chip, no
+   message, the text just sat there. Enter now waits for the query it needs
+   rather than giving up, and a query that finds nothing says so instead of
+   closing the menu.
+*/
+
+const searchAirports = (query) =>
+  api(`/api/airports/search?q=${encodeURIComponent(query)}`);
+
+function typeahead(onPick, placeholder = '+ airport or city') {
   const wrap = document.createElement('span');
   wrap.className = 'typeahead';
 
   const input = document.createElement('input');
   input.type = 'text';
-  input.placeholder = '+ airport or city';
+  input.placeholder = placeholder;
   input.autocomplete = 'off';
+  input.spellcheck = false;
 
   const menu = document.createElement('div');
   menu.className = 'typeahead__menu';
@@ -95,27 +121,43 @@ function typeahead(onPick) {
   let items = [];
   let active = -1;
   let timer;
+  // The query currently in flight, so Enter can await it instead of racing it.
+  let inFlight = null;
+  let inFlightFor = '';
 
   const close = () => { menu.hidden = true; active = -1; };
 
   const highlight = () => {
-    for (const [index, button] of [...menu.children].entries()) {
+    for (const [index, button] of [...menu.querySelectorAll('.typeahead__item')].entries()) {
       button.classList.toggle('is-active', index === active);
     }
   };
 
   const pick = (airport) => {
-    if (!airport) return;
+    if (!airport) return false;
     cacheAirports([airport]);
-    onPick(airport.iata);
     input.value = '';
+    input.classList.remove('is-unresolved');
     close();
+    onPick(airport.iata);
+    return true;
   };
 
-  const render = (results) => {
-    items = results;
+  const message = (text, tone = 'muted') => {
+    items = [];
+    active = -1;
+    menu.innerHTML = `<div class="typeahead__note ${tone}">${escapeHtml(text)}</div>`;
+    menu.hidden = false;
+  };
+
+  const render = (result, query) => {
+    items = cacheAirports(result.airports ?? []);
     menu.innerHTML = '';
-    for (const airport of results) {
+    if (!items.length) {
+      message(`No airport matches “${query}”`);
+      return;
+    }
+    for (const airport of items) {
       const button = document.createElement('button');
       button.type = 'button';
       button.className = 'typeahead__item';
@@ -123,44 +165,103 @@ function typeahead(onPick) {
       button.innerHTML =
         `<strong>${escapeHtml(airport.iata)}</strong>` +
         `<span class="muted">${escapeHtml(airport.city || airport.name)}` +
-        `${airport.country ? ', ' + escapeHtml(airport.country) : ''}</span>`;
+        `${airport.country_name ? ', ' + escapeHtml(airport.country_name) : ''}</span>`;
       button.onmousedown = (event) => { event.preventDefault(); pick(airport); };
       menu.appendChild(button);
     }
-    menu.hidden = results.length === 0;
-    active = results.length ? 0 : -1;
+    // A country match is usually longer than the list shown. Say what was cut
+    // rather than truncating in silence.
+    if (result.total > items.length) {
+      const note = document.createElement('div');
+      note.className = 'typeahead__note muted';
+      note.textContent = result.country
+        ? `${items.length} of ${result.total} in ${result.country} — biggest first, keep typing to narrow`
+        : `${items.length} of ${result.total} matches — keep typing to narrow`;
+      menu.appendChild(note);
+    }
+    menu.hidden = false;
+    active = 0;
     highlight();
+  };
+
+  // Returns the results, so Enter can act on the same promise the menu shows.
+  const run = (query) => {
+    inFlightFor = query;
+    inFlight = searchAirports(query).then(
+      (result) => {
+        if (input.value.trim() === query) render(result, query);
+        return result;
+      },
+      (error) => {
+        // This used to be `catch { close(); }`, which made a failing lookup
+        // indistinguishable from an airport that does not exist.
+        if (input.value.trim() === query) message(`Search failed — ${error.message}`, 'is-error');
+        return { airports: [], total: 0, country: null };
+      },
+    );
+    return inFlight;
   };
 
   input.oninput = () => {
     clearTimeout(timer);
+    input.classList.remove('is-unresolved');
     const query = input.value.trim();
-    if (query.length < 2) { close(); return; }
-    timer = setTimeout(async () => {
-      try {
-        render(cacheAirports(await api(`/api/airports/search?q=${encodeURIComponent(query)}`)));
-      } catch { close(); }
-    }, 160);
+    if (!query) { close(); return; }
+    timer = setTimeout(() => run(query), 160);
+  };
+
+  const commit = async () => {
+    const query = input.value.trim();
+    if (!query) return;
+    clearTimeout(timer);
+
+    // A code you already know should not wait on the network.
+    const known = airportCache.get(query.toUpperCase());
+    if (known && pick(known)) return;
+
+    const result = inFlightFor === query && inFlight ? await inFlight : await run(query);
+    if (!pick(result.airports?.[active >= 0 ? active : 0])) {
+      input.classList.add('is-unresolved');
+    }
   };
 
   input.onkeydown = (event) => {
-    if (menu.hidden) return;
-    if (event.key === 'ArrowDown') { event.preventDefault(); active = Math.min(active + 1, items.length - 1); highlight(); }
-    else if (event.key === 'ArrowUp') { event.preventDefault(); active = Math.max(active - 1, 0); highlight(); }
-    else if (event.key === 'Enter') { event.preventDefault(); pick(items[active]); }
-    else if (event.key === 'Escape') close();
+    if (event.key === 'Enter') { event.preventDefault(); commit(); }
+    else if (event.key === 'Escape') { close(); }
+    else if (event.key === 'ArrowDown' && !menu.hidden) {
+      event.preventDefault(); active = Math.min(active + 1, items.length - 1); highlight();
+    } else if (event.key === 'ArrowUp' && !menu.hidden) {
+      event.preventDefault(); active = Math.max(active - 1, 0); highlight();
+    }
   };
 
-  input.onblur = () => setTimeout(close, 120);
+  input.onblur = () => setTimeout(() => {
+    close();
+    // Text left behind after clicking away looks like a chip that is about to
+    // appear. Mark it so it is obvious nothing was added.
+    if (input.value.trim()) input.classList.add('is-unresolved');
+  }, 120);
 
   wrap.append(input, menu);
   return wrap;
 }
 
-/* ----------------------------------------------------------------- chips -- */
+/* ----------------------------------------------------------------- chips --
 
-function renderChips(host, codes, onChange) {
+   Every picker carries a stable `data-picker` key. Choosing an airport
+   re-renders the route, which destroys the input that was being typed into -
+   so focus landed on <body> and adding five airports meant five trips back to
+   the mouse. The key is what lets focus be put back afterwards.
+*/
+
+const focusPicker = (key) =>
+  document.querySelector(`[data-picker="${key}"] .typeahead input`)?.focus();
+
+function renderChips(host, codes, onChange, { key, suggest = [] } = {}) {
   host.innerHTML = '';
+  if (key) host.dataset.picker = key;
+  const change = (next) => { onChange(next); if (key) focusPicker(key); };
+
   for (const code of codes) {
     const dead = viabilityOf(code);
     const chip = document.createElement('span');
@@ -178,13 +279,38 @@ function renderChips(host, codes, onChange) {
     remove.className = 'chip__remove';
     remove.textContent = '×';
     remove.title = `Remove ${code}`;
-    remove.onclick = () => onChange(codes.filter((c) => c !== code));
+    remove.onclick = () => change(codes.filter((c) => c !== code));
     chip.appendChild(remove);
     host.appendChild(chip);
   }
+
   host.appendChild(typeahead((code) => {
-    if (!codes.includes(code)) onChange([...codes, code]);
+    if (!codes.includes(code)) change([...codes, code]);
   }));
+
+  // One-click chips for airports already in use. A checkbox grid genuinely beat
+  // typing for the departure airports, which barely change; this keeps that
+  // without hardcoding a list, because it is derived from the saved trips.
+  const unused = suggest.filter((airport) => !codes.includes(airport.iata));
+  if (unused.length) {
+    const row = document.createElement('div');
+    row.className = 'chips chips--suggest';
+    row.innerHTML = '<span class="muted small">Yours:</span>';
+    for (const airport of unused.slice(0, 8)) {
+      const add = document.createElement('button');
+      add.type = 'button';
+      add.className = 'chip chip--add';
+      add.title = `Add ${describeAirport(airport)}`;
+      add.innerHTML =
+        `<span class="chip__code">+ ${escapeHtml(airport.iata)}</span>` +
+        `<span class="chip__city">${escapeHtml(airport.city || airport.name)}</span>`;
+      add.onclick = () => change([...codes, airport.iata]);
+      row.appendChild(add);
+    }
+    // Inside the host, not after it: a sibling would survive `innerHTML = ''`
+    // and a second row would appear on every re-render.
+    host.appendChild(row);
+  }
 }
 
 /* ----------------------------------------------------------------- stops -- */
@@ -265,7 +391,7 @@ function renderStops() {
       stop.airports = codes;
       renderStops();
       scheduleEstimate();
-    });
+    }, { key: `stop-${index}`, suggest: state.frequent.destinations });
 
     card.append(head, chips);
     host.appendChild(card);
@@ -287,38 +413,43 @@ $('add-stop-btn').onclick = () => {
   scheduleEstimate();
 };
 
-$('one-way').onchange = () => {
-  route.oneWay = $('one-way').checked;
-  // Nowhere to return to when there is no leg home.
-  $('open-jaw').disabled = route.oneWay;
-  renderReturn();
-  scheduleEstimate();
-};
+/* ---------------------------------------------------------------- return --
 
-$('open-jaw').onchange = () => {
-  route.returnTo = $('open-jaw').checked ? [...(route.returnTo ?? route.origins)] : null;
-  renderReturn();
-  scheduleEstimate();
-};
+   There used to be a "One-way" and a "Return somewhere else" checkbox, and the
+   shape of the trip lived in those two booleans rather than in the route you
+   could see. The chain now says it: leave the Return row matching the origins
+   for a normal round trip, change it for an open jaw, empty it for a one-way.
+   `formToScenario` derives `one_way` and `return_to` from the row, so the
+   stored schema is untouched.
+*/
+
+const sameSet = (a, b) =>
+  a.length === b.length && [...a].sort().join() === [...b].sort().join();
 
 function renderReturn() {
-  const on = !route.oneWay && route.returnTo !== null;
-  $('return-block').hidden = !on;
-  if (on) {
-    renderChips($('return-to'), route.returnTo, (codes) => {
-      route.returnTo = codes;
-      renderReturn();
-      scheduleEstimate();
-    });
-  }
+  const mirrors = sameSet(route.returnTo, route.origins) && route.origins.length > 0;
+  $('return-note').textContent = route.returnTo.length === 0
+    ? '— empty, so this is a one-way with no leg home'
+    : mirrors
+      ? '— same as departure'
+      : '— open jaw, flying home to somewhere else';
+  renderChips($('return-to'), route.returnTo, (codes) => {
+    route.returnTo = codes;
+    renderReturn();
+    scheduleEstimate();
+  }, { key: 'return', suggest: state.frequent.origins });
 }
 
 function renderOrigins() {
   renderChips($('origins'), route.origins, (codes) => {
+    // While the return row mirrors the origins, keep it mirroring: adding a
+    // departure airport to a round trip should not quietly make it an open jaw.
+    if (sameSet(route.returnTo, route.origins)) route.returnTo = [...codes];
     route.origins = codes;
     renderOrigins();
+    renderReturn();
     scheduleEstimate();
-  });
+  }, { key: 'origins', suggest: state.frequent.origins });
 }
 
 function renderRoute() {
@@ -336,38 +467,55 @@ function fillForm(scenario) {
     airports: [...stop.airports],
     stay_days: [...stop.stay_days],
   }));
-  route.returnTo = scenario.return_to ? [...scenario.return_to] : null;
-  route.oneWay = Boolean(scenario.one_way);
+  // `return_to: null` on a return trip means "back where you started", which is
+  // shown as the row mirroring the origins rather than as an empty row.
+  route.returnTo = scenario.one_way ? [] : [...(scenario.return_to ?? scenario.origins)];
 
+  $('trip-name').value = scenario.name ?? '';
   $('window-start').value = scenario.window_start;
   $('window-end').value = scenario.window_end;
   $('adults').value = scenario.adults;
   $('currency').value = scenario.currency ?? 'CZK';
   $('depth').value = scenario.depth;
-  $('one-way').checked = route.oneWay;
-  $('open-jaw').checked = route.returnTo !== null;
-  $('open-jaw').disabled = route.oneWay;
+  $('enabled').checked = scenario.enabled !== false;
 
   renderRoute();
 }
 
 function formToScenario() {
+  const oneWay = route.returnTo.length === 0;
   return {
     ...state.scenario,
+    name: $('trip-name').value.trim() || derivedName(),
     origins: route.origins,
     stops: route.stops.map((stop) => ({
       label: stop.label,
       airports: stop.airports,
       stay_days: stop.stay_days,
     })),
-    return_to: route.oneWay ? null : route.returnTo,
-    one_way: route.oneWay,
+    return_to: oneWay || sameSet(route.returnTo, route.origins) ? null : route.returnTo,
+    one_way: oneWay,
     window_start: $('window-start').value,
     window_end: $('window-end').value,
     adults: Number($('adults').value),
     currency: ($('currency').value || 'CZK').toUpperCase(),
     depth: $('depth').value,
+    enabled: $('enabled').checked,
   };
+}
+
+/* A trip's name is a consequence of its route, not a category chosen up front.
+   "Europe → Japan → Philippines" and "Tokyo round trip" were two saved trips,
+   but reading them in a dropdown made them look like two kinds of trip. */
+function derivedName() {
+  const where = (codes) =>
+    codes.map((code) => airportLabel(code) || code).filter(Boolean)[0] ?? '?';
+  const parts = [where(route.origins)];
+  for (const stop of route.stops) parts.push(stop.label.trim() || where(stop.airports));
+  if (route.returnTo.length) {
+    parts.push(sameSet(route.returnTo, route.origins) ? where(route.origins) : where(route.returnTo));
+  }
+  return parts.join(' → ');
 }
 
 /* --------------------------------------------------------------- estimate */
@@ -379,6 +527,14 @@ const scheduleEstimate = () => {
 };
 
 async function refreshEstimate() {
+  // A trip that has never been saved has no file to estimate against, and the
+  // endpoint is keyed on the id. Say what is missing instead of 404ing.
+  if (state.isNew) {
+    $('estimate').textContent = 'Save the trip to price the sweep';
+    $('estimate').className = 'badge badge--muted';
+    $('leg-breakdown').textContent = '';
+    return;
+  }
   // The estimate is served for the *saved* scenario, so an unsaved edit shows
   // the last saved cost. Say so rather than implying the number is live.
   const dirty = JSON.stringify(formToScenario()) !== JSON.stringify(state.scenario);
@@ -409,21 +565,117 @@ const showError = (message) => {
 
 $('save-btn').onclick = async () => {
   $('save-error').hidden = true;
+  const payload = formToScenario();
   try {
-    const saved = await api(`/api/scenarios/${state.scenario.id}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(formToScenario()),
-    });
+    let saved;
+    if (state.isNew) {
+      // The id comes from the name, so two trips can collide. The server
+      // answers 409 rather than overwriting; try the next free suffix.
+      payload.id = await freeId(slug(payload.name));
+      saved = await api('/api/scenarios', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      state.isNew = false;
+      await reloadScenarioList(saved.id);
+    } else {
+      saved = await api(`/api/scenarios/${state.scenario.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const option = [...$('scenario-select').options].find((o) => o.value === saved.id);
+      if (option) option.textContent = saved.name;
+    }
     state.scenario = saved;
     fillForm(saved);
+    state.frequent = await api('/api/airports/frequent').catch(() => state.frequent);
+    renderRoute();
     await refreshEstimate();
     $('save-btn').textContent = 'Saved';
-    setTimeout(() => ($('save-btn').textContent = 'Save scenario'), 1500);
+    setTimeout(() => ($('save-btn').textContent = 'Save trip'), 1500);
   } catch (error) {
     showError(error.message);
   }
 };
+
+$('delete-trip-btn').onclick = async () => {
+  $('save-error').hidden = true;
+  if (state.isNew) { await reloadScenarioList(); return; }
+  if (!confirm(`Delete “${state.scenario.name}”? Sweep results already gathered are kept.`)) return;
+  try {
+    await api(`/api/scenarios/${state.scenario.id}`, { method: 'DELETE' });
+    await reloadScenarioList();
+  } catch (error) {
+    showError(error.message);
+  }
+};
+
+$('new-trip-btn').onclick = () => {
+  $('save-error').hidden = true;
+  state.isNew = true;
+  state.stamp = null;
+  state.sweeps = [];
+  state.scenario = blankScenario();
+  fillForm(state.scenario);
+  $('scenario-select').value = '';
+  updateNewTripUi();
+  $('estimate').textContent = 'Add airports, then save';
+  $('estimate').className = 'badge badge--muted';
+  $('leg-breakdown').textContent = '';
+  $('status-text').textContent = 'New trip — not saved yet';
+  $('status-strip').className = 'status-strip';
+  focusPicker('origins');
+};
+
+function blankScenario() {
+  // Three months out is roughly where fares settle; the previous session's
+  // probe found them moving over days rather than hours at that range.
+  const day = (offset) => {
+    const date = new Date();
+    date.setDate(date.getDate() + offset);
+    return date.toISOString().slice(0, 10);
+  };
+  const origins = state.frequent.origins.slice(0, 2).map((airport) => airport.iata);
+  return {
+    id: '',
+    name: '',
+    origins,
+    stops: [{ label: '', airports: [], stay_days: [7, 10] }],
+    window_start: day(90),
+    window_end: day(120),
+    return_to: null,
+    one_way: false,
+    adults: 1,
+    depth: 'quick',
+    currency: 'CZK',
+    alert_threshold: null,
+    bag_estimate: 1500,
+    // Off until you have run it once and believe the numbers.
+    enabled: false,
+    notes: '',
+  };
+}
+
+const slug = (name) =>
+  (name || 'trip')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')   // "Zürich" -> "Zurich"
+    .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+    .slice(0, 60) || 'trip';
+
+async function freeId(base) {
+  const taken = new Set([...$('scenario-select').options].map((option) => option.value));
+  if (!taken.has(base)) return base;
+  for (let n = 2; n < 100; n += 1) if (!taken.has(`${base}-${n}`)) return `${base}-${n}`;
+  return `${base}-${Date.now()}`;
+}
+
+function updateNewTripUi() {
+  // Nothing to sweep until the trip exists on disk.
+  for (const id of ['run-local-btn', 'run-cloud-btn']) $(id).disabled = state.isNew;
+  $('delete-trip-btn').textContent = state.isNew ? 'Discard' : 'Delete';
+}
 
 $('run-local-btn').onclick = async () => {
   $('save-error').hidden = true;
@@ -446,13 +698,14 @@ $('run-cloud-btn').onclick = async () => {
 };
 
 $('depth').onchange = scheduleEstimate;
-for (const id of ['window-start', 'window-end', 'adults', 'currency']) {
+for (const id of ['window-start', 'window-end', 'adults', 'currency', 'trip-name', 'enabled']) {
   $(id).onchange = scheduleEstimate;
 }
 
 /* ----------------------------------------------------------------- status */
 
 async function pollStatus() {
+  if (state.isNew) return;   // no file, so no sweeps to report on
   const strip = $('status-strip');
   try {
     const body = await api(`/api/sweeps/${state.scenario.id}`);
@@ -697,6 +950,8 @@ async function renderPrices() {
 /* -------------------------------------------------------------------- init */
 
 async function loadScenario(id) {
+  state.isNew = false;
+  updateNewTripUi();
   state.scenario = await api(`/api/scenarios/${id}`);
   // Cache the labels for every airport the scenario names, so chips read
   // "PRG Prague" on first paint instead of filling in after a search.
@@ -711,36 +966,55 @@ async function loadScenario(id) {
   fillForm(state.scenario);
 }
 
+/* Reloads the saved-trip list and opens `preferred`, or the first trip, or an
+   empty draft when nothing is saved at all. Called after create and delete so
+   the dropdown never names a file that is no longer there. */
+async function reloadScenarioList(preferred = null) {
+  const scenarios = await api('/api/scenarios');
+  const select = $('scenario-select');
+  select.innerHTML = '';
+  for (const scenario of scenarios) {
+    const option = document.createElement('option');
+    option.value = scenario.id;
+    option.textContent = scenario.name;
+    select.appendChild(option);
+  }
+
+  if (!scenarios.length) {
+    // A fresh checkout has no trips. Opening straight into a draft beats an
+    // empty page telling you to go and write JSON.
+    $('new-trip-btn').onclick();
+    return;
+  }
+
+  const id = scenarios.some((s) => s.id === preferred) ? preferred : scenarios[0].id;
+  select.value = id;
+  state.stamp = null;
+  await loadScenario(id);
+  await refreshEstimate();
+  await pollStatus();
+}
+
 async function init() {
   try {
-    const [scenarios, viability] = await Promise.all([
-      api('/api/scenarios'),
+    const [viability, frequent] = await Promise.all([
       api('/api/viability').catch(() => ({ airports: {} })),
+      api('/api/airports/frequent').catch(() => ({ origins: [], destinations: [] })),
     ]);
     state.viability = viability;
+    state.frequent = frequent;
+    cacheAirports([...frequent.origins, ...frequent.destinations]);
 
-    if (!scenarios.length) {
-      $('status-text').textContent = 'No scenarios yet — add one under scenarios/';
-      return;
-    }
-
-    const select = $('scenario-select');
-    for (const scenario of scenarios) {
-      const option = document.createElement('option');
-      option.value = scenario.id;
-      option.textContent = scenario.name;
-      select.appendChild(option);
-    }
-    select.onchange = async () => {
+    $('scenario-select').onchange = async () => {
+      const id = $('scenario-select').value;
+      if (!id) return;
       state.stamp = null;
-      await loadScenario(select.value);
+      await loadScenario(id);
       await refreshEstimate();
       await pollStatus();
     };
 
-    await loadScenario(scenarios[0].id);
-    await refreshEstimate();
-    await pollStatus();
+    await reloadScenarioList();
   } catch (error) {
     $('status-strip').className = 'status-strip is-error';
     $('status-text').textContent = `Could not start — ${error.message}`;

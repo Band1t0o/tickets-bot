@@ -18,8 +18,8 @@ from fastapi import Body, FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from ..airports import describe, lookup
-from ..airports import search as search_airports
+from ..airports import describe, frequent_airports, lookup
+from ..airports import search_with_meta as search_airports
 from ..combine import combine_all, series_from_result
 from ..scenario import Scenario, load_scenario, load_scenarios, save_scenario
 from ..sweep.planner import SECONDS_PER_SEARCH, estimate_minutes, plan_searches
@@ -85,8 +85,15 @@ def _read_status(directory: Path) -> dict:
 
 
 @app.get("/api/airports/search")
-def airport_search(q: str = "", limit: int = 20) -> list[dict]:
+def airport_search(q: str = "", limit: int = 20) -> dict:
+    """Matches, plus `total` and `country` so the UI can say what it cut."""
     return search_airports(q, limit=min(max(limit, 1), 50), data_dir=DATA_DIR)
+
+
+@app.get("/api/airports/frequent")
+def airport_frequent() -> dict:
+    """Airports you already use, for one-click chips beside the typeahead."""
+    return frequent_airports(SCENARIO_DIR, data_dir=DATA_DIR)
 
 
 @app.get("/api/airports/{code}")
@@ -133,12 +140,29 @@ def _scenario_from_payload(payload: dict) -> Scenario:
     return scenario
 
 
-@app.post("/api/scenarios")
+@app.post("/api/scenarios", status_code=201)
 def create_scenario(payload: dict = Body(...)) -> dict:
     scenario = _scenario_from_payload(payload)
     _safe_id(scenario.id)
+    # `save_scenario` writes unconditionally, so POST used to silently overwrite
+    # an existing trip - and the UI now generates ids from the trip name, which
+    # makes a collision something a person can hit by naming two trips alike.
+    if (SCENARIO_DIR / f"{scenario.id}.json").exists():
+        raise HTTPException(409, f"a trip with the id {scenario.id!r} already exists")
     save_scenario(scenario, SCENARIO_DIR)
     return scenario.to_dict()
+
+
+@app.delete("/api/scenarios/{scenario_id}")
+def delete_scenario(scenario_id: str) -> dict:
+    path = SCENARIO_DIR / f"{_safe_id(scenario_id)}.json"
+    if not path.exists():
+        raise HTTPException(404, f"No scenario {scenario_id!r}")
+    path.unlink()
+    # `data/sweeps/<id>/` stays. It is committed history that took real Actions
+    # minutes to gather, and deleting a plan is not a request to burn the
+    # measurements taken under it.
+    return {"deleted": scenario_id}
 
 
 @app.put("/api/scenarios/{scenario_id}")

@@ -12,12 +12,28 @@ from src.models import Leg
 from src.scenario import Scenario, Stop, save_scenario
 
 AIRPORTS = [
-    {"iata": "PRG", "name": "Vaclav Havel", "city": "Prague", "country": "CZ", "rank": 0},
-    {"iata": "VIE", "name": "Vienna Intl", "city": "Vienna", "country": "AT", "rank": 0},
-    {"iata": "NRT", "name": "Narita Intl", "city": "Narita", "country": "JP", "rank": 0},
-    {"iata": "MNL", "name": "Ninoy Aquino", "city": "Manila", "country": "PH", "rank": 0},
-    {"iata": "BRQ", "name": "Brno-Turany", "city": "Brno", "country": "CZ", "rank": 1},
+    {"iata": "PRG", "name": "Vaclav Havel", "city": "Prague", "country": "CZ", "rank": 0,
+     "runway_ft": 12189},
+    {"iata": "VIE", "name": "Vienna Intl", "city": "Vienna", "country": "AT", "rank": 0,
+     "runway_ft": 11811},
+    {"iata": "NRT", "name": "Narita Intl", "city": "Narita", "country": "JP", "rank": 0,
+     "runway_ft": 13123, "keywords": ["Tokyo"]},
+    {"iata": "HND", "name": "Haneda", "city": "Tokyo", "country": "JP", "rank": 0,
+     "runway_ft": 11024},
+    {"iata": "KRK", "name": "Krakow John Paul II", "city": "Balice", "country": "PL", "rank": 0,
+     "runway_ft": 8366},
+    {"iata": "DPS", "name": "Denpasar Ngurah Rai", "city": "Kuta", "country": "ID", "rank": 0,
+     "runway_ft": 9790, "keywords": ["Bali", "Denpasar"]},
+    {"iata": "MNL", "name": "Ninoy Aquino", "city": "Manila", "country": "PH", "rank": 0,
+     "runway_ft": 12261},
+    {"iata": "BRQ", "name": "Brno-Turany", "city": "Brno", "country": "CZ", "rank": 1,
+     "runway_ft": 8694},
 ]
+
+COUNTRIES = {
+    "CZ": "Czech Republic", "AT": "Austria", "JP": "Japan", "PH": "Philippines",
+    "PL": "Poland", "ID": "Indonesia",
+}
 
 NOTES = {
     "airports": {
@@ -36,6 +52,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("DATA_DIR", str(data))
 
     (data / "airports.json").write_text(json.dumps(AIRPORTS), encoding="utf-8")
+    (data / "countries.json").write_text(json.dumps(COUNTRIES), encoding="utf-8")
     (data / "airport_notes.json").write_text(json.dumps(NOTES), encoding="utf-8")
 
     save_scenario(
@@ -58,6 +75,8 @@ def client(tmp_path, monkeypatch):
     import src.web.app as app_module
 
     # The catalogue is memoised per directory, and every test gets a new tmp_path.
+    airports_module._raw_catalogue.cache_clear()
+    airports_module.load_countries.cache_clear()
     airports_module.load_catalogue.cache_clear()
     airports_module._by_code.cache_clear()
     airports_module.load_notes.cache_clear()
@@ -88,15 +107,70 @@ def seed_sweep(data_dir, stamp="2026-08-06T02-00-00Z", legs=None):
 # ------------------------------------------------------------------- airports
 
 
+def codes(response) -> list[str]:
+    return [airport["iata"] for airport in response.json()["airports"]]
+
+
 def test_airport_search_matches_code_and_city(client):
     api, _ = client
-    assert [a["iata"] for a in api.get("/api/airports/search?q=PRG").json()] == ["PRG"]
-    assert [a["iata"] for a in api.get("/api/airports/search?q=prague").json()] == ["PRG"]
+    assert codes(api.get("/api/airports/search?q=PRG")) == ["PRG"]
+    assert codes(api.get("/api/airports/search?q=prague")) == ["PRG"]
+
+
+def test_airport_search_matches_a_country_name(client):
+    """"Japan" is the first thing you type for somewhere you have not been.
+
+    It used to return nothing at all: the catalogue stores the ISO code, and
+    the search never looked at the country either way.
+    """
+    api, _ = client
+    body = api.get("/api/airports/search?q=Japan").json()
+    assert codes(api.get("/api/airports/search?q=Japan")) == ["NRT", "HND"]
+    assert body["country"] == "Japan"
+
+
+def test_a_city_match_still_outranks_its_country(client):
+    """Typing "Prague" must not bury PRG under every airport in Czechia."""
+    api, _ = client
+    assert codes(api.get("/api/airports/search?q=Prague"))[0] == "PRG"
+
+
+def test_the_names_people_use_beat_the_official_ones(client):
+    """Narita's municipality is Narita, so "Tokyo" used to miss it entirely."""
+    api, _ = client
+    assert codes(api.get("/api/airports/search?q=Tokyo")) == ["NRT", "HND"]
+
+
+def test_an_exact_alias_outranks_a_city_that_merely_starts_the_same(client):
+    """"Bali" resolved to Krakow, whose municipality genuinely is Balice.
+
+    Denpasar says "Bali" nowhere in its city or name - only in its aliases - so
+    an exact alias has to beat a city prefix or the wrong airport wins.
+    """
+    api, _ = client
+    assert codes(api.get("/api/airports/search?q=Bali"))[0] == "DPS"
+
+
+def test_search_reports_what_it_truncated(client):
+    api, _ = client
+    body = api.get("/api/airports/search?q=Japan&limit=1").json()
+    assert body["total"] == 2
+    assert len(body["airports"]) == 1
 
 
 def test_airport_search_needs_a_query(client):
     api, _ = client
-    assert api.get("/api/airports/search?q=").json() == []
+    assert api.get("/api/airports/search?q=").json() == {
+        "airports": [], "total": 0, "country": None
+    }
+
+
+def test_frequent_airports_come_from_the_saved_trips(client):
+    """The quick-pick row is derived, not hardcoded - and knows direction."""
+    api, _ = client
+    body = api.get("/api/airports/frequent").json()
+    assert [a["iata"] for a in body["origins"]] == ["PRG", "VIE"]
+    assert sorted(a["iata"] for a in body["destinations"]) == ["MNL", "NRT"]
 
 
 def test_unknown_airport_is_404(client):
@@ -178,9 +252,32 @@ def test_creating_a_scenario_round_trips(client):
         "window_end": "2027-03-15",
         "depth": "quick",
     }
-    assert api.post("/api/scenarios", json=payload).status_code == 200
+    assert api.post("/api/scenarios", json=payload).status_code == 201
     stored = api.get("/api/scenarios/grand-tour").json()
     assert [s["label"] for s in stored["stops"]] == ["Japan", "Philippines", "Thailand"]
+
+
+def test_creating_over_an_existing_trip_is_refused(client):
+    """POST used to overwrite silently, and ids now come from the trip name."""
+    api, _ = client
+    existing = api.get("/api/scenarios/jp-ph").json()
+    existing["name"] = "Something else entirely"
+    assert api.post("/api/scenarios", json=existing).status_code == 409
+    assert api.get("/api/scenarios/jp-ph").json()["name"] == "Japan then Philippines"
+
+
+def test_deleting_a_trip_keeps_the_sweeps_it_gathered(client):
+    """The measurements cost real Actions minutes; the plan is what is deleted."""
+    api, data = client
+    stamp = seed_sweep(data)
+    assert api.delete("/api/scenarios/jp-ph").status_code == 200
+    assert api.get("/api/scenarios/jp-ph").status_code == 404
+    assert (data / "sweeps" / "jp-ph" / stamp / "legs.jsonl").exists()
+
+
+def test_deleting_an_unknown_trip_is_404(client):
+    api, _ = client
+    assert api.delete("/api/scenarios/never-existed").status_code == 404
 
 
 def test_put_will_not_write_to_a_different_id_than_the_path(client):

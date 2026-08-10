@@ -26,10 +26,16 @@
           panel over it.
         </p>
       </div>
-      <label class="field">
-        Scenario
-        <select id="scenario-select"></select>
-      </label>
+      <div class="trip-picker">
+        <label class="field">
+          Saved trips
+          <select id="scenario-select"></select>
+        </label>
+        <div class="row">
+          <button class="small" id="new-trip-btn">+ New trip</button>
+          <button class="small" id="delete-trip-btn" title="Delete this trip">Delete</button>
+        </div>
+      </div>
     </div>
 
     <div class="tabs" id="tabs">
@@ -43,6 +49,9 @@
       <div class="panel">
         <div class="panel__header"><h2>When</h2></div>
         <div class="form-grid">
+          <label class="field field--wide">Trip name
+            <input type="text" id="trip-name" placeholder="named after the route if left blank">
+          </label>
           <label class="field">Window opens<input type="date" id="window-start"></label>
           <label class="field">Window closes<input type="date" id="window-end"></label>
           <label class="field">Travellers<input type="number" id="adults" min="1" max="9"></label>
@@ -53,9 +62,10 @@
       <div class="panel">
         <div class="panel__header"><h2>Route</h2></div>
         <p class="panel__hint">
-          A trip is a chain of stops. Add as many as you like — search cost grows with
-          the number of legs, not with the number of date combinations. Badges come from
-          your own sweep history; airports nothing has ever been found for are flagged.
+          A trip is a chain of stops, read top to bottom. Add as many as you like — search
+          cost grows with the number of legs, not with the number of date combinations.
+          Type a city, an airport code or a country and press Enter. Badges come from your
+          own sweep history; airports nothing has ever been found for are flagged.
         </p>
 
         <h3 class="muted small">Depart from</h3>
@@ -65,19 +75,12 @@
 
         <div class="row" style="margin-top:16px">
           <button class="small" id="add-stop-btn">+ Add stop</button>
-          <span class="spacer"></span>
-          <label class="check small">
-            <input type="checkbox" id="one-way"> One-way — no leg home
-          </label>
-          <label class="check small">
-            <input type="checkbox" id="open-jaw"> Return somewhere else
-          </label>
         </div>
 
-        <div id="return-block" hidden>
-          <h3 class="muted small" style="margin-top:16px">Return to</h3>
-          <div class="chips" id="return-to"></div>
-        </div>
+        <h3 class="muted small" style="margin-top:20px">
+          Return to <span class="muted" id="return-note"></span>
+        </h3>
+        <div class="chips" id="return-to"></div>
       </div>
 
       <div class="panel">
@@ -93,8 +96,11 @@
               <option value="deep">Deep — every day</option>
             </select>
           </label>
+          <label class="check small">
+            <input type="checkbox" id="enabled"> Include in the nightly cloud sweep
+          </label>
           <span class="spacer"></span>
-          <button id="save-btn">Save scenario</button>
+          <button id="save-btn">Save trip</button>
           <button id="run-local-btn" class="primary">Run locally</button>
           <button id="run-cloud-btn">Run in cloud</button>
         </div>

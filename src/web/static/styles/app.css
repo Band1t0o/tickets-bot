@@ -211,6 +211,14 @@ button {
 button:hover:not(:disabled) { background: var(--color-buttonNormalBackgroundHover); }
 button:disabled { opacity: 0.5; cursor: default; }
 
+/* A filled button at half opacity still reads as "press me". The sweep buttons
+   are disabled until a new trip is saved, so they have to look it. */
+button.primary:disabled {
+  background: transparent;
+  color: var(--color-textMuted);
+  border: 1px solid var(--color-border);
+}
+
 button.primary {
   background: var(--color-buttonPrimaryBackground);
   border-color: var(--color-buttonPrimaryBackground);
@@ -497,6 +505,50 @@ label.field > select { font-weight: 400; color: var(--color-formInputText); }
 .typeahead__item:hover,
 .typeahead__item.is-active { background: var(--color-surfaceRaised, rgb(127 127 127 / 14%)); }
 .typeahead__item .muted { margin-left: 6px; }
+
+/* "No airport matches X", "20 of 83 in Japan", "Search failed - ...". A query
+   that finds nothing used to close the menu, which looked identical to a query
+   that had not run yet. */
+.typeahead__note {
+  padding: 6px 8px;
+  font-size: 12px;
+}
+.typeahead__note.is-error { color: var(--color-danger, #e12d39); }
+
+/* Text left in the box adds nothing but looks like a chip about to appear. */
+.typeahead input.is-unresolved {
+  border-style: solid;
+  border-color: var(--color-danger, #e12d39);
+}
+
+/* Airports already in use, offered as one-click adds. */
+.chips--suggest {
+  flex-basis: 100%;
+  margin-top: 2px;
+  gap: 4px;
+}
+
+.chip--add {
+  padding: 3px 9px;
+  border-style: dashed;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+.chip--add:hover { border-style: solid; border-color: var(--color-accent, currentColor); }
+
+/* --------------------------------------------------------- trip picker -- */
+
+.trip-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-end;
+}
+
+.field--wide { grid-column: 1 / -1; }
 
 /* ------------------------------------------------------------------ stops -- */
 
