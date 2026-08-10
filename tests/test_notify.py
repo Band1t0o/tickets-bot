@@ -100,3 +100,27 @@ def test_health_alert_is_visually_distinct():
     alert = build_health_alert(scenario_name="S", legs_found=0, errors=0, total=300)
     # Red, so a broken scraper cannot be mistaken for an ordinary price update.
     assert alert["color"] == 0xE12D39
+
+
+def test_dark_route_triggers_health_alert():
+    # A whole route returning nothing on every date is breakage, not a quiet
+    # market. MNL->VIE was dark for an entire sweep that reported zero errors,
+    # and it was the return leg of the cheapest real itinerary.
+    alert = build_health_alert(
+        scenario_name="S",
+        legs_found=500,
+        errors=0,
+        total=300,
+        dark_routes=["MNL->VIE", "CEB->PRG"],
+    )
+    assert alert is not None
+    assert "MNL->VIE" in alert["description"]
+
+
+def test_no_dark_routes_leaves_a_healthy_sweep_silent():
+    assert (
+        build_health_alert(
+            scenario_name="S", legs_found=500, errors=0, total=300, dark_routes=[]
+        )
+        is None
+    )

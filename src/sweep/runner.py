@@ -25,8 +25,20 @@ from ..scenario import Scenario
 from .planner import LegSearch, plan_searches
 
 # Politeness delay between searches on the same worker.
-SEARCH_DELAY_S = 1.5
-DEFAULT_WORKERS = 4
+#
+# Raised from 1.5s/4 workers after the first sweep that could actually report
+# failures: 58 of 93 searches timed out. The same rate was present before and
+# invisible - the previous "0 errors" sweep averaged 2.9 legs per search where a
+# healthy search returns ~10, so roughly 70% of it was already failing silently.
+#
+# Whether the cause is concurrency or IP-level throttling is not established:
+# after a day of probing, even sequential single searches from this machine went
+# from ~14s to over 6 minutes, which is consistent with the site throttling the
+# client rather than with load per se. Both readings point the same way, so
+# these settings are deliberately gentler than measured need, and the daily
+# scheduled run is what should validate them - not more hammering.
+SEARCH_DELAY_S = 4.0
+DEFAULT_WORKERS = 2
 
 ProgressFn = Callable[[int, int, str], None]
 
@@ -48,6 +60,24 @@ class SweepResult:
     errors: list[str] = field(default_factory=list)
     started_at: str = ""
     finished_at: str = ""
+    # Searches attempted and legs found, per "ORIGIN->DEST". A route that was
+    # searched on many dates and yielded nothing on all of them is breakage,
+    # not a quiet market - see routes_with_no_results.
+    route_searches: dict[str, int] = field(default_factory=dict)
+    route_legs: dict[str, int] = field(default_factory=dict)
+
+    @property
+    def routes_with_no_results(self) -> list[str]:
+        """Routes that were searched but never returned a single offer.
+
+        This is the signal that was missing when MNL->VIE, CEB->PRG and
+        CEB->FRA all came back empty while the sweep reported error_count: 0.
+        """
+        return sorted(
+            route
+            for route, attempts in self.route_searches.items()
+            if attempts and not self.route_legs.get(route)
+        )
 
     @property
     def is_healthy(self) -> bool:
@@ -63,6 +93,33 @@ class SweepResult:
         if not self.legs:
             return False
         return len(self.errors) <= self.total / 2
+
+
+def _search_with_retry(provider, page, search: LegSearch, adults: int, delay_s: float):
+    """One retry on timeout before giving up on a search.
+
+    Four workers hammering the site makes it noticeably slower to render, which
+    is the most likely reason a search times out. A single retry recovers those
+    without masking a genuinely broken selector, which fails both times.
+    """
+    from ..providers.pelikan import SearchTimeout
+
+    for attempt in (1, 2):
+        try:
+            return provider.search_leg(
+                page,
+                search.origin,
+                search.destination,
+                search.depart_date,
+                search.ret_date,
+                adults,
+            )
+        except SearchTimeout:
+            if attempt == 2:
+                raise
+            if delay_s:
+                time.sleep(delay_s)
+    return []
 
 
 def _now() -> str:
@@ -118,6 +175,7 @@ def run_sweep(
             "legs_found": len(result.legs),
             "errors": result.errors[-20:],
             "error_count": len(result.errors),
+            "routes_with_no_results": result.routes_with_no_results,
             "started_at": result.started_at,
             "finished_at": result.finished_at,
             "depth": scenario.depth,
@@ -131,12 +189,16 @@ def run_sweep(
 
     def record(search: LegSearch, legs: list[Leg], error: str | None) -> None:
         label = f"{search.origin}→{search.destination} {search.depart_date}"
+        route = f"{search.origin}->{search.destination}"
         with lock:
             result.completed += 1
+            result.route_searches[route] = result.route_searches.get(route, 0) + 1
+            result.route_legs.setdefault(route, 0)
             if error:
                 result.errors.append(f"{label}: {error}")
             else:
                 result.legs.extend(legs)
+                result.route_legs[route] += len(legs)
             if result.completed % 5 == 0 or result.completed == result.total:
                 _write_status(directory, status_payload("running", label))
             if on_progress:
@@ -148,14 +210,7 @@ def run_sweep(
         with _browser_page(provider) as page:
             for search in chunk:
                 try:
-                    legs = provider.search_leg(
-                        page,
-                        search.origin,
-                        search.destination,
-                        search.depart_date,
-                        search.ret_date,
-                        scenario.adults,
-                    )
+                    legs = _search_with_retry(provider, page, search, scenario.adults, delay_s)
                     record(search, legs, None)
                 except Exception as exc:  # one bad search must not kill the sweep
                     record(search, [], str(exc))

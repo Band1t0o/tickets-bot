@@ -158,3 +158,44 @@ def test_by_date_series_keeps_the_cheapest_per_departure_date():
 
 def test_empty_input_yields_nothing():
     assert combine([], scenario()) == []
+
+
+def _bag_leg(origin, destination, depart, price, checked_bag):
+    out = leg(origin, destination, depart, price=price)
+    out.checked_bag = checked_bag
+    return out
+
+
+def test_ranking_prefers_a_bag_inclusive_fare_over_a_cheaper_bagless_one():
+    # 23,000 with a bag beats 22,000 where one leg's bag costs ~1,500 extra.
+    # Ranking on the headline fare alone systematically flatters low-cost
+    # carriers, which is exactly the leg the cheapest itinerary rides on.
+    a1 = date(2027, 1, 5)
+    b1 = date(2027, 1, 15)
+    c1 = date(2027, 1, 25)
+    bagged = [
+        _bag_leg("PRG", "NRT", a1, 10000, True),
+        _bag_leg("NRT", "MNL", b1, 4000, True),
+        _bag_leg("MNL", "PRG", c1, 9000, True),
+    ]
+    bagless = [
+        _bag_leg("VIE", "KIX", a1, 10000, True),
+        _bag_leg("KIX", "MNL", b1, 3000, None),  # bag not confirmed
+        _bag_leg("MNL", "VIE", c1, 9000, True),
+    ]
+    out = combine(bagged + bagless, scenario(bag_estimate_czk=1500))
+    assert out[0].total_price == 23000
+    assert out[0].legs[0].origin == "PRG"
+
+
+def test_total_with_bags_only_charges_unconfirmed_legs():
+    it = combine(
+        [
+            _bag_leg("PRG", "NRT", date(2027, 1, 5), 10000, True),
+            _bag_leg("NRT", "MNL", date(2027, 1, 15), 4000, None),
+            _bag_leg("MNL", "PRG", date(2027, 1, 25), 9000, True),
+        ],
+        scenario(),
+    )[0]
+    assert it.total_price == 23000
+    assert it.total_with_bags(1500) == 24500

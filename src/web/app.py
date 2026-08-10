@@ -192,13 +192,15 @@ def sweep_results(scenario_id: str, stamp: str, mode: str = "all") -> dict:
     elif mode == "open":
         itineraries = [i for i in itineraries if not i.same_airport]
 
+    bag = scenario.bag_estimate_czk
     return {
         "scenario_id": scenario_id,
         "stamp": stamp,
         "legs_found": len(legs),
-        "best_same_airport": same.to_dict() if same else None,
-        "best_open_jaw": jaw.to_dict() if jaw else None,
-        "itineraries": [i.to_dict() for i in itineraries],
+        "bag_estimate": bag,
+        "best_same_airport": same.to_dict(bag) if same else None,
+        "best_open_jaw": jaw.to_dict(bag) if jaw else None,
+        "itineraries": [i.to_dict(bag) for i in itineraries],
     }
 
 

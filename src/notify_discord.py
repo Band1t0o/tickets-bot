@@ -117,7 +117,11 @@ def build_price_embed(
 
 
 def build_health_alert(
-    scenario_name: str, legs_found: int, errors: int, total: int
+    scenario_name: str,
+    legs_found: int,
+    errors: int,
+    total: int,
+    dark_routes: list[str] | None = None,
 ) -> dict | None:
     """A red embed when the sweep looks broken, otherwise None."""
     if total == 0:
@@ -126,6 +130,13 @@ def build_health_alert(
         reason = f"all {total} searches completed but returned no flights"
     elif errors > total / 2:
         reason = f"{errors} of {total} searches failed"
+    elif dark_routes:
+        # A route searched on every date in the window without ever returning an
+        # offer is breakage. This went unnoticed once: MNL->VIE was dark for a
+        # whole sweep, and it was the return leg of the cheapest real itinerary.
+        listed = ", ".join(dark_routes[:6])
+        more = f" (+{len(dark_routes) - 6} more)" if len(dark_routes) > 6 else ""
+        reason = f"{len(dark_routes)} route(s) returned nothing on every date: {listed}{more}"
     else:
         return None
 
@@ -167,7 +178,11 @@ def notify_sweep(scenario, result, webhook_url: str | None = None) -> bool:
         return False
 
     health = build_health_alert(
-        scenario.name, len(result.legs), len(result.errors), result.total
+        scenario.name,
+        len(result.legs),
+        len(result.errors),
+        result.total,
+        getattr(result, "routes_with_no_results", None),
     )
     if health is not None:
         return post(webhook_url, [health])

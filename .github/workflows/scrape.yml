@@ -67,7 +67,11 @@ jobs:
           INPUT_DEPTH: ${{ inputs.depth }}
         run: |
           set -euo pipefail
-          DEPTH="${INPUT_DEPTH:-deep}"
+          # Standard, not deep. At 2 workers a deep sweep is ~97 min, which
+          # exceeds both this job's timeout and the 2,000-minute monthly tier.
+          # A standard sweep that mostly succeeds is worth more than a deep one
+          # where most searches time out.
+          DEPTH="${INPUT_DEPTH:-standard}"
 
           if [ -n "${INPUT_SCENARIO:-}" ]; then
             python -m src.cli sweep --scenario "$INPUT_SCENARIO" --depth "$DEPTH"

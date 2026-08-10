@@ -22,8 +22,23 @@ from .base import BaseProvider
 from .pelikan_url import build_search_url
 
 CARD_SELECTOR = "div[id^='flight-']"
-RESULT_TIMEOUT_S = 75
+# 75s was enough for a fast local search (~14s) but not under sweep conditions.
+RESULT_TIMEOUT_S = 120
 POLL_INTERVAL_S = 5
+
+# The site's own wording when a route genuinely has no inventory, verified live
+# against BRQ->NRT: "Hups! Nenašli jsme žádny let, zkuste vyhledat ješte jednou".
+# (Their copy mixes Czech and Slovak; match only the stable prefix.)
+NO_RESULTS_MARKER = "Nenašli jsme žádn"
+
+
+class SearchTimeout(RuntimeError):
+    """Results never rendered - the search failed, it did not come back empty.
+
+    Returning [] here instead of raising is how three whole return routes
+    (MNL->VIE, CEB->PRG, CEB->FRA) disappeared from a sweep that still reported
+    error_count: 0. An empty route and a broken search must never look alike.
+    """
 
 # Stop counts are conveyed by an icon alt attribute as well as Czech text.
 _STOP_ALT = {"direct": 0, "non-stop": 0, "one-stop": 1, "two-stops": 2, "three-stops": 3}
@@ -138,9 +153,36 @@ def parse_results_html(html: str, origin: str, destination: str) -> list[Leg]:
                 price_currency=currency,
                 price_amount=price,
                 url="",
+                checked_bag=_checked_bag_from_card(card),
             )
         )
     return _dedupe(legs)
+
+
+def _checked_bag_from_card(card) -> bool | None:
+    """Whether a checked bag is included, from the card's baggage row.
+
+    The icon filename is the reliable signal - `checked-baggage-include.svg` vs
+    `checked-baggage-exclude.svg`. The adjacent text is "Ano"/"Ne" when known and
+    "Pro více info o zavazadlech klikněte na POKRAČOVAT" when the site will only
+    say after a click, which is the usual case for low-cost carriers. Unknown
+    stays None: recording it as included would flatter exactly the fares whose
+    real price is a bag fee higher.
+    """
+    icon = card.select_one("img.baggage-img")
+    src = (icon.get("src") or icon.get("ng-src") or "") if icon else ""
+    if "checked-baggage-include" in src:
+        return True
+    if "checked-baggage-exclude" in src:
+        return False
+
+    label = card.select_one(".fly-item-bottom-baggage-new-reservation")
+    text = label.get_text(strip=True).casefold() if label else ""
+    if text == "ano":
+        return True
+    if text == "ne":
+        return False
+    return None
 
 
 def _dedupe(legs: list[Leg]) -> list[Leg]:
@@ -182,12 +224,20 @@ class PelikanProvider(BaseProvider):
         url = build_search_url(origin, destination, depart, ret, adults)
         page.goto(url, wait_until="domcontentloaded", timeout=45000)
 
+        # Race the offer cards against the site's explicit "no flights" message.
+        # Whichever appears first is the answer; if neither does, the search
+        # failed and must say so rather than masquerading as an empty route.
         for _ in range(0, RESULT_TIMEOUT_S, POLL_INTERVAL_S):
             time.sleep(POLL_INTERVAL_S)
             if page.locator(CARD_SELECTOR).count():
                 break
+            if NO_RESULTS_MARKER in page.inner_text("body"):
+                return []
         else:
-            return []
+            raise SearchTimeout(
+                f"{origin}->{destination} {depart}: no results and no "
+                f"'no flights' message within {RESULT_TIMEOUT_S}s"
+            )
 
         # Let the last few cards settle before snapshotting the DOM.
         time.sleep(2)

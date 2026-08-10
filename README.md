@@ -48,13 +48,21 @@ reused across every itinerary built from it.
 Stay lengths are computed from the dates **on the returned flights**, never the requested ones —
 pelikan.cz substitutes nearby dates, so asking for 22 January can return the 23rd.
 
+### Baggage and ranking
+
+Itineraries are ranked on the **bag-inclusive** total, not the headline fare. A leg that does not
+confirm an included checked bag is charged `bag_estimate_czk` (default 1,500) for ranking purposes.
+Without this, a low-cost carrier's bagless fare is compared directly against a legacy carrier's
+bag-inclusive one — which systematically flatters exactly the cheap leg the total depends on. The
+estimate is always shown as an estimate; the site only quotes the real fee after "POKRAČOVAT".
+
 ### Depth
 
-| Depth | Date step | Searches | Time |
+| Depth | Date step | Searches | Time (2 workers) |
 |---|---|---:|---:|
-| `quick` | every 7 days | 87 | ~6 min |
-| `standard` | every 3 days | 204 | ~14 min |
-| `deep` | every day | 597 | ~42 min |
+| `quick` | every 7 days | 93 | ~15 min |
+| `standard` | every 3 days | 210 | ~33 min |
+| `deep` | every day | 615 | ~97 min |
 
 ---
 
@@ -90,13 +98,48 @@ search from ~150 s to **~14 s**, and is what makes a full 3-leg sweep possible a
 /cs/letenky/T:{type},P:{adults}000E_0_0,CDF:{FROM}{FROM},CDT:A{TO},DD:{y}_{m}_{d}[,DR:{y}_{m}_{d}]/
 ```
 
-- `T:1` round trip (needs `DR`), `T:2` one-way. `T:0` and `R:0` return nothing — never generate them.
+- `T:1` round trip (needs `DR`), `T:2` one-way. `T:0`, `T:3` and `R:0` return nothing — never
+  generate them.
 - Dates are bare integers: `2027_2_3`, never `2027_02_03`.
 - `CDF` repeats the origin code; `CDT` prefixes the destination with `A`. The asymmetry is the site's.
+- **`CDF` and `CDT` are index-paired lists, not an open-jaw pair.** `CDF:PRGVIE,CDT:ANRT` searches
+  PRG↔NRT; `CDF:PRGVIE,CDT:ANRTAMNL` searches VIE↔MNL. Each index is its own round trip, so this
+  cannot express "out from Prague, back to Vienna" — do not try to build an open jaw this way.
 - Prices are **per person**. The site's label switches from "Celková cena pro všechny osoby" at
   1 passenger to "Průměrná cena na osobu" at 2 — same number either way for one traveller.
 - Flight numbers are **not** in the DOM (they sit behind a collapsed "Detaily letů" panel), so legs
   are identified by carrier + times + duration + stops.
+- Checked baggage **is** in the DOM, per offer: `img.baggage-img` resolves to
+  `checked-baggage-include.svg` or `-exclude.svg`, with `Odbavené zavazadlo: Ano/Ne` beside it.
+  Low-cost carriers show "Pro více info o zavazadlech klikněte na POKRAČOVAT" instead, which is
+  recorded as **unknown** (`None`) — never as included.
+
+### What pelikan cannot do
+
+Its search panel offers exactly three modes: **ZPÁTEČNÍ** (round trip), **JEDNOSMĚRNÁ** (one-way)
+and **NÁVRAT Z JINÉHO MĚSTA** (open jaw — return to a different city). There is **no 3-leg
+multi-city search**, so a Europe→Japan→Philippines→Europe trip cannot be priced as one ticket
+here. Metasearch sites (Skyscanner and friends) do offer it, and a hand-built quote for this trip
+came in below the sum of three pelikan one-ways — 27,971 vs 29,813 Kč on identical dates. Part of
+that gap is through-fare pricing and part is simply that a metasearch aggregates more sellers than
+one OTA; the measurement does not separate the two.
+
+The open jaw is reachable only by driving the form: the deep link is **last-pair-wins**, so
+`CDF:PRGVIE,CDT:ANRTAMNL` searches VIE↔MNL and `CDF:PRGMNL,CDT:ANRTAVIE` searches MNL↔VIE — always
+a round trip, never an open jaw.
+
+### Through-fares are real but not universal — do not assume either way
+
+Measured on pelikan, same dates, one adult:
+
+| Journey | Through-fare | Two one-ways | Winner |
+|---|---:|---:|---|
+| PRG↔NRT, 6 Jan / 28 Jan | 19,961 | 29,938 | **round trip, −33%** |
+| FRA↔NRT + NRT↔MNL, 23 Jan / 10 Feb | 28,276 | **23,009** | **one-ways, −19%** |
+
+So "always buy a through-fare" is as wrong as "always sum one-ways". A round trip is worth adding
+as an **extra candidate** to compare against the leg chain, never as a replacement for it — which
+is why the sweep still searches legs and ranks the chain.
 
 ---
 
@@ -106,17 +149,37 @@ The repo is **private**, so GitHub Actions gives 2,000 free minutes a month.
 
 | Job | Schedule | Cost |
 |---|---|---:|
-| Deep sweep ([scrape.yml](.github/workflows/scrape.yml)) | daily 02:00 UTC | ~1,330 min/mo |
+| Standard sweep ([scrape.yml](.github/workflows/scrape.yml)) | daily 02:00 UTC | ~1,000 min/mo |
 | Volatility probe ([probe.yml](.github/workflows/probe.yml)) | every 2 h, **7 days only** | ~168 min once |
 
-That is ~75% of the tier, leaving room for manual runs. Prefer **Run locally** in the UI for
+That is ~50% of the tier, leaving room for manual runs. Prefer **Run locally** in the UI for
 exploring; a cloud run spends real budget.
+
+Scheduled runs use **standard** depth, not deep. At 2 workers a deep sweep is ~97 min, over both
+the job timeout and the monthly tier — and a standard sweep that mostly succeeds beats a deep one
+where most searches time out.
+
+| Depth | Searches | Estimate (2 workers) |
+|---|---:|---:|
+| `quick` | 93 | ~15 min |
+| `standard` | 210 | ~33 min |
+| `deep` | 615 | ~97 min (manual only) |
+
+### Concurrency is deliberately low
+
+2 workers and a 4 s delay, down from 4 and 1.5 s. The first sweep that could report failures showed
+**58 of 93 searches timing out**, and the same rate was there before and invisible: the previous
+"0 errors" sweep averaged 2.9 legs per search where a healthy one returns ~10. Whether the cause is
+concurrency or IP-level throttling is unresolved — after a day of probing, sequential single
+searches from one machine went from ~14 s to over 6 minutes, which looks like client throttling
+rather than load. Both readings argue for going gentler, so these settings are below measured need.
+**Validate them from the scheduled run's `error_count`, not by hammering the site.**
 
 Making the repo public would give unlimited minutes on standard runners. The reason not to is
 privacy, not cost: scenario files record which airports you leave from and exactly when you are
 abroad.
 
-**Two failure modes worth knowing about, both now guarded:**
+**Three failure modes worth knowing about, all now guarded:**
 
 1. The previous workflow died in December 2025 and went unnoticed for **8 months**, because a
    broken scraper and a quiet day look identical. A sweep that finds nothing now posts a red
@@ -124,6 +187,12 @@ abroad.
 2. A blanket `data/` rule in `.gitignore` silently discarded every result — `git add` matched only
    ignored paths and `|| true` swallowed the error. Results are now committed, and `git add` no
    longer hides failures.
+3. A search whose results never rendered returned `[]`, which the runner recorded as a *successful*
+   empty route. On the 2026-08-06 sweep this lost `MNL→VIE`, `CEB→PRG` and `CEB→FRA` entirely while
+   `status.json` reported `error_count: 0` — and `MNL→VIE` was the return leg of the cheapest real
+   itinerary. `search_leg` now races the offer cards against the site's own "Nenašli jsme žádn"
+   message and raises `SearchTimeout` if neither appears; `status.json` lists
+   `routes_with_no_results`, and a dark route triggers the health alert.
 
 Secrets do **not** transfer between repositories. Only one is needed:
 
