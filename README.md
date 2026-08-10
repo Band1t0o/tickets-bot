@@ -1,7 +1,7 @@
 # Flight scenario watcher
 
-Finds the cheapest way to fly a **multi-leg trip** — Europe → Japan → Philippines → Europe —
-and watches the price until you book.
+Finds the cheapest way to fly a **multi-leg trip** — anywhere to anywhere, via as many stops as you
+like — and watches the price until you book.
 
 - **Scenarios** are committed JSON files: which airports, which date window, how long to stay where
 - **GitHub Actions does the searching** on a schedule and commits results back, so it works whether or not your machine is on
@@ -16,16 +16,16 @@ and watches the price until you book.
 ## Quick start
 
 ```bash
-make install     # creates a Python 3.12 venv and installs deps
+make install     # creates a venv and installs deps
 make pw-install  # installs the Chromium Playwright needs
 make ui          # http://localhost:8000
 ```
 
-Python **3.12+** is required — `str | None` annotations are evaluated at runtime by pydantic and
-will crash on 3.9 (which is what macOS ships).
+Python **3.10+** is required — models use `str | None`, which pydantic evaluates at runtime and 3.9
+cannot parse. CI pins 3.12.
 
 ```bash
-make test                                                  # run the suite
+make test
 python -m src.cli sweep --scenario japan-philippines --dry-run   # cost, no browser
 python -m src.cli sweep --scenario japan-philippines --depth quick
 ```
@@ -34,31 +34,56 @@ python -m src.cli sweep --scenario japan-philippines --depth quick
 
 ## How a trip is modelled
 
-The three legs are searched **independently** and then chained, rather than searching whole
-itineraries. That keeps cost additive rather than multiplicative — each leg is searched once and
-reused across every itinerary built from it.
+A trip is an **ordered chain of stops**. Nothing in the schema names a country:
+
+```json
+{
+  "origins": ["PRG", "VIE", "FRA"],
+  "stops": [
+    { "label": "Japan",       "airports": ["NRT", "HND", "KIX"], "stay_days": [8, 13] },
+    { "label": "Philippines", "airports": ["MNL", "CEB"],        "stay_days": [8, 13] }
+  ],
+  "window_start": "2027-01-05",
+  "window_end": "2027-02-08"
+}
+```
+
+One stop is a round trip. Two are the trip above. A fourth country costs nothing but search time.
+`return_to` flies you home somewhere other than where you left; `one_way` drops the leg home
+entirely.
+
+Legs are searched **independently** and then chained, rather than searching whole itineraries. That
+keeps cost additive rather than multiplicative — each leg is searched once and reused across every
+itinerary built from it. A three-leg trip is ~200 searches this way and tens of thousands the other.
 
 | Stage | What it does | Where |
 |---|---|---|
 | Planner | Scenario → list of one-way searches | [src/sweep/planner.py](src/sweep/planner.py) |
-| Runner | Runs them across 4 browsers, writes `legs.jsonl` | [src/sweep/runner.py](src/sweep/runner.py) |
+| Runner | Runs them across 2 browsers, writes `legs.jsonl` | [src/sweep/runner.py](src/sweep/runner.py) |
 | Combiner | Chains legs into valid itineraries | [src/combine.py](src/combine.py) |
 | Notifier | Posts to Discord when the best total improves | [src/notify_discord.py](src/notify_discord.py) |
+
+Both halves walk `scenario.airport_pools`, so they cannot disagree about the shape of a trip. They
+used to: the planner's round-trip branch emitted outbound searches only, while the combiner branch
+required a leg departing the destination, so **a round-trip scenario could never produce a single
+itinerary**. No test connected the two, which is why it went unnoticed. One now does.
 
 Stay lengths are computed from the dates **on the returned flights**, never the requested ones —
 pelikan.cz substitutes nearby dates, so asking for 22 January can return the 23rd.
 
-### Baggage and ranking
+### Ranking
 
-Itineraries are ranked on the **bag-inclusive** total, not the headline fare. A leg that does not
-confirm an included checked bag is charged `bag_estimate_czk` (default 1,500) for ranking purposes.
-Without this, a low-cost carrier's bagless fare is compared directly against a legacy carrier's
-bag-inclusive one — which systematically flatters exactly the cheap leg the total depends on. The
-estimate is always shown as an estimate; the site only quotes the real fee after "POKRAČOVAT".
+Itineraries are ranked on the **bag-inclusive** total. The cheapest headline fare is usually a
+low-cost carrier whose checked bag costs extra, and comparing that against a bag-inclusive fare is
+not like-for-like. The headline fare stays visible next to it. Where the site will not say until you
+click through, the bag is assumed *not* included — assuming otherwise flatters exactly the fares
+whose real price is a bag fee higher.
 
 ### Depth
 
-| Depth | Date step | Searches | Time (2 workers) |
+Counts are for the `japan-philippines` scenario; they scale with airports × dates.
+
+| Depth | Date step | Searches | Time |
 |---|---|---:|---:|
 | `quick` | every 7 days | 93 | ~15 min |
 | `standard` | every 3 days | 210 | ~33 min |
@@ -68,78 +93,71 @@ estimate is always shown as an estimate; the site only quotes the real fee after
 
 ## Airports
 
-Every airport below was checked live against pelikan.cz on a sample January 2027 date
-(one-way to NRT, and one-way back from MNL, 1 adult, CZK). Failures are kept in the list rather
-than deleted so nobody re-litigates them later.
+Any airport with scheduled service — 4,161 of them, filtered from the
+[OurAirports](https://ourairports.com/data/) public-domain dataset into `data/airports.json` by
+[scripts/build_airports.py](scripts/build_airports.py). The output is committed, so runtime never
+touches the network and there is no key or quota to acquire. The UI searches it by code, city or
+name.
 
-| Airport | →NRT | MNL→ | Combined | Status |
-|---|---:|---:|---:|---|
-| **VIE** Vienna | 15,057 | 8,567 | **23,624** | on by default |
-| **FRA** Frankfurt | 13,546 | 13,608 | **27,154** | on by default — 45% under Prague on a live run |
-| **PRG** Prague | 14,480 | 16,255 | **30,735** | on by default |
-| BER Berlin | 14,785 | 16,269 | 31,054 | available, off |
-| MUC Munich | 16,963 | 14,832 | 31,795 | available, off |
-| KRK Krakow | 16,723 | 17,105 | 33,828 | available, off |
-| KTW Katowice | 16,860 | 21,313 | 38,173 | available, off |
-| BTS Bratislava | 25,706 | — | — | **unavailable** — no return inventory |
-| BRQ Brno | — | — | — | **unavailable** — no long-haul inventory at all |
+**Whether an airport is worth using is derived from your own sweeps**, not hand-written:
+[src/viability.py](src/viability.py) reads sweep history and flags routes that were searched
+repeatedly and never returned a single offer. That is breakage or genuinely absent inventory, and
+either way it belongs on the airport in the picker.
 
-The Japan→Philippines leg is cheap and well served: NRT→MNL from 3,863 Kč, HND→MNL 4,261,
-KIX→CEB 4,669.
+Findings that no sweep can reproduce — airports checked by hand and then never swept, because
+nothing sweeps an airport it cannot use — live in `data/airport_notes.json`:
+
+| Airport | Finding |
+|---|---|
+| **VIE** Vienna | 23,624 combined — cheapest measured |
+| **FRA** Frankfurt | 27,154 combined — 45% under Prague on a live run |
+| **PRG** Prague | 30,735 combined — home base |
+| BER / MUC / KRK / KTW | 31,054 / 31,795 / 33,828 / 38,173 combined |
+| BTS Bratislava | **no return inventory**, and 78% over Prague outbound |
+| BRQ Brno | **no long-haul inventory in either direction** |
+
+("Combined" is the cheapest one-way to NRT plus the cheapest one-way back from MNL, 1 adult, CZK,
+measured on a sample January 2027 date.)
 
 ---
 
 ## The deep-link URL grammar
 
 Searches navigate straight to a constructed URL instead of driving the search form. This took a
-search from ~150 s to **~14 s**, and is what makes a full 3-leg sweep possible at all.
+search from ~150 s to **~14 s**, and is what makes a multi-leg sweep possible at all.
 
 ```
 /cs/letenky/T:{type},P:{adults}000E_0_0,CDF:{FROM}{FROM},CDT:A{TO},DD:{y}_{m}_{d}[,DR:{y}_{m}_{d}]/
 ```
 
-- `T:1` round trip (needs `DR`), `T:2` one-way. `T:0`, `T:3` and `R:0` return nothing — never
-  generate them.
+- `T:1` round trip (needs `DR`), `T:2` one-way. `T:0` and `R:0` return nothing — never generate them.
 - Dates are bare integers: `2027_2_3`, never `2027_02_03`.
 - `CDF` repeats the origin code; `CDT` prefixes the destination with `A`. The asymmetry is the site's.
-- **`CDF` and `CDT` are index-paired lists, not an open-jaw pair.** `CDF:PRGVIE,CDT:ANRT` searches
-  PRG↔NRT; `CDF:PRGVIE,CDT:ANRTAMNL` searches VIE↔MNL. Each index is its own round trip, so this
-  cannot express "out from Prague, back to Vienna" — do not try to build an open jaw this way.
 - Prices are **per person**. The site's label switches from "Celková cena pro všechny osoby" at
   1 passenger to "Průměrná cena na osobu" at 2 — same number either way for one traveller.
 - Flight numbers are **not** in the DOM (they sit behind a collapsed "Detaily letů" panel), so legs
   are identified by carrier + times + duration + stops.
-- Checked baggage **is** in the DOM, per offer: `img.baggage-img` resolves to
-  `checked-baggage-include.svg` or `-exclude.svg`, with `Odbavené zavazadlo: Ano/Ne` beside it.
-  Low-cost carriers show "Pro více info o zavazadlech klikněte na POKRAČOVAT" instead, which is
-  recorded as **unknown** (`None`) — never as included.
+- The deep link **cannot express an open jaw**: `CDF`/`CDT` are last-pair-wins and always build a
+  round trip, and `T:3` returns nothing. Open jaws come from chaining one-ways, not from the URL.
 
-### What pelikan cannot do
+### Sources
 
-Its search panel offers exactly three modes: **ZPÁTEČNÍ** (round trip), **JEDNOSMĚRNÁ** (one-way)
-and **NÁVRAT Z JINÉHO MĚSTA** (open jaw — return to a different city). There is **no 3-leg
-multi-city search**, so a Europe→Japan→Philippines→Europe trip cannot be priced as one ticket
-here. Metasearch sites (Skyscanner and friends) do offer it, and a hand-built quote for this trip
-came in below the sum of three pelikan one-ways — 27,971 vs 29,813 Kč on identical dates. Part of
-that gap is through-fare pricing and part is simply that a metasearch aggregates more sellers than
-one OTA; the measurement does not separate the two.
+**pelikan.cz** is the only sweep source. **letuska.cz** was spiked and rejected for sweeping: it has
+no deep-link grammar — `/letenky/PRG/NRT/<date>`, `?from=&to=&date=` and a hash route all 404 — and
+its search is an Angular form whose results render in place, reached through a cookie banner,
+autocomplete typing and a Czech-month calendar behind two nested shadow roots. It survives as a
+second opinion on a single fare:
 
-The open jaw is reachable only by driving the form: the deep link is **last-pair-wins**, so
-`CDF:PRGVIE,CDT:ANRTAMNL` searches VIE↔MNL and `CDF:PRGMNL,CDT:ANRTAVIE` searches MNL↔VIE — always
-a round trip, never an open jaw.
+```bash
+python -m src.cli check-price --from PRG --to NRT --depart 2027-01-12 --return 2027-01-30
+```
 
-### Through-fares are real but not universal — do not assume either way
+Through-fares are real but not universal, which is why the leg chain stays: PRG↔NRT on 6/28 Jan is
+33% cheaper as a round trip than as two one-ways, while FRA↔NRT + NRT↔MNL on 23 Jan/10 Feb is 19%
+cheaper as one-ways. Re-pricing everything as through-fares would have made results worse.
 
-Measured on pelikan, same dates, one adult:
-
-| Journey | Through-fare | Two one-ways | Winner |
-|---|---:|---:|---|
-| PRG↔NRT, 6 Jan / 28 Jan | 19,961 | 29,938 | **round trip, −33%** |
-| FRA↔NRT + NRT↔MNL, 23 Jan / 10 Feb | 28,276 | **23,009** | **one-ways, −19%** |
-
-So "always buy a through-fare" is as wrong as "always sum one-ways". A round trip is worth adding
-as an **extra candidate** to compare against the leg chain, never as a replacement for it — which
-is why the sweep still searches legs and ranks the chain.
+Prices are CZK because every source is a Czech OTA. Origins can be anywhere; *pricing* stays
+CZ-market until a non-CZ provider exists.
 
 ---
 
@@ -149,52 +167,31 @@ The repo is **private**, so GitHub Actions gives 2,000 free minutes a month.
 
 | Job | Schedule | Cost |
 |---|---|---:|
-| Standard sweep ([scrape.yml](.github/workflows/scrape.yml)) | daily 02:00 UTC | ~1,000 min/mo |
-| Volatility probe ([probe.yml](.github/workflows/probe.yml)) | every 2 h, **7 days only** | ~168 min once |
+| Sweep ([scrape.yml](.github/workflows/scrape.yml)) | daily 02:00 UTC, `standard` | ~1,000 min/mo |
+| Volatility probe ([probe.yml](.github/workflows/probe.yml)) | every 2 h, **temporary** | ~720 min/mo if left on |
+| Tests ([test.yml](.github/workflows/test.yml)) | every push | ~1 min |
 
-That is ~50% of the tier, leaving room for manual runs. Prefer **Run locally** in the UI for
-exploring; a cloud run spends real budget.
+Scheduled runs sweep at `standard`, not `deep`: at 2 workers a deep sweep is ~97 min, past both the
+90-minute job timeout and the monthly tier. A standard sweep that mostly succeeds is worth more than
+a deep one that does not.
 
-Scheduled runs use **standard** depth, not deep. At 2 workers a deep sweep is ~97 min, over both
-the job timeout and the monthly tier — and a standard sweep that mostly succeeds beats a deep one
-where most searches time out.
+**Failure modes worth knowing about, all now guarded:**
 
-| Depth | Searches | Estimate (2 workers) |
-|---|---:|---:|
-| `quick` | 93 | ~15 min |
-| `standard` | 210 | ~33 min |
-| `deep` | 615 | ~97 min (manual only) |
-
-### Concurrency is deliberately low
-
-2 workers and a 4 s delay, down from 4 and 1.5 s. The first sweep that could report failures showed
-**58 of 93 searches timing out**, and the same rate was there before and invisible: the previous
-"0 errors" sweep averaged 2.9 legs per search where a healthy one returns ~10. Whether the cause is
-concurrency or IP-level throttling is unresolved — after a day of probing, sequential single
-searches from one machine went from ~14 s to over 6 minutes, which looks like client throttling
-rather than load. Both readings argue for going gentler, so these settings are below measured need.
-**Validate them from the scheduled run's `error_count`, not by hammering the site.**
-
-Making the repo public would give unlimited minutes on standard runners. The reason not to is
-privacy, not cost: scenario files record which airports you leave from and exactly when you are
-abroad.
-
-**Three failure modes worth knowing about, all now guarded:**
-
-1. The previous workflow died in December 2025 and went unnoticed for **8 months**, because a
-   broken scraper and a quiet day look identical. A sweep that finds nothing now posts a red
-   health alert to Discord.
+1. The workflow died in December 2025 and went unnoticed for **8 months**, because a broken scraper
+   and a quiet day look identical. A sweep that finds nothing now posts a red health alert.
 2. A blanket `data/` rule in `.gitignore` silently discarded every result — `git add` matched only
-   ignored paths and `|| true` swallowed the error. Results are now committed, and `git add` no
-   longer hides failures.
-3. A search whose results never rendered returned `[]`, which the runner recorded as a *successful*
-   empty route. On the 2026-08-06 sweep this lost `MNL→VIE`, `CEB→PRG` and `CEB→FRA` entirely while
-   `status.json` reported `error_count: 0` — and `MNL→VIE` was the return leg of the cheapest real
-   itinerary. `search_leg` now races the offer cards against the site's own "Nenašli jsme žádn"
-   message and raises `SearchTimeout` if neither appears; `status.json` lists
-   `routes_with_no_results`, and a dark route triggers the health alert.
+   ignored paths and `|| true` swallowed the error.
+3. **A timed-out search returned `[]` and was booked as a success.** The first sweep that could
+   report failures reported 58 of 93 searches timing out — and that rate was not new: the previous
+   "error_count: 0" sweep averaged 2.9 legs per search where a healthy one returns ~10. Roughly 70%
+   had been failing invisibly. A timeout now raises, and is distinguished from the site's own "no
+   flights" message.
+4. The sweep pushed without rebasing while the probe pushed to the same branch on an overlapping
+   schedule, so a rejected push threw away ~40 minutes of spent budget.
 
-Secrets do **not** transfer between repositories. Only one is needed:
+**Legs per search is the honest health metric.** ~10 is healthy; 2.9 was 70% silent failure.
+
+Secrets do not transfer between repositories. Only one is needed:
 
 ```bash
 gh secret set DISCORD_WEBHOOK_URL -R Band1t0o/tickets-bot
@@ -212,8 +209,8 @@ python -m src.cli probe          # one sample of all three routes
 python -m src.cli probe-report   # how much prices actually moved
 ```
 
-**It is temporary.** After about a week, read the report and turn it off — left running it costs
-~720 min/month and will break the budget:
+**It is temporary.** Read the report and turn it off — left running it costs ~720 min/month and will
+break the budget:
 
 ```bash
 gh workflow disable probe.yml -R Band1t0o/tickets-bot
@@ -226,15 +223,16 @@ chasing. Frequent moves above ~5% argue for sweeping more often.
 
 ## The UI
 
-Three tabs: **Search** (scenario definition, airport picker, cost estimate before you commit),
-**Results** (cheapest same-airport and cheapest open-jaw side by side, then every itinerary,
-expandable into legs), **Prices** (cheapest total by departure date — *when* to fly; best total
-over time — *whether to book now*; and the probe table).
+Three tabs: **Search** (stops you can add, remove, reorder and label, each with a typeahead airport
+picker and a stay range; cost estimate before you commit), **Results** (cheapest same-airport and
+cheapest open-jaw side by side, then every itinerary, expandable into legs), **Prices** (cheapest
+total by departure date — *when* to fly; best total over time — *whether to book now*; and the probe
+table).
 
-The design system is **ported from the Finance-planner project**
-(`src/styles/palette.css` and `theme.css` copied verbatim). It is a copy, not a shared dependency,
-so the two will drift — style fixes worth keeping should be made in both. Charts are hand-rolled
-inline SVG in [chart.js](src/web/static/chart.js); there is deliberately no Node toolchain here.
+The design system is **ported from the Finance-planner project** (`src/styles/palette.css` and
+`theme.css` copied verbatim). It is a copy, not a shared dependency, so the two will drift. Charts
+are hand-rolled inline SVG in [chart.js](src/web/static/chart.js); there is deliberately no Node
+toolchain here.
 
 ---
 
@@ -242,8 +240,11 @@ inline SVG in [chart.js](src/web/static/chart.js); there is deliberately no Node
 
 ```
 scenarios/*.json          saved searches (committed)
+scripts/build_airports.py regenerates data/airports.json from OurAirports
 src/
-  scenario.py             schema, validation, load/save
+  scenario.py             schema, validation, load/save, migration
+  airports.py             catalogue lookup and search
+  viability.py            what sweep history says about a route or airport
   sweep/planner.py        scenario -> searches
   sweep/runner.py         concurrent execution
   combine.py              legs -> itineraries
@@ -251,12 +252,15 @@ src/
   notify_discord.py       price + health alerts
   providers/
     pelikan_url.py        deep-link builder
-    pelikan.py            search + parser
-    letuska.py            second source, legacy interface
+    pelikan.py            search + parser (the only sweep source)
+    letuska.py            on-demand second opinion, not sweepable
   web/app.py              JSON API, serves the UI
   web/static/             the UI
+data/airports.json        4,161 airports with scheduled service
+data/airport_notes.json   hand-measured findings no sweep can reproduce
 data/sweeps/<id>/<ts>/    legs.jsonl, status.json, best.json
 data/probe/               observations.jsonl
+docs/superpowers/specs/   design documents
 ```
 
 ---
@@ -264,5 +268,6 @@ data/probe/               observations.jsonl
 ## Legal
 
 Respect each site's terms and robots.txt. Verified: pelikan.cz disallows only `/gf3/` and
-`/services/`; letuska.cz disallows `/searchform`, `/api/` and `/assets/`. Nothing used here is
-disallowed. Keep request rates low.
+`/services/`; letuska.cz disallows `/searchform`, `/assets/` and `/api/`. Nothing used here is
+disallowed — searches run on public pages and results render into them. Keep request rates low; the
+sweep runs 2 workers with a 4-second delay deliberately, which is gentler than measured need.

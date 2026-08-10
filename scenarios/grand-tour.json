@@ -1,0 +1,53 @@
+{
+  "id": "grand-tour",
+  "name": "Europe → Japan → Philippines → Thailand → Europe",
+  "origins": [
+    "PRG",
+    "VIE"
+  ],
+  "stops": [
+    {
+      "label": "Japan",
+      "airports": [
+        "NRT",
+        "HND"
+      ],
+      "stay_days": [
+        7,
+        10
+      ]
+    },
+    {
+      "label": "Philippines",
+      "airports": [
+        "MNL",
+        "CEB"
+      ],
+      "stay_days": [
+        7,
+        10
+      ]
+    },
+    {
+      "label": "Thailand",
+      "airports": [
+        "BKK"
+      ],
+      "stay_days": [
+        5,
+        8
+      ]
+    }
+  ],
+  "window_start": "2027-01-05",
+  "window_end": "2027-03-15",
+  "return_to": null,
+  "one_way": false,
+  "adults": 1,
+  "depth": "quick",
+  "currency": "CZK",
+  "alert_threshold": null,
+  "bag_estimate": 1500,
+  "enabled": false,
+  "notes": "Four-leg shape the previous three-block planner could not express at all."
+}
