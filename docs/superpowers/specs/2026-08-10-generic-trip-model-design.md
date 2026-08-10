@@ -121,11 +121,20 @@ bare-except recovery path *overwrites* run history), `scheduler.py`, `Offer`, `s
 
 ## Second source
 
-`letuska.py` implements only the legacy interface and form-drives through nested shadow DOM behind a
-flat 60-second sleep — unusable at sweep volume. A spike decides its fate: if the site has a deep-link
-grammar like pelikan's, it becomes a real second provider selected per scenario; if not, it stays out
-of the sweep as an on-demand check on one chosen itinerary. Pelikan's deep link took a search from
-~150 s to ~14 s and is what makes sweeping possible at all, so that question decides everything.
+**Spiked, and the answer was no.** letuska.cz has no deep-link grammar: `/letenky/PRG/NRT/<date>`,
+`?from=&to=&date=` and a hash route all return 404, and the search is an Angular form whose results
+render in place. Pelikan's deep link took a search from ~150 s to ~14 s and is what makes sweeping
+affordable at all, so letuska stays out of `run_sweep` and becomes `src.cli check-price` — a second
+opinion on one fare, run by hand.
+
+It still had to move off `Offer` for the legacy model to be deletable, and it carried the same
+"failure looks like no flights" bug being fixed elsewhere: four separate handlers all ended in
+`return offers` with an empty list. It now raises `LetuskaSearchFailed`, parses card dates instead of
+storing raw Czech text in a field documented as `YYYY-MM-DD`, and no longer skips filling the origin
+when it happens to be Prague.
+
+robots.txt was checked while there: `/searchform`, `/assets/` and `/api/` are disallowed and none of
+them is touched — the search runs on the public homepage.
 
 ## Verification
 
