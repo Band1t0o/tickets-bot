@@ -53,11 +53,19 @@ class LetuskaProvider:
         ret: date | None = None,
         adults: int = 1,
     ) -> list[Leg]:
-        """Price one route by hand. Raises rather than returning [] on failure."""
+        """Price one route by hand. Raises rather than returning [] on failure.
+
+        `ret=None` searches a genuine **one-way**. It used to fall back to
+        `arrival_date = ret or depart`, which quietly searched a same-day round
+        trip - so a one-way leg priced here came back as a return fare, and a
+        comparison against pelikan's one-way legs read ~2.2x dearer on every
+        single route while reporting that the two sites agreed. A check that
+        confirms the wrong thing is worse than no check.
+        """
         headless = os.getenv("HEADLESS", "true").lower() == "true"
         ua = os.getenv("USER_AGENT", "Mozilla/5.0 (compatible; tickets-bot/1.0)")
         departure_date = depart.isoformat()
-        arrival_date = (ret or depart).isoformat()
+        one_way = ret is None
         offers: list[Leg] = []
 
         try:
@@ -73,12 +81,17 @@ class LetuskaProvider:
                 self._accept_cookies(page)
 
                 try:
+                    # Before the dates: switching trip type re-renders the date
+                    # fields, so a date chosen first is discarded.
+                    if one_way:
+                        self._select_one_way(page)
                     self._fill_origin(page, origin)
                     self._fill_destination(page, destination)
                     self._select_calendar_date(page, departure_date, "departure")
                     time.sleep(0.5)
-                    self._select_calendar_date(page, arrival_date, "return")
-                    time.sleep(0.5)
+                    if not one_way:
+                        self._select_calendar_date(page, ret.isoformat(), "return")
+                        time.sleep(0.5)
                     self._set_adults(page, adults)
                     self._click_search(page)
 
@@ -109,6 +122,19 @@ class LetuskaProvider:
             raise LetuskaSearchFailed(f"could not drive the search form: {exc}") from exc
 
         return offers
+
+    def _select_one_way(self, page: Page):
+        """Switch the form to "Jednosměrná".
+
+        Raises rather than carrying on: silently searching a round trip is how
+        the price comparison came out 2.2x wrong while reporting agreement.
+        """
+        print(f"[{self.NAME}] Switching to a one-way search...")
+        label = page.locator("label", has_text="Jednosměrná").first
+        if not label.count():
+            raise RuntimeError("no 'Jednosměrná' option on the form; cannot search a one-way")
+        label.click()
+        time.sleep(1.0)
 
     def _accept_cookies(self, page: Page):
         try:

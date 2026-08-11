@@ -882,6 +882,45 @@ $('sweep-select').onchange = (event) => {
 
 /* ---------------------------------------------------------------- results */
 
+/* A second opinion on the shortlist, from letuska. Never on all 900 legs — it
+   has no deep link, so a search costs a minute — but the five or six legs the
+   decision rests on are worth a few minutes once, after the sweep. */
+
+const VERDICTS = {
+  agrees: ['good', 'letuska agrees on every leg it could price.'],
+  cheaper_elsewhere: ['warning', 'letuska quotes one of these legs materially cheaper.'],
+  partial: ['muted', 'letuska agreed where it could, but could not price every leg.'],
+  unavailable: ['error', 'letuska could not be reached, so nothing was confirmed.'],
+  nothing_to_check: ['muted', 'nothing to check.'],
+};
+
+function renderVerification(report) {
+  const host = $('verification');
+  if (!report) {
+    // Not checked is not the same as checked and fine, and must not read as it.
+    host.innerHTML =
+      '<span class="muted">Not cross-checked. Run ' +
+      `<code>python -m src.cli verify --scenario ${escapeHtml(state.scenario.id)}</code>` +
+      ' to re-price the shortlist on letuska.</span>';
+    return;
+  }
+  const [tone, text] = VERDICTS[report.verdict] ?? ['muted', report.verdict];
+  const best = report.cheapest_elsewhere;
+  host.innerHTML =
+    `<span class="badge badge--${tone}">${escapeHtml(text)}</span> ` +
+    `<span class="muted">${Number(report.legs_checked)} leg(s) checked · ` +
+    `${escapeHtml(observedAt(report.checked_at))}</span>` +
+    (best
+      ? `<div class="small" style="margin-top:6px">${escapeHtml(best.route)} on ` +
+        `${escapeHtml(best.depart_date)}: ours ${money(best.ours)} · theirs ` +
+        `${money(best.theirs)} — <strong>${Number(best.saving_pct).toFixed(1)}% cheaper</strong> there.</div>`
+      : '') +
+    (report.unpriced?.length
+      ? `<div class="small muted" style="margin-top:6px">Could not be priced there: ` +
+        `${escapeHtml(report.unpriced.join(', '))}.</div>`
+      : '');
+}
+
 async function renderResults() {
   const tbody = $('results-table').querySelector('tbody');
   tbody.innerHTML = '';
@@ -907,6 +946,8 @@ async function renderResults() {
   $('results-empty').textContent = body.legs_found
     ? 'This sweep found flights, but none of them chain into a complete trip.'
     : 'Run a sweep to see itineraries.';
+
+  renderVerification(body.verification);
 
   const same = body.best_same_airport;
   const jaw = body.best_open_jaw;

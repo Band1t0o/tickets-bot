@@ -1,0 +1,38 @@
+{
+  "checked_at": "2026-08-11T11:21:54+00:00",
+  "top": 1,
+  "tolerance_pct": 3.0,
+  "legs_checked": 3,
+  "unpriced": [],
+  "comparisons": [
+    {
+      "route": "FRA->NRT",
+      "depart_date": "2027-01-26",
+      "ours": 9145.0,
+      "theirs": 10608.0,
+      "saving_pct": -16.0
+    },
+    {
+      "route": "MNL->FRA",
+      "depart_date": "2027-02-11",
+      "ours": 8329.0,
+      "theirs": 8080.0,
+      "saving_pct": 3.0
+    },
+    {
+      "route": "NRT->MNL",
+      "depart_date": "2027-02-03",
+      "ours": 3850.0,
+      "theirs": 5543.0,
+      "saving_pct": -44.0
+    }
+  ],
+  "cheapest_elsewhere": {
+    "route": "MNL->FRA",
+    "depart_date": "2027-02-11",
+    "ours": 8329.0,
+    "theirs": 8080.0,
+    "saving_pct": 3.0
+  },
+  "verdict": "cheaper_elsewhere"
+}

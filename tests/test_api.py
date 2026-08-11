@@ -761,3 +761,32 @@ def test_a_redirect_that_keeps_the_search_path_is_not_treated_as_a_failure(clien
         app_module, "_fetch_for_test", lambda source, url: (200, url + ",LOAD/", fixture)
     )
     assert api_test_source(client)["ok"] is True
+
+
+def test_results_report_no_verification_until_one_is_run(client):
+    """Absent must not read as confirmed: the UI says "not cross-checked"."""
+    api, data = client
+    stamp = seed_sweep(data)
+    assert api.get(f"/api/sweeps/jp-ph/{stamp}/results").json()["verification"] is None
+
+
+def test_results_carry_the_verification_report_once_it_exists(client):
+    api, data = client
+    stamp = seed_sweep(data)
+    (data / "sweeps" / "jp-ph" / stamp / "verify.json").write_text(
+        json.dumps({"verdict": "cheaper_elsewhere", "legs_checked": 3,
+                    "cheapest_elsewhere": {"route": "PRG->NRT", "saving_pct": 8.0}}),
+        encoding="utf-8",
+    )
+    body = api.get(f"/api/sweeps/jp-ph/{stamp}/results").json()
+    assert body["verification"]["verdict"] == "cheaper_elsewhere"
+    assert body["verification"]["cheapest_elsewhere"]["saving_pct"] == 8.0
+
+
+def test_a_corrupt_verification_file_does_not_break_the_results(client):
+    api, data = client
+    stamp = seed_sweep(data)
+    (data / "sweeps" / "jp-ph" / stamp / "verify.json").write_text("{not json", encoding="utf-8")
+    body = api.get(f"/api/sweeps/jp-ph/{stamp}/results")
+    assert body.status_code == 200
+    assert body.json()["verification"] is None

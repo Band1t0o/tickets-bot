@@ -127,6 +127,45 @@ def health_gate_command(
     return 0
 
 
+def verify_command(scenario_id: str, stamp: str | None, top: int) -> int:
+    """Re-price a finished sweep's shortlist on letuska and record the result.
+
+    Deliberately a separate command rather than a step inside `sweep`. It takes
+    minutes against a site with no deep link, and a sweep that has already
+    succeeded must not be put at risk by a second site being down.
+    """
+    from .scenario import load_scenario
+    from .sweep.runner import load_legs
+    from .verify import letuska_checker, verify_shortlist
+
+    scenario = load_scenario(Path("scenarios") / f"{scenario_id}.json")
+    root = Path("data") / "sweeps" / scenario_id
+    directories = sorted((p for p in root.iterdir() if p.is_dir()), reverse=True) if root.exists() else []
+    if stamp:
+        directories = [p for p in directories if p.name == stamp]
+    if not directories:
+        print(f"No sweep to verify for {scenario_id!r}")
+        raise SystemExit(2)
+
+    directory = directories[0]
+    print(f"[verify] {directory.name}: re-pricing the top {top} itineraries on letuska")
+    report = verify_shortlist(load_legs(directory), scenario, letuska_checker(scenario.adults), top)
+
+    (directory / "verify.json").write_text(
+        json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    print(f"[verify] {report['verdict']}: {report['legs_checked']} leg(s) checked")
+    for row in report["comparisons"]:
+        print(f"   {row['route']} {row['depart_date']}: ours {row['ours']:,.0f} · "
+              f"theirs {row['theirs']:,.0f} ({row['saving_pct']:+.1f}%)")
+    if report["unpriced"]:
+        print(f"[verify] could not be priced there: {', '.join(report['unpriced'])}")
+    if report["cheapest_elsewhere"]:
+        best = report["cheapest_elsewhere"]
+        print(f"[verify] worth a look: {best['route']} is {best['saving_pct']:.1f}% cheaper there")
+    return report["legs_checked"]
+
+
 def check_price_command(origin: str, destination: str, depart: str, ret: str | None) -> int:
     """Price one route on letuska.cz as a second opinion on a pelikan result."""
     from datetime import date
@@ -181,10 +220,21 @@ def main():
     p_gate.add_argument("--scenario", required=True)
     p_gate.add_argument("--min-legs-per-search", type=float, default=6.0)
 
+    p_verify = sub.add_parser(
+        "verify", help="Re-price a sweep's shortlist on letuska as a second opinion"
+    )
+    p_verify.add_argument("--scenario", required=True)
+    p_verify.add_argument("--stamp", help="A specific sweep; defaults to the newest")
+    p_verify.add_argument("--top", type=int, default=3, help="How many itineraries to re-price")
+
     args = parser.parse_args()
 
     if args.cmd == "health-gate":
         raise SystemExit(health_gate_command(args.scenario, args.min_legs_per_search))
+
+    if args.cmd == "verify":
+        verify_command(args.scenario, args.stamp, args.top)
+        raise SystemExit(0)
 
     if args.cmd == "probe":
         from .probe import run_probe

@@ -198,15 +198,45 @@ search from ~150 s to **~14 s**, and is what makes a multi-leg sweep possible at
 
 ### Sources
 
-**pelikan.cz** is the only sweep source. **letuska.cz** was spiked and rejected for sweeping: it has
-no deep-link grammar — `/letenky/PRG/NRT/<date>`, `?from=&to=&date=` and a hash route all 404 — and
-its search is an Angular form whose results render in place, reached through a cookie banner,
-autocomplete typing and a Czech-month calendar behind two nested shadow roots. It survives as a
-second opinion on a single fare:
+Everything about a site that changes without its behaviour changing — base URL, deep-link template,
+the six selectors, the "no flights" marker — lives in [src/sources.py](src/sources.py), overridable
+from `data/sources.json` and editable in the **Sources** tab. **Test this source** runs one real
+search and reports what those selectors parsed, which answers the only question that matters when
+the sweep goes quiet: *is it the URL or the markup?*
+
+Telling those apart needs more than an HTTP status. Measured live, pelikan answers **200** for a
+path it does not recognise and quietly bounces to `/cs`, dropping the search — clean status, real
+page, zero cards, indistinguishable from a renamed class unless you notice you were moved. So the
+check compares the *final* address against the one asked for. A working search redirects too (it
+appends `,LOAD`), so the test is the prefix, not equality.
+
+**pelikan.cz is the only sweep source**, and a [spike](docs/superpowers/specs/2026-08-11-second-source-spike.md)
+concluded it should stay that way: kiwi.com's `robots.txt` disallows `/search` for `User-Agent: *`,
+and Skyscanner's API is partner-only.
+
+**letuska.cz is the second opinion, at the scale where it is affordable.** It has no deep-link
+grammar — `/letenky/PRG/NRT/<date>`, `?from=&to=&date=` and a hash route all 404 — so a search means
+driving an Angular form through a cookie banner, autocomplete typing and a Czech-month calendar
+behind two nested shadow roots: ~60–90s against pelikan's ~14s. Unaffordable for 615 searches,
+perfectly affordable for the five or six the shortlist rests on.
 
 ```bash
+python -m src.cli verify --scenario japan-philippines --top 3
 python -m src.cli check-price --from PRG --to NRT --depart 2027-01-12 --return 2027-01-30
 ```
+
+The comparison has to be like-for-like, and two ways of failing that were found by running it:
+
+| Mistake | What it looked like |
+|---|---|
+| `ret=None` searched `ret or depart` — a same-day **round trip** | Every leg read ~2.2× dearer, and the report said the two sites *agreed* |
+| Taking letuska's cheapest quote | It offers neighbouring days, so a 3 February leg was compared against their 2 February one |
+
+Both are fixed: `ret=None` now drives the form's *Jednosměrná* toggle, and only quotes for the exact
+date requested are compared. A leg the other site cannot price on that date is reported as
+**unpriced**, never as agreement — silence from a second source is not confirmation from it. On the
+10 August sweep this reads: FRA→NRT 16% cheaper on pelikan, NRT→MNL 44% cheaper, MNL→FRA 3% cheaper
+on letuska.
 
 Through-fares are real but not universal, which is why the leg chain stays: PRG↔NRT on 6/28 Jan is
 33% cheaper as a round trip than as two one-ways, while FRA↔NRT + NRT↔MNL on 23 Jan/10 Feb is 19%

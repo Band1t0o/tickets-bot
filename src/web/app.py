@@ -86,6 +86,16 @@ def _sweep_dirs(scenario_id: str) -> list[Path]:
     return sorted((p for p in root.iterdir() if p.is_dir()), reverse=True)
 
 
+def _read_json(path: Path):
+    """Parsed JSON, or None when absent or unreadable."""
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
 def _read_status(directory: Path) -> dict:
     path = directory / "status.json"
     if not path.exists():
@@ -331,6 +341,9 @@ def sweep_results(scenario_id: str, stamp: str, mode: str = "all", limit: int = 
         "stamp": stamp,
         "legs_found": result.legs_in,
         "bag_estimate": bag,
+        # Absent until `python -m src.cli verify` has been run for this sweep.
+        # None means "not checked", which must not read as "checked and fine".
+        "verification": _read_json(directory / "verify.json"),
         "currency": scenario.currency,
         "truncated": result.truncated,
         "best_same_airport": (
