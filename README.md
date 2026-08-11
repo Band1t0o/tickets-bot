@@ -5,8 +5,10 @@ like — and watches the price until you book.
 
 - **Scenarios** are committed JSON files: which airports, which date window, how long to stay where
 - **GitHub Actions does the searching** on a schedule and commits results back, so it works whether or not your machine is on
-- **Discord** pings you only when the best total actually improves
+- **Discord** sends the cheapest trip and the cheapest from airports you'd rather use, with the difference between them — and only when one of them actually improves
 - **A local web UI** (`make ui`, or the desktop shortcut) to build trips, launch sweeps and read results
+- **Every price says when it was measured**, and sweeps too incomplete to compare are never plotted as a trend
+- **The scraper's selectors are editable in the UI**, with a button that proves them against a real search
 - No database — everything is files under `data/` and `scenarios/`
 
 > Personal, non-commercial use. Keep the politeness delays in place.
@@ -61,7 +63,8 @@ itinerary built from it. A three-leg trip is ~200 searches this way and tens of 
 | Planner | Scenario → list of one-way searches | [src/sweep/planner.py](src/sweep/planner.py) |
 | Runner | Runs them across 2 browsers, writes `legs.jsonl` | [src/sweep/runner.py](src/sweep/runner.py) |
 | Combiner | Chains legs into valid itineraries | [src/combine.py](src/combine.py) |
-| Notifier | Posts to Discord when the best total improves | [src/notify_discord.py](src/notify_discord.py) |
+| Selector | Picks which itineraries are worth reporting | [src/alerts.py](src/alerts.py) |
+| Notifier | Posts to Discord when a pick improves | [src/notify_discord.py](src/notify_discord.py) |
 
 Both halves walk `scenario.airport_pools`, so they cannot disagree about the shape of a trip. They
 used to: the planner's round-trip branch emitted outbound searches only, while the combiner branch
@@ -341,7 +344,7 @@ Two conclusions the data supports, both of which contradict the intuition that p
 
 `make ui`, or the **Flight watcher** desktop shortcut ([start-ui.bat](start-ui.bat)).
 
-Three tabs: **Search** (build a trip), **Results** (cheapest same-airport and cheapest open-jaw side
+Four tabs: **Search** (build a trip), **Results** (cheapest same-airport and cheapest open-jaw side
 by side, then every itinerary, expandable into legs), **Prices** (cheapest total by departure date —
 *when* to fly; best total over time — *whether to book now*; and the probe table).
 
@@ -383,9 +386,12 @@ src/
   scenario.py             schema, validation, load/save, migration
   airports.py             catalogue lookup and search
   viability.py            what sweep history says about a route or airport
-  sweep/planner.py        scenario -> searches
-  sweep/runner.py         concurrent execution
+  sources.py              per-site URL grammar and selectors, with the defaults
+  sweep/planner.py        scenario -> searches, and the routes a trip requires
+  sweep/runner.py         concurrent execution, sweep quality, comparability
   combine.py              legs -> itineraries
+  alerts.py               which itineraries are worth reporting
+  verify.py               re-price the shortlist on a second site
   probe.py                volatility sampling and report
   notify_discord.py       price + health alerts
   providers/
@@ -397,7 +403,8 @@ src/
 data/airports.json        4,161 airports: code, city, country, size, aliases
 data/countries.json       ISO code -> country name, so "Japan" is searchable
 data/airport_notes.json   hand-measured findings no sweep can reproduce
-data/sweeps/<id>/<ts>/    legs.jsonl, status.json, best.json
+data/sources.json         overrides for src/sources.py; delete to restore defaults
+data/sweeps/<id>/<ts>/    legs.jsonl, status.json, best.json, verify.json
 data/probe/               observations.jsonl
 docs/superpowers/specs/   design documents
 ```
