@@ -456,3 +456,72 @@ def test_an_empty_tier_row_is_dropped_rather_than_failing_the_save(ui):
     assert saved["preferred_origins"] == []
     assert page.locator("#save-error").is_hidden()
     assert not errors
+
+
+# ------------------------------------------------------------- sources tab
+#
+# The escape hatch: when pelikan renames a class the sweep goes silently to
+# zero, and the fix is a string rather than a code change. These check the
+# string can be typed, saved, and read back by the thing that sweeps.
+
+
+def open_sources(page):
+    page.locator('#tabs button[data-tab="sources"]').click()
+    page.wait_for_selector("#sources-body [data-source]")
+
+
+def test_the_sources_tab_shows_the_live_selectors(ui):
+    page, _, errors = ui
+    open_sources(page)
+    card = page.locator('[data-source="PELIKAN"] [data-selector="card"]')
+    assert card.input_value() == "div[id^='flight-']"
+    assert page.locator('[data-source="PELIKAN"] [data-field="base_url"]').input_value() \
+        .startswith("https://www.pelikan.cz")
+    assert not errors
+
+
+def test_a_selector_edited_by_hand_reaches_disk(ui):
+    """The whole point of the tab: no code change, no redeploy, no me."""
+    page, scenario_dir, errors = ui
+    open_sources(page)
+
+    field = page.locator('[data-source="PELIKAN"] [data-selector="card"]')
+    field.fill("")
+    field.click()
+    page.keyboard.type("div.new-offer-class", delay=25)
+    page.locator('[data-source="PELIKAN"] button:has-text("Save sources")').click()
+    page.wait_for_timeout(900)
+
+    saved = json.loads((scenario_dir.parent / "data" / "sources.json").read_text(encoding="utf-8"))
+    assert saved["PELIKAN"]["selectors"]["card"] == "div.new-offer-class"
+    assert "Saved" in page.locator("#source-result-PELIKAN").inner_text()
+    assert not errors
+
+
+def test_an_empty_selector_is_refused_with_a_reason(ui):
+    page, _, errors = ui
+    open_sources(page)
+
+    page.locator('[data-source="PELIKAN"] [data-selector="price"]').fill("")
+    page.locator('[data-source="PELIKAN"] button:has-text("Save sources")').click()
+    page.wait_for_timeout(900)
+
+    outcome = page.locator("#source-result-PELIKAN").inner_text()
+    assert "price" in outcome, outcome
+    assert not errors
+
+
+def test_an_edit_survives_leaving_the_tab_and_coming_back(ui):
+    page, _, errors = ui
+    open_sources(page)
+    field = page.locator('[data-source="PELIKAN"] [data-field="no_results_marker"]')
+    field.fill("Nothing found")
+    page.locator('[data-source="PELIKAN"] button:has-text("Save sources")').click()
+    page.wait_for_timeout(900)
+
+    page.locator('#tabs button[data-tab="search"]').click()
+    page.wait_for_timeout(300)
+    open_sources(page)
+    assert page.locator('[data-source="PELIKAN"] [data-field="no_results_marker"]') \
+        .input_value() == "Nothing found"
+    assert not errors

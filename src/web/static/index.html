@@ -42,6 +42,7 @@
       <button data-tab="search" class="is-active">Search</button>
       <button data-tab="results">Results</button>
       <button data-tab="prices">Prices</button>
+      <button data-tab="sources">Sources</button>
     </div>
 
     <!-- ------------------------------------------------------------ Search -->
@@ -201,6 +202,22 @@
           steadiest route here used to report the highest volatility.
         </p>
         <div id="probe-body" class="empty">No observations yet.</div>
+      </div>
+    </section>
+
+    <!-- ----------------------------------------------------------- Sources -->
+    <section data-panel="sources" hidden>
+      <div class="panel">
+        <div class="panel__header"><h2>Where the prices come from</h2></div>
+        <p class="panel__hint">
+          Sites move their URLs and rename their CSS classes, and either one stops the sweep
+          without stopping the code. Both are strings, and both are here — edit the one that
+          broke, press <strong>Test this source</strong> to run a single real search, and read
+          what it parsed. Zero cards matched means the markup changed; a page that will not load
+          at all means the URL did. Leave a field alone and it keeps the built-in value, so
+          deleting <code>data/sources.json</code> always restores working defaults.
+        </p>
+        <div id="sources-body" class="empty">Loading…</div>
       </div>
     </section>
   </main>

@@ -74,6 +74,7 @@ $('tabs').onclick = (event) => {
   }
   if (button.dataset.tab === 'results') renderResults();
   if (button.dataset.tab === 'prices') renderPrices();
+  if (button.dataset.tab === 'sources') renderSources();
 };
 
 /* --------------------------------------------------------- route editor --
@@ -1141,6 +1142,159 @@ async function renderPrices() {
       '</tbody></table></div>' +
       `<p class="panel__hint" style="margin-top:12px">${escapeHtml(probe.recommendation)}</p>`
     : 'No observations yet.';
+}
+
+/* ---------------------------------------------------------------- sources */
+
+/* The scraper's moving parts, editable without a programmer. A site renaming a
+   CSS class takes the sweep silently to zero, and the fix is a new string — so
+   the strings live in a form, and a button proves them against a real page
+   before 02:00 rather than after. */
+
+const SELECTOR_HELP = {
+  card: 'One offer. Everything else is read inside it.',
+  price: 'The block holding the price and its currency symbol.',
+  date: 'The departure date printed on the card — read rather than assumed, because the site substitutes nearby dates.',
+  time: 'Departure and arrival times.',
+  baggage_icon: 'The bag icon, whose filename says included or not.',
+  baggage_label: 'The text beside it — "Ano" / "Ne", or an invitation to click through.',
+};
+
+const FIELD_HELP = {
+  base_url: 'Everything before the search parameters.',
+  url_template: 'Comma-joined parameters. {origin}, {destination}, {depart}, {adults} and {trip_type} are filled in; a return date is appended for a round trip.',
+  no_results_marker: 'The site’s own wording for "no flights on this route". Without it, an empty route and a broken search look identical.',
+  result_timeout_s: 'How long to wait for results before calling the search failed.',
+};
+
+async function renderSources() {
+  const host = $('sources-body');
+  let sources;
+  try {
+    sources = await api('/api/sources');
+  } catch (error) {
+    host.className = 'empty';
+    host.textContent = `Could not load sources — ${error.message}`;
+    return;
+  }
+  host.className = '';
+  host.innerHTML = '';
+
+  for (const [name, source] of Object.entries(sources)) {
+    const block = document.createElement('div');
+    block.dataset.source = name;
+    block.innerHTML = `<h3>${escapeHtml(name)}</h3>`;
+
+    const grid = document.createElement('div');
+    grid.className = 'form-grid';
+    for (const key of ['base_url', 'url_template', 'no_results_marker', 'result_timeout_s']) {
+      const label = document.createElement('label');
+      label.className = key === 'result_timeout_s' ? 'field' : 'field field--wide';
+      label.innerHTML =
+        `${escapeHtml(key)}<input type="${key === 'result_timeout_s' ? 'number' : 'text'}" ` +
+        `data-field="${key}" value="${escapeHtml(source[key])}">` +
+        `<span class="muted small">${escapeHtml(FIELD_HELP[key] ?? '')}</span>`;
+      grid.appendChild(label);
+    }
+    block.appendChild(grid);
+
+    block.insertAdjacentHTML('beforeend', '<h3 class="muted small" style="margin-top:20px">Selectors</h3>');
+    const selectors = document.createElement('div');
+    selectors.className = 'form-grid';
+    for (const [key, value] of Object.entries(source.selectors)) {
+      const label = document.createElement('label');
+      label.className = 'field field--wide';
+      label.innerHTML =
+        `${escapeHtml(key)}<input type="text" data-selector="${escapeHtml(key)}" ` +
+        `value="${escapeHtml(value)}">` +
+        `<span class="muted small">${escapeHtml(SELECTOR_HELP[key] ?? '')}</span>`;
+      selectors.appendChild(label);
+    }
+    block.appendChild(selectors);
+
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.style.marginTop = '16px';
+    const save = document.createElement('button');
+    save.textContent = 'Save sources';
+    save.onclick = () => saveSources(sources, name, block);
+    const probe = document.createElement('button');
+    probe.className = 'primary';
+    probe.textContent = 'Test this source';
+    probe.onclick = () => testSource(name, probe);
+    row.append(save, probe);
+    block.appendChild(row);
+
+    const outcome = document.createElement('div');
+    outcome.className = 'small';
+    outcome.style.marginTop = '12px';
+    outcome.id = `source-result-${name}`;
+    block.appendChild(outcome);
+
+    host.appendChild(block);
+  }
+}
+
+function readSourceForm(block, source) {
+  const next = { ...source, selectors: { ...source.selectors } };
+  for (const input of block.querySelectorAll('[data-field]')) {
+    next[input.dataset.field] =
+      input.dataset.field === 'result_timeout_s' ? Number(input.value) : input.value;
+  }
+  for (const input of block.querySelectorAll('[data-selector]')) {
+    next.selectors[input.dataset.selector] = input.value;
+  }
+  return next;
+}
+
+async function saveSources(sources, name, block) {
+  const outcome = $(`source-result-${name}`);
+  try {
+    // Sent whole, so a rejected edit leaves the file exactly as it was rather
+    // than half-applied.
+    await api('/api/sources', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...sources, [name]: readSourceForm(block, sources[name]) }),
+    });
+    outcome.className = 'small badge badge--good';
+    outcome.textContent = 'Saved. Test it before trusting the next sweep to it.';
+  } catch (error) {
+    outcome.className = 'small badge badge--error';
+    outcome.textContent = error.message;
+  }
+}
+
+async function testSource(name, button) {
+  const outcome = $(`source-result-${name}`);
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = 'Searching…';
+  outcome.className = 'small muted';
+  outcome.textContent = 'Running one real search — this takes 15–30 seconds.';
+  try {
+    const body = await api(`/api/sources/${name}/test`, { method: 'POST' });
+    outcome.className = 'small';
+    const link = body.url && /^https?:\/\//i.test(body.url)
+      ? `<a href="${escapeHtml(body.url)}" target="_blank" rel="noopener">open the exact URL it used</a>`
+      : '';
+    outcome.innerHTML =
+      `<span class="badge badge--${body.ok ? 'good' : 'error'}">` +
+      `${body.cards_found} card(s), ${body.legs_parsed ?? 0} parsed</span> ` +
+      `${escapeHtml(body.message)}<br>` +
+      `<span class="muted">${escapeHtml(body.route ?? '')}</span> ${link}` +
+      (body.sample
+        ? `<br><span class="muted">First offer: ${escapeHtml(body.sample.airline)} · ` +
+          `${escapeHtml(body.sample.depart_date)} · ` +
+          `${money(body.sample.price_amount, body.sample.price_currency)}</span>`
+        : '');
+  } catch (error) {
+    outcome.className = 'small badge badge--error';
+    outcome.textContent = error.message;
+  } finally {
+    button.disabled = false;
+    button.textContent = label;
+  }
 }
 
 /* -------------------------------------------------------------------- init */

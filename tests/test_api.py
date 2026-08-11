@@ -583,3 +583,181 @@ def test_probe_endpoint_serialises_every_derived_rate(client):
 def test_probe_endpoint_is_empty_without_observations(client):
     api, _ = client
     assert api.get("/api/probe").json()["routes"] == {}
+
+
+# ------------------------------------------------------------------ sources
+#
+# The scraper's moving parts, editable without a programmer. When pelikan
+# renames a CSS class the sweep goes quiet, and the fix is a new string - the
+# endpoints below are so that string can be typed, saved and proven.
+
+
+def test_sources_are_readable_without_any_file(client):
+    api, _ = client
+    body = api.get("/api/sources").json()
+    assert body["PELIKAN"]["base_url"].startswith("https://www.pelikan.cz")
+    assert body["PELIKAN"]["selectors"]["card"]
+
+
+def test_an_edited_source_is_saved_and_read_back(client):
+    api, data = client
+    current = api.get("/api/sources").json()
+    current["PELIKAN"]["selectors"]["card"] = "div.offer"
+    assert api.put("/api/sources", json=current).status_code == 200
+
+    assert api.get("/api/sources").json()["PELIKAN"]["selectors"]["card"] == "div.offer"
+    # Written where the sweep will read it, not held in memory.
+    assert json.loads((data / "sources.json").read_text(encoding="utf-8"))
+    assert "div.offer" in (data / "sources.json").read_text(encoding="utf-8")
+
+
+def test_an_unknown_source_is_rejected_rather_than_stored(client):
+    api, _ = client
+    response = api.put("/api/sources", json={"MYSTERY": {"base_url": "https://example.test"}})
+    assert response.status_code == 400
+    assert "MYSTERY" in response.json()["detail"]
+
+
+def test_a_source_missing_a_required_selector_is_rejected(client):
+    """Saving a half-filled selector map would break the sweep at 02:00.
+
+    Rejecting on save turns that into a message now instead of a silent zero
+    tomorrow.
+    """
+    api, _ = client
+    current = api.get("/api/sources").json()
+    del current["PELIKAN"]["selectors"]["price"]
+    response = api.put("/api/sources", json=current)
+    assert response.status_code == 400
+    assert "price" in response.json()["detail"]
+
+
+def test_an_empty_card_selector_is_rejected(client):
+    api, _ = client
+    current = api.get("/api/sources").json()
+    current["PELIKAN"]["selectors"]["card"] = "  "
+    assert api.put("/api/sources", json=current).status_code == 400
+
+
+def test_testing_a_source_reports_what_the_selectors_found(client, monkeypatch):
+    """One click that answers "is it the URL or the markup?"
+
+    Runs against a saved page rather than the network here; the endpoint itself
+    is what fetches live.
+    """
+    from pathlib import Path
+
+    import src.web.app as app_module
+
+    fixture = (
+        Path(__file__).parent / "fixtures" / "pelikan_results.html"
+    ).read_text(encoding="utf-8")
+    monkeypatch.setattr(app_module, "_fetch_for_test", lambda source, url: (200, url, fixture))
+
+    body = api_test_source(client)
+    assert body["cards_found"] > 0
+    assert body["url"].startswith("https://www.pelikan.cz")
+    assert body["sample"]["price_amount"] > 0
+    assert body["ok"] is True
+
+
+def test_testing_a_source_with_a_broken_selector_says_so(client, monkeypatch):
+    from pathlib import Path
+
+    import src.web.app as app_module
+
+    fixture = (
+        Path(__file__).parent / "fixtures" / "pelikan_results.html"
+    ).read_text(encoding="utf-8")
+    monkeypatch.setattr(app_module, "_fetch_for_test", lambda source, url: (200, url, fixture))
+
+    api, _ = client
+    current = api.get("/api/sources").json()
+    current["PELIKAN"]["selectors"]["card"] = "div.nothing-here"
+    api.put("/api/sources", json=current)
+
+    body = api_test_source(client)
+    assert body["ok"] is False
+    assert body["cards_found"] == 0
+    assert "card" in body["message"].lower()
+
+
+def api_test_source(client):
+    api, _ = client
+    response = api.post("/api/sources/PELIKAN/test")
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def test_a_url_that_404s_is_blamed_on_the_url_not_the_selectors(client, monkeypatch):
+    """The one distinction the button exists to make.
+
+    A 404 page loads perfectly well and simply contains no offer cards, so
+    reporting "the card selector matched nothing" sends you to rewrite a
+    selector that was never wrong.
+    """
+    import src.web.app as app_module
+
+    monkeypatch.setattr(
+        app_module, "_fetch_for_test", lambda source, url: (404, url, "<html>Not found</html>")
+    )
+    body = api_test_source(client)
+    assert body["ok"] is False
+    assert "404" in body["message"]
+    assert "base_url" in body["message"] or "url_template" in body["message"]
+    # Saying the selectors went untested is useful; blaming them is the bug.
+    assert "renamed" not in body["message"].lower()
+    assert "matched nothing" not in body["message"].lower()
+
+
+def test_the_sites_own_no_flights_message_is_not_reported_as_breakage(client, monkeypatch):
+    """A route with no inventory is data. Only the selectors stay unproven."""
+    import src.web.app as app_module
+
+    marker = "Hups! Nenašli jsme žádny let"
+    monkeypatch.setattr(
+        app_module, "_fetch_for_test", lambda source, url: (200, url, f"<html>{marker}</html>")
+    )
+    body = api_test_source(client)
+    assert body["cards_found"] == 0
+    assert "no flights" in body["message"].lower()
+    assert "renamed" not in body["message"].lower()
+
+
+def test_a_silent_redirect_to_the_homepage_is_blamed_on_the_url(client, monkeypatch):
+    """pelikan.cz answers 200 for a path that does not exist.
+
+    It quietly bounces to https://www.pelikan.cz/cs, dropping the search
+    entirely — so the status is clean, the page is real, and nothing on it is
+    an offer card. Measured live: a wrong base_url was reported as renamed
+    markup, which is precisely the wrong afternoon to spend. Being redirected
+    away from the address asked for is the general signal, and needs no
+    knowledge of any particular site.
+    """
+    import src.web.app as app_module
+
+    monkeypatch.setattr(
+        app_module,
+        "_fetch_for_test",
+        lambda source, url: (200, "https://www.pelikan.cz/cs", "<html>homepage</html>"),
+    )
+    body = api_test_source(client)
+    assert body["ok"] is False
+    assert "redirect" in body["message"].lower()
+    assert "base_url" in body["message"] or "url_template" in body["message"]
+    assert "renamed" not in body["message"].lower()
+
+
+def test_a_redirect_that_keeps_the_search_path_is_not_treated_as_a_failure(client, monkeypatch):
+    """A working search really does redirect — it appends ",LOAD" to the path."""
+    from pathlib import Path
+
+    import src.web.app as app_module
+
+    fixture = (
+        Path(__file__).parent / "fixtures" / "pelikan_results.html"
+    ).read_text(encoding="utf-8")
+    monkeypatch.setattr(
+        app_module, "_fetch_for_test", lambda source, url: (200, url + ",LOAD/", fixture)
+    )
+    assert api_test_source(client)["ok"] is True

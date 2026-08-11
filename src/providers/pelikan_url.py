@@ -35,7 +35,9 @@ from __future__ import annotations
 
 from datetime import date
 
-BASE = "https://www.pelikan.cz/cs/letenky/"
+from ..sources import DEFAULTS, Source
+
+BASE = DEFAULTS["PELIKAN"].base_url
 
 TRIP_ROUND = "1"
 TRIP_ONE_WAY = "2"
@@ -51,24 +53,30 @@ def build_search_url(
     depart: date,
     ret: date | None = None,
     adults: int = 1,
+    source: Source | None = None,
 ) -> str:
     """Build a directly navigable pelikan.cz search URL.
 
     Passing `ret` produces a round-trip search; omitting it produces a one-way.
+
+    `source` supplies the base URL and template, so a site that moves its path
+    or renames a parameter can be repaired by editing `data/sources.json`
+    instead of this file. Omitting it uses the built-in defaults, which is what
+    every caller that predates the file does.
     """
     if ret is not None and ret < depart:
         raise ValueError(f"return date {ret} precedes departure date {depart}")
     if adults < 1:
         raise ValueError(f"adults must be at least 1, got {adults}")
 
-    trip_type = TRIP_ROUND if ret is not None else TRIP_ONE_WAY
-    parts = [
-        f"T:{trip_type}",
-        f"P:{adults}000E_0_0",
-        f"CDF:{origin}{origin}",
-        f"CDT:A{destination}",
-        f"DD:{_fmt_date(depart)}",
-    ]
+    source = source or DEFAULTS["PELIKAN"]
+    path = source.url_template.format(
+        trip_type=TRIP_ROUND if ret is not None else TRIP_ONE_WAY,
+        adults=adults,
+        origin=origin,
+        destination=destination,
+        depart=_fmt_date(depart),
+    )
     if ret is not None:
-        parts.append(f"DR:{_fmt_date(ret)}")
-    return BASE + ",".join(parts) + "/"
+        path += f",DR:{_fmt_date(ret)}"
+    return source.base_url + path + "/"

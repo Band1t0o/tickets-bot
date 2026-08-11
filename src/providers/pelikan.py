@@ -17,18 +17,18 @@ from datetime import UTC, date, datetime
 from bs4 import BeautifulSoup
 
 from ..models import Leg
+from ..sources import DEFAULTS, Source, load_source
 from .base import BaseProvider
 from .pelikan_url import build_search_url
 
-CARD_SELECTOR = "div[id^='flight-']"
-# 75s was enough for a fast local search (~14s) but not under sweep conditions.
-RESULT_TIMEOUT_S = 120
+# Selectors, timeouts and the "no flights" marker now live in `src/sources.py`
+# and can be overridden from `data/sources.json` without editing code, because
+# the usual way this scraper breaks is the site renaming a class. These names
+# are kept as the defaults' values so existing references still read.
+CARD_SELECTOR = DEFAULTS["PELIKAN"].selectors["card"]
+RESULT_TIMEOUT_S = DEFAULTS["PELIKAN"].result_timeout_s
 POLL_INTERVAL_S = 5
-
-# The site's own wording when a route genuinely has no inventory, verified live
-# against BRQ->NRT: "Hups! Nenašli jsme žádny let, zkuste vyhledat ješte jednou".
-# (Their copy mixes Czech and Slovak; match only the stable prefix.)
-NO_RESULTS_MARKER = "Nenašli jsme žádn"
+NO_RESULTS_MARKER = DEFAULTS["PELIKAN"].no_results_marker
 
 
 class SearchTimeout(RuntimeError):
@@ -75,8 +75,8 @@ def _stops_from_card(card) -> int | None:
 _CURRENCY_MARKERS = (("Kč", "CZK"), ("€", "EUR"), ("EUR", "EUR"), ("$", "USD"), ("£", "GBP"))
 
 
-def _price_from_card(card) -> tuple[float | None, str | None]:
-    node = card.select_one(".fly-search-price-info-wrapp")
+def _price_from_card(card, selectors: dict[str, str]) -> tuple[float | None, str | None]:
+    node = card.select_one(selectors["price"])
     if node is None:
         return None, None
     text = node.get_text(" ", strip=True)
@@ -96,13 +96,13 @@ def _price_from_card(card) -> tuple[float | None, str | None]:
     return float(digits), currency
 
 
-def _depart_date_from_card(card) -> date | None:
+def _depart_date_from_card(card, selectors: dict[str, str]) -> date | None:
     """Read the date printed on the card.
 
     The site substitutes nearby dates (asking for 22 Jan can return 23 Jan), so
     the requested date must never be assumed.
     """
-    node = card.select_one(".fly-item-date-new-reservation")
+    node = card.select_one(selectors["date"])
     if node is None:
         return None
     match = re.search(r"(\d{1,2})\.(\d{1,2})\.(\d{4})", node.get_text(" ", strip=True))
@@ -115,10 +115,10 @@ def _depart_date_from_card(card) -> date | None:
         return None
 
 
-def _times_from_card(card) -> tuple[str | None, str | None]:
+def _times_from_card(card, selectors: dict[str, str]) -> tuple[str | None, str | None]:
     times = [
         node.get_text(" ", strip=True)
-        for node in card.select(".fly-item-time-new-reservation")
+        for node in card.select(selectors["time"])
     ]
     times = [t for t in times if re.fullmatch(r"\d{1,2}:\d{2}", t)]
     if not times:
@@ -135,23 +135,28 @@ def _duration_from_card(card) -> int | None:
     return int(days or 0) * 1440 + int(hours) * 60 + int(minutes)
 
 
-def parse_results_html(html: str, origin: str, destination: str) -> list[Leg]:
+def parse_results_html(
+    html: str, origin: str, destination: str, source: Source | None = None
+) -> list[Leg]:
     """Extract Legs from a rendered results page.
 
-    Pure and browser-free so it can be tested against a saved fixture.
+    Pure and browser-free so it can be tested against a saved fixture, and so
+    the Settings tab can show exactly what a given set of selectors parses.
 
-    Only `div[id^='flight-']` is selected. The previous selector,
+    Only one card selector is used. The previous one,
     `div[id^='flight-'], flights-flight`, matched each offer twice - the proven
     cause of the duplicate-offer bug.
     """
+    source = source or DEFAULTS["PELIKAN"]
+    selectors = source.selectors
     soup = BeautifulSoup(html, "lxml")
     legs: list[Leg] = []
 
-    for card in soup.select(CARD_SELECTOR):
-        price, currency = _price_from_card(card)
+    for card in soup.select(selectors["card"]):
+        price, currency = _price_from_card(card, selectors)
         if price is None:
             continue
-        depart_time, arrive_time = _times_from_card(card)
+        depart_time, arrive_time = _times_from_card(card, selectors)
         legs.append(
             Leg(
                 depart_time=depart_time,
@@ -160,7 +165,7 @@ def parse_results_html(html: str, origin: str, destination: str) -> list[Leg]:
                 provider=PelikanProvider.NAME,
                 origin=origin,
                 destination=destination,
-                depart_date=_depart_date_from_card(card),
+                depart_date=_depart_date_from_card(card, selectors),
                 airline=_airline_from_card(card) or "Unknown",
                 # Flight numbers live behind a collapsed "Detaily letů" panel and
                 # are not in the DOM; extracting them would cost a click per card.
@@ -169,13 +174,13 @@ def parse_results_html(html: str, origin: str, destination: str) -> list[Leg]:
                 price_currency=currency,
                 price_amount=price,
                 url="",
-                checked_bag=_checked_bag_from_card(card),
+                checked_bag=_checked_bag_from_card(card, selectors),
             )
         )
     return _dedupe(legs)
 
 
-def _checked_bag_from_card(card) -> bool | None:
+def _checked_bag_from_card(card, selectors: dict[str, str]) -> bool | None:
     """Whether a checked bag is included, from the card's baggage row.
 
     The icon filename is the reliable signal - `checked-baggage-include.svg` vs
@@ -185,14 +190,14 @@ def _checked_bag_from_card(card) -> bool | None:
     stays None: recording it as included would flatter exactly the fares whose
     real price is a bag fee higher.
     """
-    icon = card.select_one("img.baggage-img")
+    icon = card.select_one(selectors["baggage_icon"])
     src = (icon.get("src") or icon.get("ng-src") or "") if icon else ""
     if "checked-baggage-include" in src:
         return True
     if "checked-baggage-exclude" in src:
         return False
 
-    label = card.select_one(".fly-item-bottom-baggage-new-reservation")
+    label = card.select_one(selectors["baggage_label"])
     text = label.get_text(strip=True).casefold() if label else ""
     if text == "ano":
         return True
@@ -223,6 +228,12 @@ class PelikanProvider(BaseProvider):
     NAME = "PELIKAN"
     BASE_URL = "https://www.pelikan.cz"
 
+    def __init__(self, source: Source | None = None, data_dir="data"):
+        # Read once per provider rather than once per search: a sweep runs
+        # hundreds of searches, and re-reading the file for each would let an
+        # edit take effect halfway through and make the results incomparable.
+        self.source = source or load_source(self.NAME, data_dir)
+
     def search_leg(
         self,
         page,
@@ -237,22 +248,23 @@ class PelikanProvider(BaseProvider):
         The page is supplied by the caller so a worker can reuse one browser
         across many searches.
         """
-        url = build_search_url(origin, destination, depart, ret, adults)
+        source = self.source
+        url = build_search_url(origin, destination, depart, ret, adults, source=source)
         page.goto(url, wait_until="domcontentloaded", timeout=45000)
 
         # Race the offer cards against the site's explicit "no flights" message.
         # Whichever appears first is the answer; if neither does, the search
         # failed and must say so rather than masquerading as an empty route.
-        for _ in range(0, RESULT_TIMEOUT_S, POLL_INTERVAL_S):
+        for _ in range(0, source.result_timeout_s, POLL_INTERVAL_S):
             time.sleep(POLL_INTERVAL_S)
-            if page.locator(CARD_SELECTOR).count():
+            if page.locator(source.selectors["card"]).count():
                 break
-            if NO_RESULTS_MARKER in page.inner_text("body"):
+            if source.no_results_marker in page.inner_text("body"):
                 return []
         else:
             raise SearchTimeout(
                 f"{origin}->{destination} {depart}: no results and no "
-                f"'no flights' message within {RESULT_TIMEOUT_S}s"
+                f"'no flights' message within {source.result_timeout_s}s"
             )
 
         # Let the last few cards settle before snapshotting the DOM.
@@ -262,7 +274,7 @@ class PelikanProvider(BaseProvider):
         # here rather than in the parser so `parse_results_html` stays pure -
         # reading a saved fixture is not an observation of a live price.
         observed_at = datetime.now(UTC).isoformat(timespec="seconds")
-        legs = parse_results_html(html, origin, destination)
+        legs = parse_results_html(html, origin, destination, source=source)
         for leg in legs:
             leg.url = url
             leg.observed_at = observed_at

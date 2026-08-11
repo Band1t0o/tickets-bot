@@ -12,8 +12,10 @@ import re
 import subprocess
 import threading
 from dataclasses import asdict, replace
+from datetime import date, timedelta
 from pathlib import Path
 
+from bs4 import BeautifulSoup
 from fastapi import Body, FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -22,6 +24,8 @@ from ..airports import describe, frequent_airports, lookup
 from ..airports import search_with_meta as search_airports
 from ..combine import combine_all, series_from_result
 from ..scenario import Scenario, load_scenario, load_scenarios, save_scenario
+from ..sources import DEFAULTS as DEFAULT_SOURCES
+from ..sources import Source, load_source, load_sources, save_sources
 from ..sweep.planner import (
     SECONDS_PER_SEARCH,
     estimate_minutes,
@@ -408,6 +412,181 @@ def probe_stats() -> dict:
 @app.get("/api/describe/{code}")
 def describe_airport(code: str) -> dict:
     return {"code": code.upper(), "label": describe(code, data_dir=DATA_DIR)}
+
+
+# ------------------------------------------------------------------- sources
+#
+# When a site renames a CSS class, the sweep goes quiet and the fix is a new
+# string, not a code change. These endpoints let that string be typed, saved
+# and — the part that matters — proven against a real page before 02:00.
+
+# The parser reads all six. A half-filled map would parse nothing at all, and
+# nothing at all looks exactly like a quiet market until someone checks.
+REQUIRED_SELECTORS = ("card", "price", "date", "time", "baggage_icon", "baggage_label")
+
+# A route with dependable inventory, so a zero result means the selectors are
+# wrong rather than the route being empty. Deliberately near-term: a date the
+# site will not sell is not a test of anything.
+TEST_ROUTE = ("PRG", "NRT")
+
+
+@app.get("/api/sources")
+def get_sources() -> dict:
+    return {name: source.to_dict() for name, source in load_sources(DATA_DIR).items()}
+
+
+@app.put("/api/sources")
+def put_sources(payload: dict = Body(...)) -> dict:
+    unknown = set(payload) - set(DEFAULT_SOURCES)
+    if unknown:
+        raise HTTPException(
+            400,
+            f"unknown source(s): {', '.join(sorted(unknown))}. "
+            f"Known sources are {', '.join(sorted(DEFAULT_SOURCES))}",
+        )
+
+    sources = {}
+    for name, body in payload.items():
+        selectors = body.get("selectors") or {}
+        missing = [key for key in REQUIRED_SELECTORS if not str(selectors.get(key, "")).strip()]
+        if missing:
+            raise HTTPException(
+                400, f"{name}: selector(s) {', '.join(missing)} must not be empty"
+            )
+        if not str(body.get("base_url", "")).strip():
+            raise HTTPException(400, f"{name}: base_url must not be empty")
+        sources[name] = Source(
+            name=name,
+            base_url=body["base_url"],
+            url_template=body.get("url_template", DEFAULT_SOURCES[name].url_template),
+            selectors={key: str(selectors[key]).strip() for key in REQUIRED_SELECTORS},
+            no_results_marker=body.get("no_results_marker", ""),
+            result_timeout_s=int(body.get("result_timeout_s", 120)),
+            enabled=bool(body.get("enabled", True)),
+        )
+
+    save_sources(sources, DATA_DIR)
+    return {name: source.to_dict() for name, source in sources.items()}
+
+
+def _fetch_for_test(source, url: str) -> tuple[int, str, str]:
+    """Render one search page and return its status, final URL and HTML.
+
+    All three are needed to tell a wrong address from renamed markup, which is
+    the one distinction this endpoint exists to make:
+
+    - **Status** catches an honest 404.
+    - **Final URL** catches a dishonest one. Measured live: pelikan.cz answers
+      200 for a path that does not exist and quietly bounces to
+      `https://www.pelikan.cz/cs`, dropping the search. Status clean, page real,
+      no offer cards - identical to a renamed class unless you notice you were
+      moved. A working search redirects too (it appends ",LOAD"), so what
+      matters is whether the address still begins with the one asked for.
+
+    Separated so a test can supply a saved page instead of launching Chromium
+    and hitting a third-party site.
+    """
+    import time
+
+    from ..sweep.runner import _browser_page
+
+    class _Real:
+        NAME = "PELIKAN"
+
+    with _browser_page(_Real()) as page:
+        response = page.goto(url, wait_until="domcontentloaded", timeout=45000)
+        status = response.status if response else 0
+        if status >= 400:
+            return status, page.url, page.content()
+        for _ in range(0, source.result_timeout_s, 5):
+            time.sleep(5)
+            if page.locator(source.selectors["card"]).count():
+                break
+            if source.no_results_marker and source.no_results_marker in page.inner_text("body"):
+                break
+        time.sleep(2)
+        return status, page.url, page.content()
+
+
+@app.post("/api/sources/{name}/test")
+def test_source(name: str) -> dict:
+    """Run one real search and report exactly what these selectors parsed.
+
+    The single question this answers is "is it the URL or the markup?", which
+    otherwise costs an afternoon. It reports rather than raises: a zero count
+    *is* the finding.
+    """
+    if name not in DEFAULT_SOURCES:
+        raise HTTPException(404, f"No source named {name!r}")
+
+    from ..providers.pelikan import parse_results_html
+    from ..providers.pelikan_url import build_search_url
+
+    source = load_source(name, DATA_DIR)
+    origin, destination = TEST_ROUTE
+    depart = date.today() + timedelta(days=45)
+    url = build_search_url(origin, destination, depart, source=source)
+
+    def outcome(message: str, cards: int = 0, legs: list | None = None) -> dict:
+        legs = legs or []
+        return {
+            "ok": bool(legs),
+            "url": url,
+            "route": f"{origin}→{destination} {depart.isoformat()}",
+            "cards_found": cards,
+            "legs_parsed": len(legs),
+            "sample": legs[0].to_dict() if legs else None,
+            "message": message,
+        }
+
+    try:
+        status, final_url, html = _fetch_for_test(source, url)
+    except Exception as exc:  # noqa: BLE001 - the failure is the answer here
+        return outcome(
+            f"Could not load the page at all: {type(exc).__name__}: {exc}. "
+            "That points at base_url or url_template rather than at the selectors."
+        )
+
+    # Both checked before the selectors: either failure parses to zero cards and
+    # would otherwise be reported as renamed markup, sending you to rewrite a
+    # selector that was never wrong.
+    if status >= 400:
+        return outcome(
+            f"The site answered {status} for this address, so nothing was searched. "
+            "Fix base_url or url_template; the selectors are untested either way."
+        )
+    if not final_url.startswith(source.base_url):
+        return outcome(
+            f"The site accepted the request but redirected to {final_url}, dropping the "
+            "search. A path it does not recognise is answered with a 200 and a bounce to "
+            "the homepage, so this is a wrong base_url or url_template rather than a "
+            "selector problem; the selectors are untested either way."
+        )
+
+    cards = len(BeautifulSoup(html, "lxml").select(source.selectors["card"]))
+    legs = parse_results_html(html, origin, destination, source=source)
+
+    if legs:
+        return outcome(f"{cards} card(s) matched and {len(legs)} parsed cleanly.", cards, legs)
+    if cards:
+        return outcome(
+            f"{cards} card(s) matched but none produced a price, so the `price` selector "
+            "is the likely culprit.",
+            cards,
+        )
+    # A route the site really has no inventory for renders its own message. That
+    # is data, not breakage, and must not be reported as a broken selector.
+    if source.no_results_marker and source.no_results_marker in html:
+        return outcome(
+            "The page loaded and the site says it has no flights on this route. The URL "
+            "grammar is therefore fine; the selectors stay unproven until a route with "
+            "inventory is tried."
+        )
+    return outcome(
+        "The page loaded with a normal status but the `card` selector matched nothing, "
+        "and the site did not say it had no flights either. That is the signature of "
+        "renamed markup — open the URL below and read the class names off a real offer."
+    )
 
 
 @app.exception_handler(ValueError)
