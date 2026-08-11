@@ -22,8 +22,19 @@ from ..airports import describe, frequent_airports, lookup
 from ..airports import search_with_meta as search_airports
 from ..combine import combine_all, series_from_result
 from ..scenario import Scenario, load_scenario, load_scenarios, save_scenario
-from ..sweep.planner import SECONDS_PER_SEARCH, estimate_minutes, plan_searches
-from ..sweep.runner import DEFAULT_WORKERS, load_legs, run_sweep
+from ..sweep.planner import (
+    SECONDS_PER_SEARCH,
+    estimate_minutes,
+    plan_searches,
+    planned_routes,
+)
+from ..sweep.runner import (
+    DEFAULT_WORKERS,
+    is_comparable,
+    legs_per_search_of,
+    load_legs,
+    run_sweep,
+)
 from ..viability import report as viability_report
 
 SCENARIO_DIR = Path(os.getenv("SCENARIO_DIR", "scenarios"))
@@ -337,19 +348,37 @@ def sweep_by_date(scenario_id: str, stamp: str) -> list[dict]:
 
 @app.get("/api/history/{scenario_id}")
 def history(scenario_id: str) -> list[dict]:
-    """Best total per sweep over time — 'book now or wait'."""
+    """Best total per sweep over time — 'book now or wait'.
+
+    Every point carries the quality of the sweep behind it. Without that the
+    chart drew one line through sweeps running 2.9 to 9.7 legs per search, so
+    its ups and downs tracked how well the scraper was working rather than what
+    flights cost. `comparable` is the flag the UI dims on.
+    """
     scenario = _scenario_or_404(scenario_id)
+    # What the trip requires *now*, so a sweep taken under a narrower shape is
+    # retired rather than plotted beside sweeps of the current one.
+    required = planned_routes(scenario)
     series = []
     for directory in reversed(_sweep_dirs(scenario_id)):
+        legs = load_legs(directory)
         best = _combination(scenario, directory).best
         if best is None:
             continue
+        status = _read_status(directory)
+        covered = len(required & {(leg.origin, leg.destination) for leg in legs})
         series.append(
             {
                 "swept_at": directory.name,
                 "best_total": best.total_price,
                 "best_total_with_bags": best.total_with_bags(scenario.bag_estimate),
                 "currency": best.currency,
+                "depth": status.get("depth"),
+                "searches": status.get("total"),
+                "legs_per_search": legs_per_search_of(status),
+                "routes_covered": covered,
+                "routes_planned": len(required),
+                "comparable": is_comparable(status, covered, len(required)),
             }
         )
     return series

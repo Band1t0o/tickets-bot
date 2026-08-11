@@ -89,6 +89,7 @@ def make_leg():
         url: str = "https://www.pelikan.cz/cs/letenky/example/",
         provider: str = "PELIKAN",
         checked_bag: bool | None = None,
+        observed_at: str | None = None,
     ) -> Leg:
         return Leg(
             provider=provider,
@@ -102,6 +103,7 @@ def make_leg():
             price_amount=price_amount,
             url=url,
             checked_bag=checked_bag,
+            observed_at=observed_at,
         )
 
     return _make

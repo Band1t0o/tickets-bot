@@ -71,6 +71,47 @@ itinerary**. No test connected the two, which is why it went unnoticed. One now 
 Stay lengths are computed from the dates **on the returned flights**, never the requested ones —
 pelikan.cz substitutes nearby dates, so asking for 22 January can return the 23rd.
 
+### When a price was true
+
+Every leg carries `observed_at`, the moment its card was read off the page, and every itinerary
+reports the **oldest** of its legs' stamps plus how far apart they were. A deep sweep runs ~97
+minutes and the probe caught FRA→NRT moving 21% inside a single two-hour window, so a leg from
+minute 3 and one from minute 95 are not the same measurement. Legs written before the field existed
+fall back to the sweep's own timestamp on load.
+
+It is deliberately outside `content_hash()`. Unlike `checked_bag`, which merely *could* split one
+flight into two hashes, a per-search timestamp is unique by construction — hashing it would give
+every leg a distinct digest and turn the parser's `_dedupe` into a no-op.
+
+### Comparing sweeps
+
+Two sweeps' best totals may only be plotted against each other when both are complete enough to
+mean anything. A sweep is **comparable** when it finished, averaged at least 6 legs per search, and
+returned at least one offer on every route the trip plans *today*.
+
+The threshold is measured, not guessed. Of the first four sweeps committed here:
+
+| Sweep | Depth | Searches | Legs/search | Routes | Best total | Comparable |
+|---|---|---:|---:|---:|---:|:--:|
+| 06 Aug 18:08 | quick | 20 | 7.6 | 5/21 | 30,188 | no |
+| 06 Aug 20:22 | **standard** | 204 | **2.9** | 15/21 | 23,017 | no |
+| 07 Aug 13:17 | quick | 93 | 3.7 | 15/21 | 31,302 | no |
+| 10 Aug 11:57 | quick | 93 | **9.7** | **21/21** | **21,324** | **yes** |
+
+The *quick* sweep that worked beat the *standard* sweep by 7%, at 2.9 legs per search and
+`error_count: 0`. Drawn as one line, that chart plotted scraper health rather than prices. 6.0 sits
+between the two clusters (2.9/3.7 against 7.6/9.7) so nothing marginal turns on it.
+
+Incomparable sweeps are still **drawn** — hollow, dash-joined and never labelled as "the best". The
+gaps in the record are worth seeing; a chart that silently dropped them would be its own kind of
+lie. Measuring coverage against what the trip plans *now* also retires old sweeps automatically when
+you widen a trip, which is why the 5-route smoke test is excluded.
+
+**Depth is about the date axis, not the price level.** It sets the resolution of *cheapest total by
+departure date*, and that curve is steep — the cheapest day sampled is 29% below the dearest. At
+`quick` the grid is 7 days, so the best day is only known to ±3 days. The chart says so under
+itself rather than drawing a smooth line through gaps it never searched.
+
 ### Ranking
 
 Itineraries are ranked on the **bag-inclusive** total. The cheapest headline fare is usually a
@@ -204,7 +245,9 @@ a deep one that does not.
 4. The sweep pushed without rebasing while the probe pushed to the same branch on an overlapping
    schedule, so a rejected push threw away ~40 minutes of spent budget.
 
-**Legs per search is the honest health metric.** ~10 is healthy; 2.9 was 70% silent failure.
+**Legs per search is the honest health metric.** ~10 is healthy; 2.9 was 70% silent failure. It is
+now written into every `status.json` alongside route coverage, and the UI refuses to compare sweeps
+that fall short of either — see *Comparing sweeps* below.
 
 Secrets do not transfer between repositories. Only one is needed:
 
@@ -243,6 +286,11 @@ chasing. Frequent moves above ~5% argue for sweeping more often.
 Three tabs: **Search** (build a trip), **Results** (cheapest same-airport and cheapest open-jaw side
 by side, then every itinerary, expandable into legs), **Prices** (cheapest total by departure date —
 *when* to fly; best total over time — *whether to book now*; and the probe table).
+
+Every total on Results says when it was measured and how long ago, on the headline cards and on each
+leg — a figure from three days ago otherwise reads exactly like one from ten minutes ago. Both charts
+on Prices caption their own limits: what the departure-date grid is, and how many sweeps were too
+incomplete to compare.
 
 **+ New trip** creates one; the dropdown beside it is a list of saved trips, not a mode selector. A
 trip's name is derived from its route unless you give it one, and its id is the slug of that name —

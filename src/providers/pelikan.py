@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import re
 import time
-from datetime import date
+from datetime import UTC, date, datetime
 
 from bs4 import BeautifulSoup
 
@@ -257,9 +257,15 @@ class PelikanProvider(BaseProvider):
 
         # Let the last few cards settle before snapshotting the DOM.
         time.sleep(2)
-        legs = parse_results_html(page.content(), origin, destination)
+        html = page.content()
+        # Stamped from the snapshot, not from when parsing finished, and applied
+        # here rather than in the parser so `parse_results_html` stays pure -
+        # reading a saved fixture is not an observation of a live price.
+        observed_at = datetime.now(UTC).isoformat(timespec="seconds")
+        legs = parse_results_html(html, origin, destination)
         for leg in legs:
             leg.url = url
+            leg.observed_at = observed_at
             if leg.depart_date is None:
                 leg.depart_date = depart
         return legs

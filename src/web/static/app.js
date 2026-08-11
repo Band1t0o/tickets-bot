@@ -24,6 +24,33 @@ const api = async (path, options) => {
 
 const money = (n, currency = 'CZK') => `${Math.round(n).toLocaleString()} ${currency}`;
 
+/* A price is a measurement, and one taken three days ago may no longer be
+   buyable. Every total on screen says when it was read off the site. */
+
+const observedAt = (iso) => {
+  if (!iso) return 'time not recorded';
+  const when = new Date(iso);
+  if (Number.isNaN(when.getTime())) return 'time not recorded';
+  const stamp = when.toLocaleString(undefined, {
+    day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit',
+  });
+  return `measured ${stamp} · ${relativeTime(when)}`;
+};
+
+const relativeTime = (when) => {
+  const minutes = Math.round((Date.now() - when.getTime()) / 60000);
+  if (minutes < 2) return 'just now';
+  if (minutes < 90) return `${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 36) return `${hours} h ago`;
+  return `${Math.round(hours / 24)} days ago`;
+};
+
+// A trip is chained from legs priced minutes or hours apart, so a total can be
+// assembled from prices that were never all true at the same moment.
+const spanNote = (minutes) =>
+  minutes >= 20 ? ` · legs priced up to ${minutes >= 90 ? `${Math.round(minutes / 60)} h` : `${minutes} min`} apart` : '';
+
 /* ------------------------------------------------------------------ theme */
 
 const savedTheme = localStorage.getItem('theme');
@@ -828,11 +855,18 @@ async function renderResults() {
     const bagNote = itinerary && itinerary.bags_needed
       ? `<div class="stat__sub">${money(itinerary.total_price, itinerary.currency)} fare + est. ${itinerary.bags_needed} bag(s)</div>`
       : '<div class="stat__sub">bags included</div>';
+    // When the price was true. Without it a figure from a sweep three days ago
+    // reads exactly like one from ten minutes ago, and only one of them is
+    // still worth clicking through on.
+    const measured = itinerary
+      ? `<div class="stat__sub muted">${escapeHtml(observedAt(itinerary.observed_at))}` +
+        `${escapeHtml(spanNote(itinerary.observed_span_minutes ?? 0))}</div>`
+      : '';
     card.innerHTML =
       `<div class="stat__label">${label}</div>` +
       (itinerary
         ? `<div class="stat__value">${money(withBags(itinerary), itinerary.currency)}</div>
-           <div class="stat__sub">${itinerary.route}</div>${bagNote}${saving}`
+           <div class="stat__sub">${itinerary.route}</div>${bagNote}${measured}${saving}`
         : '<div class="stat__value muted">—</div><div class="stat__sub">none found</div>');
     $('headline').appendChild(card);
   }
@@ -871,7 +905,8 @@ async function renderResults() {
         `${money(leg.price_amount, leg.price_currency)}` +
         (leg.checked_bag === true
           ? ' · <span class="badge badge--good">bag incl.</span>'
-          : ' · <span class="badge badge--warning">bag extra</span>');
+          : ' · <span class="badge badge--warning">bag extra</span>') +
+        ` · <span class="muted">${escapeHtml(observedAt(leg.observed_at))}</span>`;
       if (leg.url && /^https?:\/\//i.test(leg.url)) {
         const link = document.createElement('a');
         link.href = leg.url;
@@ -890,6 +925,68 @@ async function renderResults() {
 }
 
 /* ----------------------------------------------------------------- prices */
+
+/* Why a sweep is or is not comparable, in the tooltip. "0 errors" is not
+   health: the 06 Aug standard sweep reported exactly that while averaging 2.9
+   legs a search — roughly 70% silent failure — and read 7% dearer than a quick
+   sweep that actually worked. */
+const sweepQuality = (row) => {
+  const parts = [`${row.depth ?? '?'} · ${row.searches ?? '?'} searches`];
+  if (row.legs_per_search != null) parts.push(`${row.legs_per_search} legs/search`);
+  if (row.routes_planned) parts.push(`${row.routes_covered}/${row.routes_planned} routes`);
+  if (!row.comparable) parts.push('not comparable');
+  return parts.join(' · ');
+};
+
+const historyNote = (history, comparable) => {
+  if (!history.length) return '';
+  const dropped = history.length - comparable.length;
+  if (!dropped) return `<span class="muted">All ${history.length} sweeps are complete enough to compare.</span>`;
+
+  // Name the two failure modes separately: they call for different fixes. A
+  // starved sweep means the scraper or the site; short coverage usually means
+  // the sweep predates a widening of the trip and measured a smaller one.
+  const starved = history.filter((r) => !r.comparable && r.legs_per_search != null
+    && r.legs_per_search < 6).length;
+  const short = dropped - starved;
+  const reasons = [
+    starved ? `${starved} ran too thin to trust (under 6 legs per search)` : '',
+    short ? `${short} did not cover every route this trip needs` : '',
+  ].filter(Boolean).join(', and ');
+
+  // Said plainly, because a single solid point among dimmed ones still reads as
+  // a trend at a glance, and it is not one.
+  const trend = comparable.length >= 2
+    ? ''
+    : ` ${comparable.length === 1
+      ? 'That leaves one sweep complete enough to compare, so there is no trend here yet'
+      : 'No sweep yet is complete enough to compare against another'}.`;
+
+  return `<span class="muted">${dropped} of ${history.length} sweeps are dimmed: ${escapeHtml(reasons)}. ` +
+    'Their totals are drawn but not joined or labelled — a line through them would track how well ' +
+    `the scraper was working rather than what flights cost.${trend}</span>`;
+};
+
+/* Depth sets the resolution of this curve, and the curve is steep — 29% between
+   the cheapest and dearest day sampled — so a coarse grid can miss the best day
+   entirely. Say what the grid is instead of drawing a smooth line through it. */
+const byDateNote = (byDate) => {
+  if (byDate.length < 2) return '';
+  const days = byDate.map((row) => Date.parse(row.depart_date) / 86400000);
+  const step = Math.round(Math.min(...days.slice(1).map((d, i) => d - days[i])));
+  const values = byDate.map((row) => row.cheapest_total);
+  // The saving from picking the right day, which is the decision this chart
+  // supports. Not max/min - 1: that is how far the dearest day sits *above*
+  // the cheapest, a larger number that answers a question nobody asked.
+  const saving = Math.round((1 - Math.min(...values) / Math.max(...values)) * 100);
+  const slack = Math.floor(step / 2);
+  return '<span class="muted">' +
+    `Sampled every ${step} day${step === 1 ? '' : 's'}` +
+    (slack ? `, so the true cheapest day could be up to ${slack} day${slack === 1 ? '' : 's'} either side of a point` : '') +
+    `. The cheapest day sampled is ${saving}% below the dearest` +
+    (step > 1 ? ' — sweep deeper to find the day itself.' : '.') +
+    '</span>';
+};
 
 async function renderPrices() {
   if (!state.stamp) return;
@@ -919,16 +1016,31 @@ async function renderPrices() {
         ? `Could not load — ${byDateResult.reason.message}`
         : 'No itineraries in this sweep yet.' },
   ));
+  $('by-date-note').innerHTML = byDateNote(byDate);
+
   $('chart-history').innerHTML = '';
-  // One point is not a trend. Say so rather than drawing a lone dot that
-  // implies a flat line.
+  // Every sweep is drawn, including the ones too incomplete to trust: the gaps
+  // in the record are worth seeing, and a chart that silently dropped them
+  // would be its own kind of lie. What comparability buys is the *line* — only
+  // trustworthy points are joined solid and eligible for the cheapest label.
+  // Drawn through starved sweeps, this chart tracked how well the scraper was
+  // working rather than what flights cost.
+  const comparable = history.filter((row) => row.comparable);
   $('chart-history').appendChild(lineChart(
-    history.length >= 2 ? history.map((row) => ({ label: row.swept_at.slice(0, 10), value: row.best_total })) : [],
+    history.length >= 2
+      ? history.map((row) => ({
+        label: row.swept_at.slice(0, 10),
+        value: row.best_total,
+        muted: !row.comparable,
+        note: sweepQuality(row),
+      }))
+      : [],
     { width, valueSuffix: suffix, ariaLabel: 'Best total over time',
       emptyText: history.length === 1
         ? 'Only one sweep so far — a trend needs at least two.'
         : 'Needs a few sweeps before a trend means anything.' },
   ));
+  $('history-note').innerHTML = historyNote(history, comparable);
 
   const probe = probeResult.status === 'fulfilled' ? probeResult.value : { routes: {}, recommendation: '' };
   const routes = Object.entries(probe.routes);

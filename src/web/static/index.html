@@ -143,12 +143,18 @@
         <div class="panel__header"><h2>Cheapest total by departure date</h2></div>
         <p class="panel__hint">Which day to leave on. Lowest point is labelled.</p>
         <div class="chart" id="chart-by-date"></div>
+        <p class="panel__hint small" id="by-date-note"></p>
       </div>
 
       <div class="panel">
         <div class="panel__header"><h2>Best total over time</h2></div>
-        <p class="panel__hint">Whether to book now or wait. Fills in as sweeps accumulate.</p>
+        <p class="panel__hint">
+          Whether to book now or wait. Only sweeps complete enough to compare are joined
+          and labelled — a sweep that half-failed reports a price that says more about the
+          scraper than about the market.
+        </p>
         <div class="chart" id="chart-history"></div>
+        <p class="panel__hint small" id="history-note"></p>
       </div>
 
       <div class="panel">

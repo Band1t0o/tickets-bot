@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import asdict, dataclass, field
-from datetime import date
+from datetime import date, datetime
 
 
 @dataclass
@@ -42,6 +42,16 @@ class Leg:
     # Deliberately NOT in content_hash(): baggage belongs to the fare, not the
     # flight, and hashing it would let one flight hash two ways.
     checked_bag: bool | None = None
+    # ISO-8601 UTC moment this price was read off the page. A deep sweep runs
+    # ~97 minutes and the probe caught FRA->NRT moving 21% inside a single
+    # two-hour window, so a leg from minute 3 and one from minute 95 are not the
+    # same measurement. None on legs written before the field existed.
+    #
+    # Also deliberately NOT in content_hash(), for the same reason as
+    # checked_bag but with sharper consequences: it is unique per search, so
+    # hashing it would give every leg a distinct digest and turn the parser's
+    # _dedupe into a no-op.
+    observed_at: str | None = None
 
     def content_hash(self) -> str:
         body = "|".join(
@@ -72,6 +82,9 @@ class Leg:
         payload = dict(data)
         raw = payload.get("depart_date")
         payload["depart_date"] = date.fromisoformat(raw) if raw else None
+        # `observed_at` is absent from every legs.jsonl written before it
+        # existed, and those files are committed history worth keeping
+        # readable. The dataclass default covers it.
         return cls(**payload)
 
 
@@ -157,6 +170,35 @@ class Itinerary:
             return ""
         return " → ".join([self.legs[0].origin] + [leg.destination for leg in self.legs])
 
+    @property
+    def _observations(self) -> list[str]:
+        return sorted(leg.observed_at for leg in self.legs if leg.observed_at)
+
+    @property
+    def observed_at(self) -> str | None:
+        """When the *stalest* price in this trip was read.
+
+        The oldest rather than the newest: a trip quoted from a leg priced 90
+        minutes ago is 90 minutes old, however fresh the rest of it is.
+        """
+        stamps = self._observations
+        return stamps[0] if stamps else None
+
+    @property
+    def observed_span_minutes(self) -> int | None:
+        """Minutes between the oldest and newest price in this trip.
+
+        Legs are chained from a sweep that can run for an hour and a half, so a
+        total can be assembled from prices that were never true at the same
+        moment. This is how far apart they were.
+        """
+        stamps = self._observations
+        if len(stamps) < 2:
+            return None
+        first = datetime.fromisoformat(stamps[0])
+        last = datetime.fromisoformat(stamps[-1])
+        return round((last - first).total_seconds() / 60)
+
     def to_dict(self, bag_estimate: float = 0) -> dict:
         return {
             "legs": [leg.to_dict() for leg in self.legs],
@@ -167,4 +209,6 @@ class Itinerary:
             "currency": self.currency,
             "same_airport": self.same_airport,
             "route": self.route,
+            "observed_at": self.observed_at,
+            "observed_span_minutes": self.observed_span_minutes,
         }

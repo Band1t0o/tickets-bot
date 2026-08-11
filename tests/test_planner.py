@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 from src.scenario import Stop
-from src.sweep.planner import estimate_minutes, plan_searches
+from src.sweep.planner import estimate_minutes, plan_searches, planned_routes
 from tests.conftest import (
     WINDOW_END,
     WINDOW_START,
@@ -153,3 +153,33 @@ def test_estimate_scales_with_search_count_and_workers():
 
 def test_single_day_window_still_produces_searches():
     assert plan_searches(two_stop(window_start=WINDOW_START, window_end=WINDOW_START))
+
+
+# ------------------------------------------------------------ planned routes
+#
+# The route set is what a sweep must cover to be worth comparing against
+# another sweep of the same trip. Derived from airport_pools like everything
+# else about a trip's shape, so it cannot disagree with plan_searches.
+
+
+def test_planned_routes_are_the_distinct_pairs_plan_searches_visits():
+    scenario = make_scenario()
+    assert planned_routes(scenario) == {(s.origin, s.destination) for s in plan_searches(scenario)}
+
+
+def test_planned_routes_do_not_depend_on_depth():
+    """Depth changes how many dates are searched, never which routes."""
+    assert planned_routes(make_scenario(depth="quick")) == planned_routes(
+        make_scenario(depth="deep")
+    )
+
+
+def test_planned_routes_for_the_real_trip_number_21():
+    # 3 origins x 3 Japan + 3 Japan x 2 Philippines + 2 Philippines x 3 origins.
+    assert len(planned_routes(make_scenario())) == 21
+
+
+def test_planned_routes_never_include_an_airport_flying_to_itself():
+    # Pools overlap on a round trip, and no site will price PRG->PRG.
+    for origin, destination in planned_routes(make_round_trip()):
+        assert origin != destination

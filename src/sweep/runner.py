@@ -43,6 +43,55 @@ DEFAULT_WORKERS = 2
 
 ProgressFn = Callable[[int, int, str], None]
 
+# What a sweep must clear before its best total may be plotted against another
+# sweep's. Measured, not guessed: of the first four sweeps committed here, the
+# `standard` one averaged 2.9 legs per search with error_count 0 and reported a
+# best total 7% *worse* than a `quick` sweep at 9.7 that ran half as many
+# searches. Comparing them as a price series charts scraper health.
+#
+# 6.0 sits between the two clusters (2.9/3.7 against 7.6/9.7) rather than on
+# either, so neither a marginal pass nor a marginal fail turns on it.
+MIN_COMPARABLE_LEGS_PER_SEARCH = 6.0
+
+
+def legs_per_search_of(status: dict) -> float | None:
+    """This sweep's legs per search, recorded or derived.
+
+    Sweeps written before the field existed still carry `legs_found` and
+    `total`, and the figure is exactly their quotient - so deriving it
+    classifies committed history honestly instead of discarding all of it for
+    lacking a field it could not have had.
+    """
+    recorded = status.get("legs_per_search")
+    if recorded is not None:
+        return float(recorded)
+    total = status.get("total")
+    found = status.get("legs_found")
+    if not total or found is None:
+        return None
+    return round(found / total, 2)
+
+
+def is_comparable(status: dict, routes_covered: int, routes_planned: int) -> bool:
+    """Whether this sweep's best total may be plotted beside another's.
+
+    Two independent ways for a sweep to be incomparable, and both have happened:
+
+    - **Starved.** Enough searches failed or came back thin that the cheapest
+      trip was simply never seen. `error_count` does not catch this; legs per
+      search does.
+    - **Narrower than the trip.** Either a route went dark, or the sweep
+      predates a widening of the trip and searched a smaller one. Measuring
+      coverage against what the trip plans *now* handles both, and correctly
+      retires old sweeps when the trip is edited.
+    """
+    if status.get("state") != "done":
+        return False
+    if not routes_planned or routes_covered < routes_planned:
+        return False
+    legs_per_search = legs_per_search_of(status)
+    return legs_per_search is not None and legs_per_search >= MIN_COMPARABLE_LEGS_PER_SEARCH
+
 
 class LegProvider(Protocol):
     NAME: str
@@ -79,6 +128,32 @@ class SweepResult:
             for route, attempts in self.route_searches.items()
             if attempts and not self.route_legs.get(route)
         )
+
+    @property
+    def legs_per_search(self) -> float:
+        """The honest health metric: flights found per search run.
+
+        ~10 is healthy; 2.9 was 70% silent failure. Recorded rather than
+        derived on demand because it is what makes two sweeps comparable, and
+        the one figure that separates a broken sweep from a quiet market -
+        `error_count` cannot, having read 0 on the sweep that was failing most.
+        """
+        if not self.total:
+            return 0.0
+        return round(len(self.legs) / self.total, 2)
+
+    @property
+    def route_coverage(self) -> float:
+        """Share of searched routes that returned at least one offer.
+
+        A sweep missing the leg home still reports a healthy leg count while
+        being unable to produce a single complete trip, so coverage is tracked
+        separately from volume.
+        """
+        if not self.route_searches:
+            return 0.0
+        found = sum(1 for route in self.route_searches if self.route_legs.get(route))
+        return round(found / len(self.route_searches), 3)
 
     @property
     def is_healthy(self) -> bool:
@@ -203,6 +278,12 @@ def run_sweep(
             "legs_found": len(result.legs),
             "errors": result.errors[-20:],
             "error_count": len(result.errors),
+            # Written into every sweep so later ones can be compared against
+            # earlier ones without re-reading and re-combining legs.jsonl.
+            "legs_per_search": result.legs_per_search,
+            "route_coverage": result.route_coverage,
+            "routes_planned": len(result.route_searches),
+            "routes_with_legs": sum(1 for r in result.route_searches if result.route_legs.get(r)),
             "routes_with_no_results": result.routes_with_no_results,
             "started_at": result.started_at,
             "finished_at": result.finished_at,
@@ -260,15 +341,39 @@ def _write_legs(directory: Path, legs: list[Leg]) -> None:
             handle.write(json.dumps(leg.to_dict(), ensure_ascii=False) + "\n")
 
 
+def _stamp_to_iso(name: str) -> str | None:
+    """"2026-08-10T11-57-06Z" -> "2026-08-10T11:57:06+00:00", or None."""
+    try:
+        return (
+            datetime.strptime(name, "%Y-%m-%dT%H-%M-%SZ")
+            .replace(tzinfo=UTC)
+            .isoformat(timespec="seconds")
+        )
+    except ValueError:
+        return None
+
+
 def load_legs(directory: Path) -> list[Leg]:
-    path = Path(directory) / "legs.jsonl"
+    directory = Path(directory)
+    path = directory / "legs.jsonl"
     if not path.exists():
         return []
-    return [
+    legs = [
         Leg.from_dict(json.loads(line))
         for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
+
+    # Sweeps committed before legs carried their own timestamp still deserve an
+    # answer to "when was this true", and the directory name is the honest one:
+    # accurate to the start of the sweep rather than to the search. Never
+    # applied over a leg that knows its own time.
+    fallback = _stamp_to_iso(directory.name)
+    if fallback:
+        for leg in legs:
+            if leg.observed_at is None:
+                leg.observed_at = fallback
+    return legs
 
 
 class _NullPage:

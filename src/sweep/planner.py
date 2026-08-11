@@ -79,6 +79,24 @@ def plan_searches(scenario: Scenario) -> list[LegSearch]:
     return list(dict.fromkeys(searches))
 
 
+def planned_routes(scenario: Scenario) -> set[tuple[str, str]]:
+    """The distinct origin-destination pairs this trip requires, ignoring dates.
+
+    What a sweep has to cover before its result may be compared with another
+    sweep of the same trip. Walks `airport_pools` exactly as `plan_searches`
+    does - including the self-pair skip - so the two cannot disagree about
+    which routes a trip implies.
+    """
+    pools = scenario.airport_pools
+    return {
+        (origin, destination)
+        for index in range(len(pools) - 1)
+        for origin in pools[index]
+        for destination in pools[index + 1]
+        if origin != destination
+    }
+
+
 def estimate_minutes(searches: list[LegSearch], workers: int = 2) -> float:
     """Wall-clock estimate for running `searches` across `workers` browsers."""
     if not searches:

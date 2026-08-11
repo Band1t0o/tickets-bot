@@ -420,3 +420,131 @@ def test_sweep_with_no_legs_yields_no_itineraries(client):
     body = api.get(f"/api/sweeps/jp-ph/{stamp}/results").json()
     assert body["itineraries"] == []
     assert body["best_same_airport"] is None
+
+
+# ------------------------------------------------------- sweep comparability
+#
+# The "best total over time" chart drew a trend through four sweeps whose
+# legs-per-search ran 2.9, 3.7, 7.6 and 9.7. The 2.9 sweep - the one at
+# `standard` depth with error_count 0 - was roughly 70% silent failure, and its
+# price sat 7% above what the healthy `quick` sweep found. Plotting them as one
+# series charts scraper health, not prices.
+
+
+# The seeded scenario is PRG/VIE -> NRT -> MNL -> PRG/VIE, so it plans four
+# routes: PRG->NRT, VIE->NRT, NRT->MNL, MNL->PRG, MNL->VIE. Five, in fact - and
+# the default seeded legs cover four of them.
+ALL_ROUTES = [
+    Leg("T", "PRG", "NRT", date(2027, 1, 10), "QR", None, 1, "CZK", 12000.0, "u"),
+    Leg("T", "VIE", "NRT", date(2027, 1, 10), "OS", None, 1, "CZK", 13000.0, "u"),
+    Leg("T", "NRT", "MNL", date(2027, 1, 20), "PR", None, 0, "CZK", 4000.0, "u"),
+    Leg("T", "MNL", "PRG", date(2027, 1, 30), "QR", None, 1, "CZK", 14000.0, "u"),
+    Leg("T", "MNL", "VIE", date(2027, 1, 30), "EY", None, 1, "CZK", 11000.0, "u"),
+]
+
+
+def seed_quality(data_dir, stamp, legs=ALL_ROUTES, **status):
+    """A sweep whose status.json carries whatever quality figures a test needs."""
+    seed_sweep(data_dir, stamp, legs=legs)
+    directory = data_dir / "sweeps" / "jp-ph" / stamp
+    payload = {"state": "done", "total": 4, "depth": "quick", "legs_per_search": 9.7}
+    payload.update(status)
+    (directory / "status.json").write_text(json.dumps(payload))
+    return stamp
+
+
+def test_history_marks_a_starved_sweep_incomparable(client):
+    api, data = client
+    seed_quality(data, "2026-08-06T20-22-44Z", legs_per_search=2.9, depth="standard")
+    row = api.get("/api/history/jp-ph").json()[0]
+    assert row["comparable"] is False
+    assert row["legs_per_search"] == 2.9
+
+
+def test_history_marks_a_healthy_fully_covered_sweep_comparable(client):
+    api, data = client
+    seed_quality(data, "2026-08-10T11-57-06Z")
+    row = api.get("/api/history/jp-ph").json()[0]
+    assert row["comparable"] is True
+    assert row["routes_covered"] == row["routes_planned"] == 5
+
+
+def test_history_marks_a_sweep_missing_a_route_incomparable(client):
+    """Volume is not coverage.
+
+    A sweep can average ten legs a search and still never price one leg home,
+    and that missing route is exactly where the cheapest trip tends to hide -
+    MNL->VIE went dark for a whole sweep while being the return of the best
+    real itinerary.
+    """
+    api, data = client
+    seed_quality(data, "2026-08-07T13-17-07Z", legs=ALL_ROUTES[:-1])
+    row = api.get("/api/history/jp-ph").json()[0]
+    assert row["comparable"] is False
+    assert row["routes_covered"] < row["routes_planned"]
+
+
+def test_history_marks_an_unhealthy_sweep_incomparable(client):
+    api, data = client
+    seed_quality(data, "2026-08-07T13-17-07Z", state="unhealthy")
+    assert api.get("/api/history/jp-ph").json()[0]["comparable"] is False
+
+
+def test_legs_per_search_is_derived_when_a_sweep_predates_the_field(client):
+    """The four already-committed sweeps have no legs_per_search recorded.
+
+    It is exactly legs_found / total, both of which every status.json has, so
+    deriving it classifies them honestly rather than discarding all of them.
+    """
+    api, data = client
+    seed_sweep(data, "2026-08-10T11-57-06Z", legs=ALL_ROUTES)
+    directory = data / "sweeps" / "jp-ph" / "2026-08-10T11-57-06Z"
+    (directory / "status.json").write_text(
+        json.dumps({"state": "done", "total": 10, "legs_found": 97, "depth": "quick"})
+    )
+    row = api.get("/api/history/jp-ph").json()[0]
+    assert row["legs_per_search"] == 9.7
+    assert row["comparable"] is True
+
+
+def test_a_sweep_with_no_countable_searches_is_incomparable(client):
+    api, data = client
+    seed_quality(data, "2026-08-10T11-57-06Z", total=0, legs_per_search=None)
+    assert api.get("/api/history/jp-ph").json()[0]["comparable"] is False
+
+
+def test_history_reports_depth_and_search_count(client):
+    api, data = client
+    seed_quality(data, "2026-08-10T11-57-06Z", depth="deep", total=615)
+    row = api.get("/api/history/jp-ph").json()[0]
+    assert row["depth"] == "deep"
+    assert row["searches"] == 615
+
+
+# ------------------------------------------------------------ observation time
+
+
+def test_results_carry_when_each_price_was_observed(client):
+    api, data = client
+    stamp = seed_sweep(data)
+    body = api.get(f"/api/sweeps/jp-ph/{stamp}/results").json()
+    best = body["best_same_airport"]
+    # Seeded legs have no per-leg stamp, so the sweep directory answers for them.
+    assert best["observed_at"] == "2026-08-06T02:00:00+00:00"
+    assert all(leg["observed_at"] for leg in best["legs"])
+
+
+def test_results_report_how_far_apart_the_prices_were_read(client):
+    api, data = client
+    stamp = "2026-08-06T02-00-00Z"
+    seed_sweep(data, stamp, legs=[
+        Leg("T", "PRG", "NRT", date(2027, 1, 10), "QR", None, 1, "CZK", 12000.0, "u",
+            observed_at="2026-08-06T02:05:00+00:00"),
+        Leg("T", "NRT", "MNL", date(2027, 1, 20), "PR", None, 0, "CZK", 4000.0, "u",
+            observed_at="2026-08-06T02:35:00+00:00"),
+        Leg("T", "MNL", "PRG", date(2027, 1, 30), "QR", None, 1, "CZK", 14000.0, "u",
+            observed_at="2026-08-06T03:35:00+00:00"),
+    ])
+    best = api.get(f"/api/sweeps/jp-ph/{stamp}/results").json()["best_same_airport"]
+    assert best["observed_at"] == "2026-08-06T02:05:00+00:00"
+    assert best["observed_span_minutes"] == 90

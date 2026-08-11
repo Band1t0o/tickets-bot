@@ -229,3 +229,156 @@ def test_the_return_row_states_the_shape_of_the_trip(ui):
     assert chips(page, "#return-to") == []
     assert "one-way" in page.locator("#return-note").inner_text().lower()
     assert not errors
+
+
+# ------------------------------------------------------- results and prices
+#
+# These read the two panels that were quietly lying. The headline showed a
+# price with no indication of when it was true, and the history chart joined
+# four sweeps whose legs-per-search ran 2.9 to 9.7 into one line, so its shape
+# tracked how well the scraper was working rather than what flights cost.
+#
+# Sweeps are seeded after the fixture and the page reloaded: the app reads
+# `data/` per request, so nothing needs restarting.
+
+LEGS = [
+    ("PRG", "NRT", "2027-01-10", 12000.0),
+    ("VIE", "NRT", "2027-01-10", 13000.0),
+    ("NRT", "MNL", "2027-01-20", 4000.0),
+    ("MNL", "PRG", "2027-01-30", 14000.0),
+    ("MNL", "VIE", "2027-01-30", 11000.0),
+]
+
+
+def seed_sweep(data_dir, stamp, *, status, legs=LEGS, observed_at=None):
+    directory = data_dir / "sweeps" / "jp-ph" / stamp
+    directory.mkdir(parents=True, exist_ok=True)
+    with (directory / "legs.jsonl").open("w", encoding="utf-8") as handle:
+        for origin, destination, depart, price in legs:
+            handle.write(json.dumps({
+                "provider": "T", "origin": origin, "destination": destination,
+                "depart_date": depart, "airline": "QR", "flight_number": None,
+                "stops": 1, "price_currency": "CZK", "price_amount": price, "url": "",
+                "depart_time": None, "arrive_time": None, "duration_minutes": None,
+                "checked_bag": True, "observed_at": observed_at,
+            }) + "\n")
+    (directory / "status.json").write_text(json.dumps(status), encoding="utf-8")
+
+
+def open_prices(page):
+    page.locator('#tabs button[data-tab="prices"]').click()
+    page.wait_for_timeout(900)
+
+
+def test_the_headline_says_when_the_price_was_measured(ui):
+    """A figure from three days ago reads exactly like one from ten minutes ago."""
+    page, scenarios, errors = ui
+    seed_sweep(
+        scenarios.parent / "data", "2026-08-10T11-57-06Z",
+        status={"state": "done", "total": 5, "legs_found": 5, "depth": "quick"},
+        observed_at="2026-08-10T11:59:04+00:00",
+    )
+    page.reload(wait_until="networkidle")
+    page.locator('#tabs button[data-tab="results"]').click()
+    page.wait_for_timeout(900)
+
+    headline = page.locator("#headline").inner_text()
+    assert "measured" in headline.lower(), headline
+    # Rendered in the viewer's locale, so assert on the instant rather than the
+    # formatting: 11:59 UTC is 13:59 in Prague.
+    assert "13:59" in headline, headline
+    assert "ago" in headline, headline
+    assert not errors
+
+
+def test_a_starved_sweep_is_dimmed_out_of_the_trend(ui):
+    """The 2.9-legs-per-search sweep must not be joined to the 9.7 one.
+
+    Both are drawn — the gap in the record is worth seeing — but only the
+    trustworthy one is solid, joined and eligible for the cheapest label.
+    """
+    page, scenarios, errors = ui
+    data = scenarios.parent / "data"
+    # Starved: every route answered, but barely anything came back.
+    seed_sweep(data, "2026-08-06T20-22-44Z",
+               status={"state": "done", "total": 100, "legs_found": 293, "depth": "standard"})
+    # Healthy and fully covered.
+    seed_sweep(data, "2026-08-10T11-57-06Z",
+               status={"state": "done", "total": 5, "legs_found": 49, "depth": "quick"})
+    page.reload(wait_until="networkidle")
+    open_prices(page)
+
+    note = page.locator("#history-note").inner_text()
+    assert "1 of 2 sweeps are dimmed" in note, note
+    assert "under 6 legs per search" in note, note
+
+    # One hollow marker (fill = panel background) for the starved sweep, and at
+    # least one dashed segment joining it to the healthy one.
+    markers = page.locator("#chart-history circle")
+    hollow = [i for i in range(markers.count())
+              if "panelBackground" in (markers.nth(i).get_attribute("fill") or "")]
+    assert len(hollow) == 1, f"expected exactly one dimmed point, got {len(hollow)}"
+    assert page.locator("#chart-history path[stroke-dasharray]").count() >= 1
+    assert not errors
+
+
+def test_a_sweep_missing_a_route_is_dimmed_for_coverage_not_starvation(ui):
+    """The two failure modes call for different fixes, so they are named apart."""
+    page, scenarios, errors = ui
+    data = scenarios.parent / "data"
+    seed_sweep(data, "2026-08-07T13-17-07Z", legs=LEGS[:-1],
+               status={"state": "done", "total": 4, "legs_found": 40, "depth": "quick"})
+    seed_sweep(data, "2026-08-10T11-57-06Z",
+               status={"state": "done", "total": 5, "legs_found": 49, "depth": "quick"})
+    page.reload(wait_until="networkidle")
+    open_prices(page)
+
+    note = page.locator("#history-note").inner_text()
+    assert "did not cover every route" in note, note
+    assert "legs per search" not in note, note
+    assert not errors
+
+
+def test_a_lone_comparable_sweep_refuses_to_draw_a_trend(ui):
+    page, scenarios, errors = ui
+    data = scenarios.parent / "data"
+    seed_sweep(data, "2026-08-06T20-22-44Z",
+               status={"state": "done", "total": 100, "legs_found": 293, "depth": "standard"})
+    seed_sweep(data, "2026-08-10T11-57-06Z",
+               status={"state": "done", "total": 5, "legs_found": 49, "depth": "quick"})
+    # Only one of the two is comparable. Both points are still drawn — the gap
+    # in the record is worth seeing — but the caption refuses the trend.
+    page.reload(wait_until="networkidle")
+    open_prices(page)
+    note = page.locator("#history-note").inner_text().lower()
+    assert "one sweep complete enough to compare" in note, note
+    assert "no trend here yet" in note, note
+    assert page.locator("#chart-history circle").count() >= 2
+    assert not errors
+
+
+def test_the_by_date_chart_states_its_sampling_resolution(ui):
+    """A smooth line through points a week apart implies knowledge of the gaps."""
+    page, scenarios, errors = ui
+    seed_sweep(
+        scenarios.parent / "data", "2026-08-10T11-57-06Z",
+        status={"state": "done", "total": 5, "legs_found": 49, "depth": "quick"},
+        legs=[
+            ("PRG", "NRT", "2027-01-05", 12000.0),
+            ("PRG", "NRT", "2027-01-12", 9000.0),
+            ("NRT", "MNL", "2027-01-15", 4000.0),
+            ("NRT", "MNL", "2027-01-22", 4000.0),
+            ("MNL", "PRG", "2027-01-25", 14000.0),
+            ("MNL", "PRG", "2027-02-01", 14000.0),
+        ],
+    )
+    page.reload(wait_until="networkidle")
+    open_prices(page)
+
+    note = page.locator("#by-date-note").inner_text()
+    assert "sampled every 7 days" in note.lower(), note
+    assert "3 days either side" in note, note
+    # 30,000 on 01-05 against 27,000 on 01-12 — a 10% saving for leaving a week
+    # later, not the 11% that max/min - 1 would report.
+    assert "10% below the dearest" in note, note
+    assert not errors

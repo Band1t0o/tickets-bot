@@ -7,7 +7,7 @@ flights today".
 """
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import pytest
@@ -150,6 +150,27 @@ def test_genuine_no_results_page_returns_empty_list(monkeypatch):
         _DATE,
     )
     assert legs == []
+
+
+def test_search_stamps_every_leg_with_when_the_page_was_read(monkeypatch):
+    # The parser stays pure and browser-free, so the timestamp is applied by the
+    # search - the same place url and the fallback depart_date are applied.
+    from src.providers import pelikan as mod
+
+    monkeypatch.setattr(mod.time, "sleep", lambda _s: None)
+    legs = mod.PelikanProvider().search_leg(_StubPage(cards=3), "PRG", "NRT", _DATE)
+
+    assert legs, "fixture should yield legs"
+    for leg in legs:
+        assert leg.observed_at is not None
+        # Parseable as an aware UTC instant, not a bare local string.
+        assert datetime.fromisoformat(leg.observed_at).tzinfo is not None
+
+
+def test_parser_alone_leaves_observed_at_unset():
+    """Parsing a saved page is not an observation of a live price."""
+    for leg in parse_results_html(FIXTURE, "PRG", "NRT"):
+        assert leg.observed_at is None
 
 
 def test_parser_reads_checked_baggage(legs):
