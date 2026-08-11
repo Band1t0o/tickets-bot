@@ -215,3 +215,51 @@ def test_an_old_round_trip_keeps_its_trip_length_as_the_stay():
 def test_unknown_fields_are_rejected_rather_than_ignored():
     with pytest.raises(ValueError, match="unknown scenario fields"):
         Scenario.from_dict({**make_scenario().to_dict(), "japan_stay_dayz": [1, 2]})
+
+
+# ----------------------------------------------- notification preferences
+#
+# Which deals get sent, and from where. These live on the scenario beside
+# alert_threshold and bag_estimate because the scenario file is what the cloud
+# sweep reads - a preference held anywhere else would not reach the run that
+# actually sends the message.
+
+
+def test_a_trip_defaults_to_no_airport_preference():
+    assert make_scenario().preferred_origins == []
+
+
+def test_preferred_origins_round_trip_as_ranked_tiers(tmp_path):
+    tiers = [["PRG", "VIE"], ["BER", "KRK", "KTW"], ["FRA", "MUC"]]
+    save_scenario(make_scenario(preferred_origins=tiers), tmp_path)
+    assert load_scenario(tmp_path / "japan-philippines.json").preferred_origins == tiers
+
+
+def test_preferred_origins_reject_a_code_that_is_not_iata():
+    with pytest.raises(ValueError, match="preferred_origins"):
+        make_scenario(preferred_origins=[["PRG"], ["Berlin"]]).validate()
+
+
+def test_preferred_origins_reject_an_empty_tier():
+    """An empty tier is a ranking with a hole in it, not a preference."""
+    with pytest.raises(ValueError, match="tier 2"):
+        make_scenario(preferred_origins=[["PRG"], []]).validate()
+
+
+def test_an_airport_may_not_sit_in_two_tiers():
+    # Otherwise "best tier that has one" has two answers for the same airport.
+    with pytest.raises(ValueError, match="VIE"):
+        make_scenario(preferred_origins=[["PRG", "VIE"], ["VIE", "BER"]]).validate()
+
+
+def test_notify_defaults_to_the_cheapest_and_the_preferred():
+    assert make_scenario().notify == ["cheapest", "preferred"]
+
+
+def test_unknown_notify_selection_is_rejected():
+    with pytest.raises(ValueError, match="notify"):
+        make_scenario(notify=["cheapest", "shiniest"]).validate()
+
+
+def test_quiet_by_default_so_two_sweeps_a_day_do_not_become_sixty_pings():
+    assert make_scenario().notify_quiet is True

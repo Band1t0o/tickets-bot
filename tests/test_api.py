@@ -548,3 +548,38 @@ def test_results_report_how_far_apart_the_prices_were_read(client):
     best = api.get(f"/api/sweeps/jp-ph/{stamp}/results").json()["best_same_airport"]
     assert best["observed_at"] == "2026-08-06T02:05:00+00:00"
     assert best["observed_span_minutes"] == 90
+
+
+# ------------------------------------------------------------------- probe
+
+
+def seed_probe(data_dir, prices, origin="FRA", destination="NRT"):
+    directory = data_dir / "probe"
+    directory.mkdir(parents=True, exist_ok=True)
+    with (directory / "observations.jsonl").open("a", encoding="utf-8") as handle:
+        for index, price in enumerate(prices):
+            handle.write(json.dumps({
+                "ts": f"2026-08-07T{index:02d}:00:00+00:00", "origin": origin,
+                "destination": destination, "depart_date": "2027-01-12",
+                "min_price": price, "n_offers": 10, "currency": "CZK",
+            }) + "\n")
+
+
+def test_probe_endpoint_serialises_every_derived_rate(client):
+    """`asdict` covers fields only, so each computed rate must be named.
+
+    Missing one is silent rather than loud: the UI reads undefined, renders 0%,
+    and a route that moved 20% of the time reports as perfectly steady.
+    """
+    api, data = client
+    seed_probe(data, [10832, 11146, 13556])
+    route = api.get("/api/probe").json()["routes"]["FRA→NRT"]
+    for key in ("change_rate", "meaningful_change_rate", "net_change_pct", "range_pct"):
+        assert route.get(key) is not None, f"{key} missing from the probe payload"
+    assert route["meaningful_change_rate"] == 1.0
+    assert route["net_change_pct"] == 25.1
+
+
+def test_probe_endpoint_is_empty_without_observations(client):
+    api, _ = client
+    assert api.get("/api/probe").json()["routes"] == {}

@@ -67,12 +67,12 @@ def test_load_best_tolerates_a_corrupt_state_file(tmp_path):
     assert load_best(tmp_path) is None
 
 
-def test_price_embed_names_both_options():
+def test_price_embed_names_the_trip_and_every_total():
+    from src.alerts import Pick
+
     embed = build_price_embed(
-        scenario_name="Japan then Philippines",
-        best_same=itinerary(30000),
-        best_jaw=itinerary(27000),
-        previous_best=31000,
+        "Japan then Philippines",
+        [Pick("cheapest", itinerary(27000)), Pick("preferred", itinerary(30000), tier=1)],
     )
     text = json.dumps(embed, ensure_ascii=False)
     assert "Japan then Philippines" in text
@@ -80,8 +80,10 @@ def test_price_embed_names_both_options():
 
 
 def test_price_embed_shows_the_delta_against_the_previous_best():
-    embed = build_price_embed("S", itinerary(28000), None, previous_best=30000)
-    assert "2" in json.dumps(embed)  # a 2,000 CZK drop is reported
+    from src.alerts import Pick
+
+    embed = build_price_embed("S", [Pick("cheapest", itinerary(28000))], previous_best=30000)
+    assert "down 2,000" in embed["description"], embed["description"]
 
 
 def test_zero_legs_triggers_health_alert():
@@ -124,3 +126,102 @@ def test_no_dark_routes_leaves_a_healthy_sweep_silent():
         )
         is None
     )
+
+
+# ------------------------------------------------------- reporting the picks
+#
+# One embed per pick, so "cheapest" and "cheapest from an airport you like" are
+# both visible with the difference between them stated. Previously the message
+# was always "same airport" against "open jaw", which answers a question about
+# trip shape rather than about where you would rather fly from.
+
+
+def pick(name, total, tier=None, premium=0.0, also_preferred=False, origin="PRG"):
+    from src.alerts import Pick
+
+    trip = Itinerary(legs=[
+        leg(origin, "NRT", date(2027, 1, 10), total * 0.4),
+        leg("NRT", "MNL", date(2027, 1, 20), total * 0.15),
+        leg("MNL", origin, date(2027, 1, 30), total * 0.45),
+    ])
+    return Pick(name, trip, tier=tier, premium=premium, also_preferred=also_preferred)
+
+
+def test_each_pick_becomes_its_own_field():
+    embed = build_price_embed("S", [pick("cheapest", 21000, origin="FRA"),
+                                    pick("preferred", 30000, tier=1, premium=9000)])
+    names = [field["name"] for field in embed["fields"]]
+    assert any("Cheapest overall" in n for n in names), names
+    assert any("tier-1" in n for n in names), names
+
+
+def test_the_preferred_field_states_what_the_preference_costs():
+    embed = build_price_embed("S", [pick("cheapest", 21000, origin="FRA"),
+                                    pick("preferred", 30000, tier=1, premium=9000)])
+    preferred = next(f for f in embed["fields"] if "tier-1" in f["name"])
+    assert "9" in preferred["value"], preferred["value"]
+
+
+def test_a_collapsed_pick_is_reported_once_and_says_so():
+    embed = build_price_embed("S", [pick("cheapest", 21000, tier=1, also_preferred=True)])
+    assert len(embed["fields"]) == 1
+    assert "prefer" in embed["fields"][0]["name"].lower()
+
+
+def test_every_field_says_when_the_price_was_measured():
+    """A ping about a price read three days ago is worth less than one about a
+    price read ten minutes ago, and the message must not hide which it is."""
+    stamped = pick("cheapest", 21000)
+    for one in stamped.itinerary.legs:
+        one.observed_at = "2026-08-10T11:59:04+00:00"
+    embed = build_price_embed("S", [stamped])
+    assert "2026-08-10" in embed["fields"][0]["value"]
+
+
+def test_no_picks_produces_no_embed():
+    assert build_price_embed("S", []) is None
+
+
+# ------------------------------------------------------ per-pick quiet state
+
+
+def test_best_state_is_tracked_per_pick(tmp_path):
+    """The preferred pick improving is news even when the cheapest has not.
+
+    One shared figure meant a tier-1 trip dropping 3,000 CZK went unreported
+    whenever Frankfurt happened to stay flat.
+    """
+    save_best(tmp_path, 21000, "CZK", name="cheapest")
+    save_best(tmp_path, 30000, "CZK", name="preferred")
+    assert load_best(tmp_path, name="cheapest") == 21000
+    assert load_best(tmp_path, name="preferred") == 30000
+
+
+def test_an_unknown_pick_has_no_recorded_best(tmp_path):
+    save_best(tmp_path, 21000, "CZK", name="cheapest")
+    assert load_best(tmp_path, name="preferred") is None
+
+
+def test_the_flat_best_file_still_reads_as_the_cheapest(tmp_path):
+    """best.json predates having more than one pick; it recorded the cheapest."""
+    (tmp_path / "best.json").write_text(
+        json.dumps({"best_total": 23017, "currency": "CZK"}), encoding="utf-8"
+    )
+    assert load_best(tmp_path, name="cheapest") == 23017
+    assert load_best(tmp_path, name="preferred") is None
+
+
+def test_saving_one_pick_does_not_discard_another(tmp_path):
+    save_best(tmp_path, 21000, "CZK", name="cheapest")
+    save_best(tmp_path, 30000, "CZK", name="preferred")
+    save_best(tmp_path, 20000, "CZK", name="cheapest")
+    assert load_best(tmp_path, name="preferred") == 30000
+
+
+def test_a_worse_total_never_walks_the_recorded_best_upward(tmp_path):
+    # With alert_threshold set, an alert fires on any total under it - including
+    # one worse than the best already recorded. Letting that overwrite destroyed
+    # the "only report genuine improvement" guarantee for every later run.
+    save_best(tmp_path, 21000, "CZK", name="cheapest")
+    save_best(tmp_path, 25000, "CZK", name="cheapest")
+    assert load_best(tmp_path, name="cheapest") == 21000

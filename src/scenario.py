@@ -21,11 +21,16 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import date
 from pathlib import Path
 
 DEPTHS = ("quick", "standard", "deep")
+
+# Picks a sweep can report. "cheapest" is the best bag-inclusive total whatever
+# the route; "preferred" is the best one flying from and back to the highest
+# tier of `preferred_origins` that has anything at all.
+NOTIFY_SELECTIONS = ("cheapest", "preferred")
 
 # Days between searched departure dates, per depth.
 DEPTH_STEP_DAYS = {"quick": 7, "standard": 3, "deep": 1}
@@ -73,6 +78,24 @@ class Scenario:
     bag_estimate: int = 1500
     enabled: bool = True
     notes: str = ""
+
+    # ---------------------------------------------------- what gets sent
+    #
+    # These live here rather than in a settings file because the scenario is
+    # what the scheduled cloud sweep reads. A preference held anywhere else
+    # would never reach the run that actually sends the message.
+
+    # Airports you would rather fly from, best first. An itinerary belongs to a
+    # tier when *both* ends of it are in that tier or better, which handles an
+    # open jaw without needing a second setting. Empty means no preference, and
+    # then only the cheapest is ever reported.
+    preferred_origins: list[list[str]] = field(default_factory=list)
+    # Which picks to report. See `src/alerts.py` for what each one means.
+    notify: list[str] = field(default_factory=lambda: ["cheapest", "preferred"])
+    # Stay silent unless a pick actually improved on the best recorded for it.
+    # Default True: at two sweeps a day, unconditional reporting is ~60 messages
+    # a month, most of them "still 21,324". Set false for a digest every run.
+    notify_quiet: bool = True
 
     # ------------------------------------------------------------------ shape
 
@@ -147,6 +170,29 @@ class Scenario:
             )
         if not 1 <= self.adults <= 9:
             raise ValueError(f"adults must be between 1 and 9, got {self.adults}")
+
+        seen: dict[str, int] = {}
+        for rank, tier in enumerate(self.preferred_origins, start=1):
+            if not tier:
+                raise ValueError(f"preferred_origins tier {rank} is empty; remove it or fill it")
+            for code in tier:
+                if not IATA_RE.match(code):
+                    raise ValueError(
+                        f"preferred_origins tier {rank}: {code!r} is not a 3-letter IATA code"
+                    )
+                # Otherwise "the best tier containing this airport" has two
+                # answers and the reported pick depends on iteration order.
+                if code in seen:
+                    raise ValueError(
+                        f"preferred_origins: {code} appears in tier {seen[code]} and tier {rank}"
+                    )
+                seen[code] = rank
+
+        unknown = [name for name in self.notify if name not in NOTIFY_SELECTIONS]
+        if unknown:
+            raise ValueError(
+                f"notify: {', '.join(sorted(unknown))} is not one of {NOTIFY_SELECTIONS}"
+            )
 
         # Without this the planner emits the first leg and nothing else: the
         # later legs have no valid departure dates, so the sweep yields no

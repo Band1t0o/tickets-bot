@@ -84,6 +84,37 @@
       </div>
 
       <div class="panel">
+        <div class="panel__header"><h2>What gets sent to Discord</h2></div>
+        <p class="panel__hint">
+          Each sweep reports the picks you tick below, so a daily ping is a short list
+          rather than the whole deep search.
+        </p>
+        <div class="row">
+          <label class="check small">
+            <input type="checkbox" id="notify-cheapest"> Cheapest overall
+          </label>
+          <label class="check small">
+            <input type="checkbox" id="notify-preferred"> Cheapest from airports you prefer
+          </label>
+          <label class="check small">
+            <input type="checkbox" id="notify-quiet"> Only when it beats the best so far
+          </label>
+        </div>
+
+        <h3 class="muted small" style="margin-top:20px">Airports you'd rather fly from</h3>
+        <p class="panel__hint" style="margin-top:0">
+          Best first. A trip counts as belonging to a tier only when it both leaves from and
+          returns to that tier — flying out of Prague and home into Frankfurt still strands you
+          in Frankfurt. The best tier that has any trip at all wins, and the message says what
+          preferring it cost against the outright cheapest.
+        </p>
+        <div id="preferred-tiers"></div>
+        <div class="row" style="margin-top:12px">
+          <button class="small" id="add-tier-btn">+ Add a lower choice</button>
+        </div>
+      </div>
+
+      <div class="panel">
         <div class="panel__header">
           <h2>Run</h2>
           <span class="badge badge--muted" id="estimate">—</span>
@@ -106,9 +137,11 @@
         </div>
         <div id="leg-breakdown" class="small muted" style="margin-top:12px"></div>
         <p class="panel__hint" style="margin:12px 0 0" id="run-note">
-          Local runs use your machine and cost nothing. Cloud runs spend from the
-          2,000-minute monthly Actions budget. The estimate above is measured at the
-          current pace, so it moves when the sweep settings do.
+          Local runs use your machine; cloud runs are free, since the repo is public. What
+          limits depth now is pelikan.cz rather than minutes — it has throttled this client
+          into mass timeouts before, and a sweep that half-fails is worth less than a shallow
+          one that works. The estimate above is measured at the current pace, so it moves when
+          the sweep settings do.
         </p>
         <div id="save-error" class="badge badge--error" hidden></div>
       </div>
@@ -160,9 +193,12 @@
       <div class="panel">
         <div class="panel__header"><h2>Volatility probe</h2></div>
         <p class="panel__hint">
-          Three fixed routes sampled every two hours, to decide whether daily sweeping
-          is often enough. Disable the probe workflow once it has a week of data —
-          left running it costs roughly 720 Actions minutes a month.
+          Three fixed routes sampled every two hours, to decide whether daily sweeping is
+          often enough. <strong>Net move</strong> is first observation to last — the figure
+          that says whether a fare is running away from you. <strong>Steps that moved</strong>
+          counts any change at all, including the site rounding by a few crowns; the column
+          beside it counts only moves worth noticing, and the gap between the two is why the
+          steadiest route here used to report the highest volatility.
         </p>
         <div id="probe-body" class="empty">No observations yet.</div>
       </div>

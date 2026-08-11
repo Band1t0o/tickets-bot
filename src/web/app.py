@@ -389,9 +389,16 @@ def probe_stats() -> dict:
     from ..probe import probe_report
 
     stats = probe_report(DATA_DIR / "probe")
+    # `asdict` serialises fields only, so every derived rate has to be named
+    # here. Missing one is silent: the UI reads undefined, prints 0% and looks
+    # like a measurement rather than an omission.
     return {
         "routes": {
-            name: asdict(route) | {"change_rate": route.change_rate}
+            name: asdict(route)
+            | {
+                "change_rate": route.change_rate,
+                "meaningful_change_rate": route.meaningful_change_rate,
+            }
             for name, route in stats.routes.items()
         },
         "recommendation": stats.recommendation,

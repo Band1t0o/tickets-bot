@@ -382,3 +382,77 @@ def test_the_by_date_chart_states_its_sampling_resolution(ui):
     # later, not the 11% that max/min - 1 would report.
     assert "10% below the dearest" in note, note
     assert not errors
+
+
+# ------------------------------------------------------ notification settings
+#
+# Which deals get sent, and from where. Typed the way a person types, for the
+# same reason the route editor is: the picker below is the same component, and
+# the bug it once had was invisible to every scripted click.
+
+
+def test_a_preferred_tier_is_typed_and_saved(ui):
+    page, scenario_dir, errors = ui
+    page.locator("#add-tier-btn").click()
+    page.wait_for_timeout(300)
+
+    page.locator('[data-picker="tier-0"] .typeahead input').click()
+    page.keyboard.type("VIE", delay=55)
+    page.keyboard.press("Enter")
+    page.wait_for_timeout(800)
+
+    assert chips(page, "#preferred-tiers") == ["VIE"]
+    page.locator("#save-btn").click()
+    page.wait_for_timeout(900)
+
+    saved = json.loads((scenario_dir / "jp-ph.json").read_text(encoding="utf-8"))
+    assert saved["preferred_origins"] == [["VIE"]]
+    assert not errors
+
+
+def test_an_airport_cannot_sit_in_two_tiers_at_once(ui):
+    """The scenario rejects a duplicate, so the picker must not let one exist.
+
+    Otherwise "the best tier holding this airport" has two answers and Save
+    fails on something the form could see coming.
+    """
+    page, _, errors = ui
+    for _ in range(2):
+        page.locator("#add-tier-btn").click()
+        page.wait_for_timeout(250)
+
+    for tier in ("tier-0", "tier-1"):
+        page.locator(f'[data-picker="{tier}"] .typeahead input').click()
+        page.keyboard.type("PRG", delay=55)
+        page.keyboard.press("Enter")
+        page.wait_for_timeout(700)
+
+    # Claimed by the second tier, and gone from the first rather than in both.
+    assert chips(page, "#preferred-tiers") == ["PRG"]
+    assert not errors
+
+
+def test_notification_choices_round_trip(ui):
+    page, scenario_dir, errors = ui
+    page.locator("#notify-preferred").uncheck()
+    page.locator("#notify-quiet").uncheck()
+    page.locator("#save-btn").click()
+    page.wait_for_timeout(900)
+
+    saved = json.loads((scenario_dir / "jp-ph.json").read_text(encoding="utf-8"))
+    assert saved["notify"] == ["cheapest"]
+    assert saved["notify_quiet"] is False
+    assert not errors
+
+
+def test_an_empty_tier_row_is_dropped_rather_than_failing_the_save(ui):
+    page, scenario_dir, errors = ui
+    page.locator("#add-tier-btn").click()
+    page.wait_for_timeout(300)
+    page.locator("#save-btn").click()
+    page.wait_for_timeout(900)
+
+    saved = json.loads((scenario_dir / "jp-ph.json").read_text(encoding="utf-8"))
+    assert saved["preferred_origins"] == []
+    assert page.locator("#save-error").is_hidden()
+    assert not errors

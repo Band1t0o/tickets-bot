@@ -1,13 +1,28 @@
 name: sweep
 
-# One deep sweep per day. The previous schedule fired 20x/day and each run
-# spent ~11 of its ~13.6 minutes on pip + playwright install, costing roughly
-# 8,000 min/month against a 2,000-minute private-repo tier. Caching the browser
-# and searching via deep links (15s instead of 150s) is what makes daily
-# full-depth coverage affordable.
+# One deep sweep per day, moving to two once the first is proven healthy.
+#
+# The repo is public, so Actions minutes are free and depth is no longer
+# rationed by budget. What still constrains it is pelikan.cz: this client has
+# already been throttled into 58 of 93 timeouts in a single sweep, and a
+# starved sweep is worse than no sweep - it spends time, commits thin results,
+# and its price is not comparable with anything. Hence the health gate below,
+# and hence workers/delay stay where they are. Free minutes are not a reason to
+# hammer the site harder.
+#
+# Timing comes from the probe, detrended against each route-day's median:
+# 01:00-03:00 UTC runs ~2.2% below the day's median and 18:00-22:00 ~0.6% above,
+# so a true evening slot would systematically sample the day's high. 02:00 lands
+# results before you wake; 13:00 (~15:00 local) is near-median and actionable
+# while you are awake to act on it.
 on:
   schedule:
-    - cron: '0 2 * * *'      # 02:00 UTC daily, full-depth multi-city sweep
+    - cron: '0 2 * * *'      # 02:00 UTC, deep
+    # Second slot, deliberately not enabled yet. Turn it on only once the 02:00
+    # deep runs hold >=8 legs/search at 21/21 route coverage for a few days --
+    # doubling the load before that is the most likely way to make the data
+    # worse rather than better.
+    # - cron: '0 13 * * *'   # 13:00 UTC, deep, gated on the morning run
   workflow_dispatch:
     inputs:
       scenario:
@@ -28,10 +43,10 @@ concurrency:
 jobs:
   sweep:
     runs-on: ubuntu-latest
-    # A standard sweep is ~28 min at 2 workers (deep would be ~97, which is why
-    # the run step below caps scheduled runs at standard). Without a ceiling,
-    # one hung browser could burn the entire monthly budget overnight.
-    timeout-minutes: 90
+    # A deep sweep is ~97 min at 2 workers, so 90 would have killed every one of
+    # them a few minutes from the end. Still a ceiling, not a budget: without it
+    # one hung browser runs until GitHub's own 6-hour limit.
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
 
@@ -59,20 +74,35 @@ jobs:
             python -m src.cli sweep --scenario "$id" --dry-run || true
           done
 
+      # Only the afternoon run is gated: the morning one has nothing ahead of it
+      # to judge, and the whole point is not to follow a starved sweep with
+      # another. Sets SKIP rather than failing, so a skipped run reads as a
+      # decision in the log and not as breakage.
+      - name: Ask the morning sweep whether another is worth running
+        if: github.event.schedule == '0 13 * * *'
+        id: gate
+        run: |
+          for f in scenarios/*.json; do
+            id=$(basename "$f" .json)
+            if ! python -m src.cli health-gate --scenario "$id" --min-legs-per-search 6; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+
       - name: Run sweep
+        if: steps.gate.outputs.skip != 'true'
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          # Scheduled runs sweep at full depth; the scenario's own depth is the
-          # interactive default and stays lower so local runs are quick.
           INPUT_SCENARIO: ${{ inputs.scenario }}
           INPUT_DEPTH: ${{ inputs.depth }}
         run: |
           set -euo pipefail
-          # Standard, not deep. At 2 workers a deep sweep is ~97 min, which
-          # exceeds both this job's timeout and the 2,000-minute monthly tier.
-          # A standard sweep that mostly succeeds is worth more than a deep one
-          # where most searches time out.
-          DEPTH="${INPUT_DEPTH:-standard}"
+          # Deep: every departure date, ~615 searches, ~97 min. Affordable now
+          # the repo is public, and it is what the date axis needed - at `quick`
+          # the grid is 7 days and the cheapest day is only known to +/-3, on a
+          # curve whose cheapest and dearest days differ by 29%.
+          DEPTH="${INPUT_DEPTH:-deep}"
 
           if [ -n "${INPUT_SCENARIO:-}" ]; then
             python -m src.cli sweep --scenario "$INPUT_SCENARIO" --depth "$DEPTH"
@@ -109,8 +139,9 @@ jobs:
           # Rebase before pushing. probe.yml runs `0 */2 * * *`, which includes
           # the 02:00 slot this workflow fires on, and pushes to the same branch.
           # The two concurrency groups differ, so nothing serialises them: a
-          # rejected push would throw away a sweep that already spent ~40 minutes
-          # of the monthly budget. Retried because the probe may land twice.
+          # rejected push would throw away ~97 minutes of sweeping that cannot be
+          # re-run against the same prices. Retried because the probe may land
+          # twice inside one deep sweep.
           for attempt in 1 2 3; do
             if git push; then
               exit 0

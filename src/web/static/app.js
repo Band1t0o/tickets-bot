@@ -93,7 +93,7 @@ const escapeHtml = (value) =>
 
 // Everything below `route` is the editable trip; `state.scenario` stays the
 // last saved version so an unsaved edit can be discarded by reloading.
-const route = { origins: [], stops: [], returnTo: [] };
+const route = { origins: [], stops: [], returnTo: [], preferredTiers: [] };
 
 const airportCache = new Map();
 const cacheAirports = (list) => {
@@ -479,10 +479,68 @@ function renderOrigins() {
   }, { key: 'origins', suggest: state.frequent.origins });
 }
 
+/* ------------------------------------------------------ preferred airports */
+
+/* Ranked tiers, not a flat list: PRG and VIE are not interchangeable with KTW
+   just because all three beat FRA. Built from the same chip/typeahead machinery
+   as the route rows, so an airport is chosen the same way everywhere. */
+
+const ORDINALS = ['1st choice', '2nd choice', '3rd choice', '4th choice', '5th choice'];
+
+function renderPreferred() {
+  const host = $('preferred-tiers');
+  host.innerHTML = '';
+
+  route.preferredTiers.forEach((tier, index) => {
+    const block = document.createElement('div');
+    block.style.marginBottom = '12px';
+
+    const heading = document.createElement('div');
+    heading.className = 'row';
+    heading.innerHTML = `<span class="small muted">${ORDINALS[index] ?? `choice ${index + 1}`}</span>`;
+    const drop = document.createElement('button');
+    drop.type = 'button';
+    drop.className = 'small';
+    drop.textContent = 'Remove';
+    drop.title = `Remove ${ORDINALS[index] ?? 'this tier'}`;
+    drop.onclick = () => {
+      route.preferredTiers.splice(index, 1);
+      renderPreferred();
+    };
+    heading.appendChild(drop);
+    block.appendChild(heading);
+
+    const chips = document.createElement('div');
+    chips.className = 'chips';
+    block.appendChild(chips);
+    host.appendChild(block);
+
+    renderChips(chips, tier, (next) => {
+      // An airport in two tiers makes "the best tier holding it" ambiguous, and
+      // the scenario rejects it on save. Drop it from the others rather than
+      // letting a save fail on something the UI could see coming.
+      route.preferredTiers = route.preferredTiers.map((other, i) =>
+        (i === index ? next : other.filter((code) => !next.includes(code))));
+      renderPreferred();
+    }, { key: `tier-${index}`, suggest: state.frequent.origins });
+  });
+
+  if (!route.preferredTiers.length) {
+    host.innerHTML =
+      '<p class="empty small">No preference — only the cheapest trip is ever reported.</p>';
+  }
+}
+
+$('add-tier-btn').onclick = () => {
+  route.preferredTiers.push([]);
+  renderPreferred();
+};
+
 function renderRoute() {
   renderOrigins();
   renderStops();
   renderReturn();
+  renderPreferred();
 }
 
 /* -------------------------------------------------------------- scenarios */
@@ -497,6 +555,12 @@ function fillForm(scenario) {
   // `return_to: null` on a return trip means "back where you started", which is
   // shown as the row mirroring the origins rather than as an empty row.
   route.returnTo = scenario.one_way ? [] : [...(scenario.return_to ?? scenario.origins)];
+  route.preferredTiers = (scenario.preferred_origins ?? []).map((tier) => [...tier]);
+
+  const notify = scenario.notify ?? ['cheapest', 'preferred'];
+  $('notify-cheapest').checked = notify.includes('cheapest');
+  $('notify-preferred').checked = notify.includes('preferred');
+  $('notify-quiet').checked = scenario.notify_quiet !== false;
 
   $('trip-name').value = scenario.name ?? '';
   $('window-start').value = scenario.window_start;
@@ -528,6 +592,14 @@ function formToScenario() {
     currency: ($('currency').value || 'CZK').toUpperCase(),
     depth: $('depth').value,
     enabled: $('enabled').checked,
+    // An empty tier is a ranking with a hole in it and the scenario rejects it,
+    // so a row you added and never filled is simply dropped on save.
+    preferred_origins: route.preferredTiers.filter((tier) => tier.length),
+    notify: [
+      ...($('notify-cheapest').checked ? ['cheapest'] : []),
+      ...($('notify-preferred').checked ? ['preferred'] : []),
+    ],
+    notify_quiet: $('notify-quiet').checked,
   };
 }
 
@@ -682,6 +754,9 @@ function blankScenario() {
     // Off until you have run it once and believe the numbers.
     enabled: false,
     notes: '',
+    preferred_origins: [],
+    notify: ['cheapest', 'preferred'],
+    notify_quiet: true,
   };
 }
 
@@ -1045,15 +1120,24 @@ async function renderPrices() {
   const probe = probeResult.status === 'fulfilled' ? probeResult.value : { routes: {}, recommendation: '' };
   const routes = Object.entries(probe.routes);
   $('probe-body').className = routes.length ? '' : 'empty';
+  // Net movement leads, because it is what decides whether to book. The panel
+  // used to lead with "median move" and "biggest drop", and reported 24 and 20
+  // for FRA→NRT during the four days it climbed 2,724 Kč — both true, both
+  // useless, since `largest_drop` reads only negative steps.
   $('probe-body').innerHTML = routes.length
     ? '<div class="table-scroll"><table class="data"><thead><tr>' +
-      '<th>Route</th><th class="num">Observations</th><th class="num">Changed</th>' +
-      '<th class="num">Median move</th><th class="num">Biggest drop</th></tr></thead><tbody>' +
-      routes.map(([name, r]) =>
-        `<tr><td>${escapeHtml(name)}</td><td class="num">${Number(r.n_observations)}</td>` +
-        `<td class="num">${Math.round(r.change_rate * 100)}%</td>` +
-        `<td class="num">${Math.round(r.median_change).toLocaleString()}</td>` +
-        `<td class="num">${Math.round(r.largest_drop).toLocaleString()}</td></tr>`).join('') +
+      '<th>Route</th><th class="num">Observations</th><th class="num">Net move</th>' +
+      '<th class="num">High to low</th><th class="num">Steps that moved</th>' +
+      '<th class="num">…by more than 1%</th></tr></thead><tbody>' +
+      routes.map(([name, r]) => {
+        const net = Number(r.net_change_pct ?? 0);
+        const trend = net > 0 ? 'trend trend--up' : net < 0 ? 'trend trend--down' : 'muted';
+        return `<tr><td>${escapeHtml(name)}</td><td class="num">${Number(r.n_observations)}</td>` +
+          `<td class="num ${trend}">${net > 0 ? '+' : ''}${net.toFixed(1)}%</td>` +
+          `<td class="num">${Number(r.range_pct ?? 0).toFixed(1)}%</td>` +
+          `<td class="num muted">${Math.round(r.change_rate * 100)}%</td>` +
+          `<td class="num">${Math.round((r.meaningful_change_rate ?? 0) * 100)}%</td></tr>`;
+      }).join('') +
       '</tbody></table></div>' +
       `<p class="panel__hint" style="margin-top:12px">${escapeHtml(probe.recommendation)}</p>`
     : 'No observations yet.';

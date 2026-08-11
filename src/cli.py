@@ -9,6 +9,7 @@ the git history if it is ever wanted back.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -78,6 +79,54 @@ def run_sweep_command(scenario_id: str, depth: str | None, dry_run: bool) -> int
     return len(result.legs)
 
 
+def health_gate_command(
+    scenario_id: str, min_legs_per_search: float, data_dir: Path | str = "data"
+) -> int:
+    """0 to proceed with another sweep, 1 to skip it.
+
+    Two deep sweeps a day is ~1,230 searches against a site that has already
+    throttled this client into 58 of 93 timeouts once, and a starved sweep is
+    worse than no sweep: it spends the budget, commits thin results, and its
+    price is not comparable with anything. So the second run of the day asks
+    the first how it went.
+
+    Lives here rather than in workflow YAML so it can be tested.
+    """
+    from .sweep.runner import legs_per_search_of
+
+    root = Path(data_dir) / "sweeps" / scenario_id
+    directories = sorted((p for p in root.iterdir() if p.is_dir()), reverse=True) if root.exists() else []
+    if not directories:
+        # Refusing here would deadlock: only a sweep can open the gate.
+        print(f"[gate] no sweep yet for {scenario_id!r}; proceeding")
+        return 0
+
+    latest = directories[0]
+    try:
+        status = json.loads((latest / "status.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"[gate] {latest.name}: status unreadable ({exc}); skipping this run")
+        return 1
+
+    if status.get("state") != "done":
+        print(f"[gate] {latest.name}: last sweep state is {status.get('state')!r}; skipping this run")
+        return 1
+
+    rate = legs_per_search_of(status)
+    if rate is None:
+        print(f"[gate] {latest.name}: no legs-per-search recorded or derivable; skipping this run")
+        return 1
+    if rate < min_legs_per_search:
+        print(
+            f"[gate] {latest.name}: {rate} legs/search is below {min_legs_per_search}; "
+            "skipping this run rather than hammering a site that is already refusing"
+        )
+        return 1
+
+    print(f"[gate] {latest.name}: {rate} legs/search; proceeding")
+    return 0
+
+
 def check_price_command(origin: str, destination: str, depart: str, ret: str | None) -> int:
     """Price one route on letuska.cz as a second opinion on a pelikan result."""
     from datetime import date
@@ -125,7 +174,17 @@ def main():
     sub.add_parser("probe", help="Sample the fixed volatility-probe routes once")
     sub.add_parser("probe-report", help="Summarise how much probe prices have moved")
 
+    p_gate = sub.add_parser(
+        "health-gate",
+        help="Exit non-zero when the last sweep was too starved to justify another",
+    )
+    p_gate.add_argument("--scenario", required=True)
+    p_gate.add_argument("--min-legs-per-search", type=float, default=6.0)
+
     args = parser.parse_args()
+
+    if args.cmd == "health-gate":
+        raise SystemExit(health_gate_command(args.scenario, args.min_legs_per_search))
 
     if args.cmd == "probe":
         from .probe import run_probe

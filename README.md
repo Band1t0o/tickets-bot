@@ -217,19 +217,36 @@ CZ-market until a non-CZ provider exists.
 
 ---
 
-## Automation and the Actions budget
+## Automation
 
-The repo is **private**, so GitHub Actions gives 2,000 free minutes a month.
+The repo is **public**, so Actions minutes are free and depth is no longer rationed by budget.
 
-| Job | Schedule | Cost |
+| Job | Schedule | Runtime |
 |---|---|---:|
-| Sweep ([scrape.yml](.github/workflows/scrape.yml)) | daily 02:00 UTC, `standard` | ~1,000 min/mo |
-| Volatility probe ([probe.yml](.github/workflows/probe.yml)) | every 2 h, **temporary** | ~720 min/mo if left on |
+| Sweep ([scrape.yml](.github/workflows/scrape.yml)) | daily 02:00 UTC, `deep` | ~97 min |
+| Volatility probe ([probe.yml](.github/workflows/probe.yml)) | every 2 h | ~2 min |
 | Tests ([test.yml](.github/workflows/test.yml)) | every push | ~1 min |
 
-Scheduled runs sweep at `standard`, not `deep`: at 2 workers a deep sweep is ~97 min, past both the
-90-minute job timeout and the monthly tier. A standard sweep that mostly succeeds is worth more than
-a deep one that does not.
+**What still constrains the sweep is pelikan.cz, not minutes.** This client has already been
+throttled into 58 of 93 timeouts in one sweep, and a starved sweep is worse than no sweep: it spends
+time, commits thin results, and its price is not comparable with anything. So `DEFAULT_WORKERS = 2`
+and `SEARCH_DELAY_S = 4.0` stay exactly where they are — free minutes are not a reason to hammer the
+site harder — and a second daily run is gated:
+
+```bash
+python -m src.cli health-gate --scenario japan-philippines --min-legs-per-search 6
+```
+
+It reads the newest `status.json` and exits non-zero when the last sweep was starved, so the
+afternoon run skips rather than following a failing sweep with another. It lives in the CLI rather
+than in workflow YAML so it can be tested.
+
+**A second slot at 13:00 UTC is written into [scrape.yml](.github/workflows/scrape.yml) but
+commented out.** Enable it only once the 02:00 deep runs hold ≥8 legs/search at full route coverage
+for a few days. The two times come from the probe, detrended against each route-day's median:
+01:00–03:00 UTC runs ~2.2% below the day's median and 18:00–22:00 ~0.6% above, so a true evening
+slot would systematically sample the day's high. 02:00 lands results before you wake; 13:00 (~15:00
+local) is near-median and actionable while you are awake.
 
 **Failure modes worth knowing about, all now guarded:**
 
@@ -259,23 +276,34 @@ gh secret set DISCORD_WEBHOOK_URL -R Band1t0o/tickets-bot
 
 ## Volatility probe
 
-The daily cadence is an assumption: at five months out, fares normally move over days, not hours.
-The probe measures whether that holds, sampling three fixed routes every two hours.
+Three fixed routes, sampled every two hours, so the sweep cadence comes from data.
 
 ```bash
 python -m src.cli probe          # one sample of all three routes
 python -m src.cli probe-report   # how much prices actually moved
 ```
 
-**It is temporary.** Read the report and turn it off — left running it costs ~720 min/month and will
-break the budget:
+**Net move leads.** It is the figure that says whether a fare is running away from you, and it was
+the one missing. Over the first four days:
 
-```bash
-gh workflow disable probe.yml -R Band1t0o/tickets-bot
-```
+| Route | Any step moved | Moved >1% | Net | High to low |
+|---|---:|---:|---:|---:|
+| FRA→NRT | 17% | 6% | **+25.1%** | 25.2% |
+| PRG→NRT | 37% | 20% | +12.6% | 14.6% |
+| NRT→MNL | **56%** | 11% | −0.1% | 2.3% |
 
-Reading it: a change rate under ~20% with moves under ~2% means daily sweeping loses nothing worth
-chasing. Frequent moves above ~5% argue for sweeping more often.
+Read the first two columns together. NRT→MNL moved at 56% of steps — the highest of the three — while
+living inside a 2.3% band all week, because a 6 Kč twitch on a 3,850 Kč fare counted the same as a
+2,400 Kč step. Counting changes measures the site's rounding; magnitude measures the market. The
+panel used to lead on `median move` and `biggest drop`, and reported **24** and **20** for FRA→NRT
+during the four days it climbed 2,724 Kč — `largest_drop` reads only negative steps.
+
+Two conclusions the data supports, both of which contradict the intuition that prompted the probe:
+
+- **Movement is day-over-day, not intraday.** FRA→NRT stepped 21% on 8 August and then sat perfectly
+  flat for two entire days. A second daily sweep catches a step ~12 h sooner and little else.
+- **Fares are rising, not falling.** Every route measured went up. Whatever the general shape of a
+  booking curve, the only evidence in this repo says waiting has cost money so far.
 
 ---
 
