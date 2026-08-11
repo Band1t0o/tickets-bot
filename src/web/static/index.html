@@ -38,6 +38,19 @@
       </div>
     </div>
 
+    <!-- An empty trip picker is what "you have no saved trips" looks like, so a
+         failed request must never be allowed to render as one. Anything that
+         stops the page loading says so here, in words, with the reason. -->
+    <div class="notice notice--error" id="blocker" hidden>
+      <h2 id="blocker-title"></h2>
+      <p id="blocker-detail"></p>
+      <p class="small" id="blocker-reassure">
+        Nothing has been deleted — this is about reaching the server, not about
+        what is saved on disk.
+      </p>
+      <button class="small" id="blocker-retry">Try again</button>
+    </div>
+
     <div class="tabs" id="tabs">
       <button data-tab="search" class="is-active">Search</button>
       <button data-tab="results">Results</button>
@@ -219,6 +232,38 @@
           deleting <code>data/sources.json</code> always restores working defaults.
         </p>
         <div id="sources-body" class="empty">Loading…</div>
+      </div>
+
+      <div class="panel">
+        <div class="panel__header">
+          <h2>Where results get sent</h2>
+          <span class="badge badge--muted" id="notify-origin">—</span>
+        </div>
+        <p class="panel__hint">
+          The Discord webhook the picks above are posted to. In Discord:
+          <strong>Edit Channel → Integrations → Webhooks → Copy Webhook URL</strong>.
+        </p>
+        <div class="row">
+          <label class="field field--wide">Webhook URL
+            <input type="password" id="webhook-url" autocomplete="off"
+                   placeholder="https://discord.com/api/webhooks/…">
+          </label>
+        </div>
+        <div class="row" style="margin-top:12px">
+          <button id="webhook-save">Save webhook</button>
+          <button id="webhook-test" class="primary">Send a test message</button>
+          <button class="small" id="webhook-clear">Remove</button>
+        </div>
+        <div id="webhook-result" class="small" style="margin-top:12px"></div>
+        <p class="panel__hint small" style="margin-top:14px">
+          This URL is a password in disguise — anyone holding it can post to the channel —
+          so it is stored in <code id="webhook-path">.secrets/discord.json</code>, outside
+          everything git tracks. It is never sent back to this page; the field above shows
+          it masked. <strong>Cloud sweeps do not read that file.</strong> They read the
+          repository secret, which you set once with
+          <code>gh secret set DISCORD_WEBHOOK_URL</code>. When that variable is present it
+          wins, so a cloud run always posts where the secret says.
+        </p>
       </div>
     </section>
   </main>

@@ -12,7 +12,7 @@ import re
 import subprocess
 import threading
 from dataclasses import asdict, replace
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 from bs4 import BeautifulSoup
@@ -23,7 +23,8 @@ from fastapi.staticfiles import StaticFiles
 from ..airports import describe, frequent_airports, lookup
 from ..airports import search_with_meta as search_airports
 from ..combine import combine_all, series_from_result
-from ..scenario import Scenario, load_scenario, load_scenarios, save_scenario
+from ..notify_discord import COLOR_INFO, post
+from ..scenario import Scenario, load_scenario, read_scenarios, save_scenario
 from ..sources import DEFAULTS as DEFAULT_SOURCES
 from ..sources import Source, load_source, load_sources, save_sources
 from ..sweep.planner import (
@@ -40,15 +41,30 @@ from ..sweep.runner import (
     run_sweep,
 )
 from ..viability import report as viability_report
+from ..webhook_store import clear_webhook, load_webhook, save_webhook
+from ..webhook_store import mask as mask_webhook
 
 SCENARIO_DIR = Path(os.getenv("SCENARIO_DIR", "scenarios"))
 DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
+# Outside DATA_DIR on purpose: the scheduled workflow commits that directory.
+SECRETS_DIR = Path(os.getenv("SECRETS_DIR", ".secrets"))
 STATIC_DIR = Path(__file__).parent / "static"
 
 # Both are interpolated straight into filesystem paths, so neither may contain
 # a separator or a parent reference.
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 SAFE_STAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z$")
+
+# Bumped whenever this file and `static/app.js` must be deployed together: a new
+# endpoint the page relies on, or a changed response shape.
+#
+# It exists because static files are read from disk on every request while the
+# Python is frozen at import time, so a `uvicorn` left running from an older
+# commit serves the *newest* page against an old API. The page then gets 404s
+# and 400s for things it needs, and renders them as emptiness - which is
+# indistinguishable from "you have no saved trips". `static/app.js` carries the
+# same number and refuses to render until they match.
+API_CONTRACT = 1
 
 app = FastAPI(title="Flight scenario watcher")
 
@@ -106,6 +122,20 @@ def _read_status(directory: Path) -> dict:
         return {"state": "unreadable"}
 
 
+# -------------------------------------------------------------------- version
+
+
+@app.get("/api/version")
+def version() -> dict:
+    """What generation of the API this process is.
+
+    The page asks this before anything else, so it deliberately reads no file
+    and loads no scenario: the whole point is to still answer when the things
+    it would have read are the broken ones.
+    """
+    return {"contract": API_CONTRACT}
+
+
 # ------------------------------------------------------------------- airports
 
 
@@ -139,8 +169,15 @@ def viability() -> dict:
 
 
 @app.get("/api/scenarios")
-def list_scenarios_endpoint() -> list[dict]:
-    return [s.to_dict() for s in load_scenarios(SCENARIO_DIR)]
+def list_scenarios_endpoint() -> dict:
+    """The trips that load, and what went wrong with any that did not.
+
+    Deliberately never an error: one file with a typo used to 400 the whole
+    listing, and the page drew that as an empty trip picker - the same thing it
+    draws when nothing is saved at all.
+    """
+    scenarios, problems = read_scenarios(SCENARIO_DIR)
+    return {"trips": [s.to_dict() for s in scenarios], "problems": problems}
 
 
 @app.get("/api/scenarios/{scenario_id}")
@@ -425,6 +462,69 @@ def probe_stats() -> dict:
 @app.get("/api/describe/{code}")
 def describe_airport(code: str) -> dict:
     return {"code": code.upper(), "label": describe(code, data_dir=DATA_DIR)}
+
+
+# ------------------------------------------------------------- notify target
+#
+# A webhook URL is a bearer token: whoever holds it can post to the channel. So
+# it goes out of the repo entirely (see src/webhook_store.py) and it never
+# leaves this process whole — every response carries the masked form only.
+
+
+@app.get("/api/notify")
+def get_notify() -> dict:
+    url, origin = load_webhook(SECRETS_DIR)
+    return {
+        "configured": url is not None,
+        "origin": origin,
+        "masked": mask_webhook(url),
+        # Named so the page can say which file to look in, or that the
+        # environment is overriding whatever is in it.
+        "path": str(SECRETS_DIR / "discord.json"),
+    }
+
+
+@app.put("/api/notify")
+def put_notify(payload: dict = Body(...)) -> dict:
+    # `save_webhook` raises ValueError with the advice; the handler below turns
+    # that into a 400 the page shows verbatim.
+    save_webhook(str(payload.get("url", "")), SECRETS_DIR)
+    return get_notify()
+
+
+@app.delete("/api/notify")
+def delete_notify() -> dict:
+    removed = clear_webhook(SECRETS_DIR)
+    return {**get_notify(), "removed": removed}
+
+
+@app.post("/api/notify/test")
+def test_notify() -> dict:
+    """Post a real message, so "saved" and "works" are not the same claim."""
+    url, origin = load_webhook(SECRETS_DIR)
+    if url is None:
+        raise HTTPException(400, "There is no webhook saved yet, so there is nowhere to send.")
+
+    embed = {
+        "title": "✅ Test message from the flight watcher",
+        "description": (
+            "This is the channel sweep results will land in. Each sweep posts the "
+            "picks ticked under *What gets sent to Discord*."
+        ),
+        "color": COLOR_INFO,
+        "timestamp": datetime.now(UTC).isoformat(),
+        "footer": {"text": f"Flight scenario watcher — webhook from the {origin}"},
+    }
+    if post(url, [embed]):
+        return {"sent": True, "message": "Sent. Check the channel."}
+    return {
+        "sent": False,
+        "message": (
+            "Discord refused the message. The usual cause is a webhook that was "
+            "deleted or regenerated in the channel settings — copy the URL again. "
+            "The exact error is in the server's console output."
+        ),
+    }
 
 
 # ------------------------------------------------------------------- sources

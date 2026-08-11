@@ -213,6 +213,24 @@ page, zero cards, indistinguishable from a renamed class unless you notice you w
 check compares the *final* address against the one asked for. A working search redirects too (it
 appends `,LOAD`), so the test is the prefix, not equality.
 
+### Where results get sent
+
+The same tab holds the Discord webhook, with a **Send a test message** button — because "saved" and
+"reaches the channel" are different claims, and the gap between them otherwise shows up as silence
+from a 02:00 run nobody watched.
+
+A webhook URL is a bearer token wearing a URL's clothes: whoever holds it can post to the channel.
+So it is stored in **`.secrets/discord.json`**, which `.gitignore` excludes as a directory —
+deliberately not under `data/`, which the scheduled workflow commits, and deliberately not in a
+scenario file, which is committed on purpose. It is never sent back to the page either; the field
+shows the id with the token replaced by dots, which is enough to tell one channel from another and
+not enough to post with.
+
+`DISCORD_WEBHOOK_URL` wins over the file whenever it is set. Actions sets it from the repo secret
+and has no `.secrets/` at all, so saving one locally can never change where a cloud run posts. The
+file exists so a local `python -m src.cli sweep` notifies without exporting anything first — the UI
+disables the field and says so when the variable is overriding it.
+
 **pelikan.cz is the only sweep source**, and a [spike](docs/superpowers/specs/2026-08-11-second-source-spike.md)
 concluded it should stay that way: kiwi.com's `robots.txt` disallows `/search` for `User-Agent: *`,
 and Skyscanner's API is partner-only.
@@ -299,7 +317,8 @@ local) is near-median and actionable while you are awake.
 now written into every `status.json` alongside route coverage, and the UI refuses to compare sweeps
 that fall short of either — see *Comparing sweeps* below.
 
-Secrets do not transfer between repositories. Only one is needed:
+Secrets do not transfer between repositories. Only one is needed, and cloud runs read *this*, not
+the local `.secrets/discord.json`:
 
 ```bash
 gh secret set DISCORD_WEBHOOK_URL -R Band1t0o/tickets-bot
@@ -369,6 +388,24 @@ debounce and a round trip. Typing three letters takes about 200 ms, so Enter alw
 gap — no chip, no message, nothing in the console. Those tests are marked `slow` and run a real
 browser (`make test-ui`); CI runs `pytest -m "not slow"`.
 
+### An empty page must never mean "your data is gone"
+
+`make ui` serves static files from disk on every request while the Python stays frozen at import
+time. A `uvicorn` left running from an older commit therefore hands you the *newest* page and then
+404s the endpoints it asks for. That happened: two stale processes, a page that rendered an empty
+trip picker and empty charts, and nothing whatsoever wrong on disk.
+
+Two guards, because emptiness is the one failure mode this app cannot afford to render silently:
+
+- **A contract number.** `API_CONTRACT` in [src/web/app.py](src/web/app.py) and
+  `EXPECTED_CONTRACT` in [app.js](src/web/static/app.js) must match; `tests/test_web_contract.py`
+  fails if they drift. The page asks `/api/version` before anything else and, on a mismatch — or on
+  a 404, which is what a server older than the endpoint answers — replaces itself with *restart the
+  server*, rather than drawing a convincing nothing.
+- **Per-file scenario loading.** `read_scenarios` returns the trips that parsed alongside a named
+  reason for each one that did not, so a single typo costs you that trip instead of the whole list.
+  `load_scenarios` still raises, because a sweep told to run a specific trip should fail loudly.
+
 The design system is **ported from the Finance-planner project** (`src/styles/palette.css` and
 `theme.css` copied verbatim). It is a copy, not a shared dependency, so the two will drift. Charts
 are hand-rolled inline SVG in [chart.js](src/web/static/chart.js); there is deliberately no Node
@@ -394,6 +431,7 @@ src/
   verify.py               re-price the shortlist on a second site
   probe.py                volatility sampling and report
   notify_discord.py       price + health alerts
+  webhook_store.py        the Discord webhook, kept where `git add` cannot reach
   providers/
     pelikan_url.py        deep-link builder
     pelikan.py            search + parser (the only sweep source)
@@ -404,6 +442,7 @@ data/airports.json        4,161 airports: code, city, country, size, aliases
 data/countries.json       ISO code -> country name, so "Japan" is searchable
 data/airport_notes.json   hand-measured findings no sweep can reproduce
 data/sources.json         overrides for src/sources.py; delete to restore defaults
+.secrets/discord.json     the webhook URL — gitignored, never committed
 data/sweeps/<id>/<ts>/    legs.jsonl, status.json, best.json, verify.json
 data/probe/               observations.jsonl
 docs/superpowers/specs/   design documents

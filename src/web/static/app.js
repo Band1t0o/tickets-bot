@@ -12,6 +12,16 @@ const state = {
   isNew: false,
 };
 
+/* Must equal `API_CONTRACT` in src/web/app.py; a test fails if it does not.
+
+   Static files are served from disk on every request, but the Python is frozen
+   at import time — so a server left running from an older commit hands you this
+   very file and then 404s the endpoints it asks for. That is how an afternoon
+   was lost: the page rendered an empty trip picker and empty charts, which is
+   exactly what a deleted database looks like, when in fact nothing on disk had
+   changed and the answer was `make ui` again. */
+const EXPECTED_CONTRACT = 1;
+
 const api = async (path, options) => {
   const response = await fetch(path, options);
   if (!response.ok) {
@@ -21,6 +31,50 @@ const api = async (path, options) => {
   }
   return response.json();
 };
+
+/* Replaces the whole app with a stated reason. Used only where the alternative
+   is drawing something misleading. */
+const block = (title, detail, { retry = null } = {}) => {
+  $('blocker-title').textContent = title;
+  $('blocker-detail').innerHTML = detail;
+  $('blocker').hidden = false;
+  $('tabs').hidden = true;
+  for (const section of document.querySelectorAll('section[data-panel]')) section.hidden = true;
+  const button = $('blocker-retry');
+  button.hidden = retry === null;
+  button.onclick = retry;
+};
+
+const unblock = () => {
+  $('blocker').hidden = true;
+  $('tabs').hidden = false;
+  const active = document.querySelector('#tabs button.is-active')?.dataset.tab ?? 'search';
+  for (const section of document.querySelectorAll('section[data-panel]')) {
+    section.hidden = section.dataset.panel !== active;
+  }
+};
+
+/* True when the server is the same generation as this page. */
+async function contractMatches() {
+  let contract = null;
+  try {
+    contract = (await api('/api/version')).contract;
+  } catch { /* an old server has no such endpoint at all */ }
+
+  if (contract === EXPECTED_CONTRACT) return true;
+
+  const missing = contract === null
+    ? 'It is old enough that it has no version endpoint at all.'
+    : `It reports contract ${escapeHtml(String(contract))}; this page needs ${EXPECTED_CONTRACT}.`;
+  block(
+    'The server is running older code than this page',
+    `${missing} Restarting it fixes this: stop the running server and run ` +
+    '<code>make ui</code> again. Your trips and sweep history are files on disk ' +
+    'and are untouched by any of this.',
+    { retry: () => window.location.reload() },
+  );
+  return false;
+}
 
 const money = (n, currency = 'CZK') => `${Math.round(n).toLocaleString()} ${currency}`;
 
@@ -74,7 +128,7 @@ $('tabs').onclick = (event) => {
   }
   if (button.dataset.tab === 'results') renderResults();
   if (button.dataset.tab === 'prices') renderPrices();
-  if (button.dataset.tab === 'sources') renderSources();
+  if (button.dataset.tab === 'sources') { renderSources(); renderNotifyTarget(); }
 };
 
 /* --------------------------------------------------------- route editor --
@@ -1276,6 +1330,92 @@ async function renderSources() {
   }
 }
 
+/* ------------------------------------------------------- the notify target
+
+   The webhook never comes back from the server, so this panel is written
+   around that: the field shows a masked placeholder and an empty field means
+   "leave it alone", never "clear it". Removing is its own button. */
+
+async function renderNotifyTarget() {
+  const field = $('webhook-url');
+  const badge = $('notify-origin');
+  let body;
+  try {
+    body = await api('/api/notify');
+  } catch (error) {
+    badge.textContent = 'unknown';
+    $('webhook-result').textContent = `Could not read the current setting — ${error.message}`;
+    return;
+  }
+
+  field.value = '';
+  field.placeholder = body.masked || 'https://discord.com/api/webhooks/…';
+  $('webhook-path').textContent = body.path;
+  badge.className = `badge badge--${body.configured ? 'good' : 'muted'}`;
+  badge.textContent = {
+    environment: 'set by DISCORD_WEBHOOK_URL',
+    file: 'saved on this machine',
+    none: 'not set — nothing is being sent',
+  }[body.origin];
+
+  // Editing the box would be silently pointless while the variable overrides it.
+  const overridden = body.origin === 'environment';
+  field.disabled = overridden;
+  $('webhook-save').disabled = overridden;
+  $('webhook-clear').disabled = overridden;
+  if (overridden) {
+    $('webhook-result').className = 'small muted';
+    $('webhook-result').textContent =
+      'DISCORD_WEBHOOK_URL is set in this server’s environment and takes precedence, so ' +
+      'there is nothing to edit here. Unset it to manage the webhook from this page.';
+  }
+}
+
+function notifyOutcome(message, kind = 'good') {
+  const host = $('webhook-result');
+  host.className = `small badge badge--${kind}`;
+  host.textContent = message;
+}
+
+$('webhook-save').onclick = async () => {
+  const url = $('webhook-url').value.trim();
+  if (!url) return notifyOutcome('Paste the webhook URL first.', 'error');
+  try {
+    await api('/api/notify', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    });
+    await renderNotifyTarget();
+    notifyOutcome('Saved. Send a test message to prove it reaches the channel.');
+  } catch (error) {
+    notifyOutcome(error.message, 'error');
+  }
+};
+
+$('webhook-clear').onclick = async () => {
+  try {
+    await api('/api/notify', { method: 'DELETE' });
+    await renderNotifyTarget();
+    notifyOutcome('Removed. Sweeps will run as before and report nowhere.', 'muted');
+  } catch (error) {
+    notifyOutcome(error.message, 'error');
+  }
+};
+
+$('webhook-test').onclick = async () => {
+  const button = $('webhook-test');
+  button.disabled = true;
+  try {
+    const body = await api('/api/notify/test', { method: 'POST' });
+    notifyOutcome(body.message, body.sent ? 'good' : 'error');
+  } catch (error) {
+    notifyOutcome(error.message, 'error');
+  } finally {
+    button.disabled = false;
+  }
+};
+
 function readSourceForm(block, source) {
   const next = { ...source, selectors: { ...source.selectors } };
   for (const input of block.querySelectorAll('[data-field]')) {
@@ -1361,7 +1501,23 @@ async function loadScenario(id) {
    empty draft when nothing is saved at all. Called after create and delete so
    the dropdown never names a file that is no longer there. */
 async function reloadScenarioList(preferred = null) {
-  const scenarios = await api('/api/scenarios');
+  let body;
+  try {
+    body = await api('/api/scenarios');
+  } catch (error) {
+    // "I could not ask" and "you have no trips" both used to end at an empty
+    // picker, and only one of them means anything is missing.
+    block(
+      'Could not read your saved trips',
+      `The server answered: <code>${escapeHtml(error.message)}</code>. The trips ` +
+      'themselves are JSON files under <code>scenarios/</code> and are still there.',
+      { retry: () => window.location.reload() },
+    );
+    return;
+  }
+  unblock();
+
+  const scenarios = body.trips;
   const select = $('scenario-select');
   select.innerHTML = '';
   for (const scenario of scenarios) {
@@ -1369,6 +1525,15 @@ async function reloadScenarioList(preferred = null) {
     option.value = scenario.id;
     option.textContent = scenario.name;
     select.appendChild(option);
+  }
+
+  // Named rather than swallowed: a trip missing from the picker because its
+  // file will not parse should say so, not simply be absent.
+  if (body.problems.length) {
+    showError(
+      `${body.problems.length} trip file(s) could not be read and are missing from the ` +
+      `list: ${body.problems.map((p) => `${p.file} (${p.error})`).join('; ')}`,
+    );
   }
 
   if (!scenarios.length) {
@@ -1387,6 +1552,10 @@ async function reloadScenarioList(preferred = null) {
 }
 
 async function init() {
+  // Asked first and on its own: everything after it assumes the server can
+  // answer the calls this page makes, and a stale one cannot.
+  if (!(await contractMatches())) return;
+
   try {
     const [viability, frequent] = await Promise.all([
       api('/api/viability').catch(() => ({ airports: {} })),

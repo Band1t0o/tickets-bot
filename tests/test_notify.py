@@ -12,6 +12,7 @@ from src.notify_discord import (
     save_best,
     should_alert,
 )
+from tests.conftest import make_scenario
 
 
 def leg(origin="PRG", destination="NRT", depart=date(2027, 1, 10), price=10000.0) -> Leg:
@@ -225,3 +226,39 @@ def test_a_worse_total_never_walks_the_recorded_best_upward(tmp_path):
     save_best(tmp_path, 21000, "CZK", name="cheapest")
     save_best(tmp_path, 25000, "CZK", name="cheapest")
     assert load_best(tmp_path, name="cheapest") == 21000
+
+
+# --------------------------------------------------- where the message goes
+#
+# `notify_sweep` used to read the environment directly, so a webhook saved
+# through the UI was invisible to a local `python -m src.cli sweep` - the
+# setting existed and did nothing.
+
+
+def test_notify_sweep_uses_a_locally_saved_webhook(tmp_path, monkeypatch):
+    from src import notify_discord
+    from src.webhook_store import save_webhook
+
+    monkeypatch.delenv("DISCORD_WEBHOOK_URL", raising=False)
+    save_webhook("https://discord.com/api/webhooks/1/local-token", tmp_path / ".secrets")
+    monkeypatch.setattr(notify_discord, "SECRETS_DIR", tmp_path / ".secrets")
+
+    posted: list[str] = []
+    monkeypatch.setattr(notify_discord, "post", lambda url, embeds: posted.append(url) or True)
+
+    notify_discord.notify_sweep(make_scenario(), _empty_result(tmp_path))
+
+    assert posted == ["https://discord.com/api/webhooks/1/local-token"]
+
+
+def _empty_result(tmp_path):
+    """A finished sweep that found nothing - enough to reach the post call via
+    the health alert, without needing a full leg set."""
+    from types import SimpleNamespace
+
+    directory = tmp_path / "sweeps" / "s" / "2026-08-11T02-00-00Z"
+    directory.mkdir(parents=True)
+    return SimpleNamespace(
+        legs=[], errors=["boom"], total=4, directory=directory,
+        routes_with_no_results=[],
+    )

@@ -287,7 +287,32 @@ def load_scenario(path: Path) -> Scenario:
     return Scenario.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
 
 
+def read_scenarios(directory: Path) -> tuple[list[Scenario], list[dict]]:
+    """Every trip that loads, plus a named reason for each one that does not.
+
+    Separate from `load_scenarios` because the two callers want opposite
+    things. A sweep asked for a specific trip should fail loudly rather than
+    quietly run something else. The UI listing every trip should show the ones
+    it has: one file with a typo in it is not a reason to render an empty
+    picker, and an empty picker is exactly what a deleted database looks like.
+    """
+    directory = Path(directory)
+    if not directory.exists():
+        return [], []
+
+    scenarios: list[Scenario] = []
+    problems: list[dict] = []
+    for path in sorted(directory.glob("*.json")):
+        try:
+            scenarios.append(load_scenario(path))
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+            problems.append({"file": path.name, "error": str(exc)})
+    scenarios.sort(key=lambda s: s.id)
+    return scenarios, problems
+
+
 def load_scenarios(directory: Path) -> list[Scenario]:
+    """Strict: one unreadable file raises. Use `read_scenarios` to be told."""
     directory = Path(directory)
     if not directory.exists():
         return []

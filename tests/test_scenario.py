@@ -1,11 +1,19 @@
 """Tests for scenario definition, validation and on-disk storage."""
 from __future__ import annotations
 
+import json
 from datetime import date
 
 import pytest
 
-from src.scenario import Scenario, Stop, load_scenario, load_scenarios, save_scenario
+from src.scenario import (
+    Scenario,
+    Stop,
+    load_scenario,
+    load_scenarios,
+    read_scenarios,
+    save_scenario,
+)
 from tests.conftest import make_round_trip, make_scenario, make_three_stop
 
 
@@ -263,3 +271,43 @@ def test_unknown_notify_selection_is_rejected():
 
 def test_quiet_by_default_so_two_sweeps_a_day_do_not_become_sixty_pings():
     assert make_scenario().notify_quiet is True
+
+
+# ----------------------------------------------------- one bad file, many good
+#
+# `load_scenarios` builds its list inside `sorted(...)`, so a single unreadable
+# file used to raise and take every other trip down with it. Through the API
+# that surfaced as an empty trip picker, which is indistinguishable from having
+# no saved trips at all - the app said "your data is gone" when one file had a
+# typo in it.
+
+
+def test_read_scenarios_returns_the_files_it_could_read(tmp_path):
+    save_scenario(make_scenario(id="good-one"), tmp_path)
+    save_scenario(make_scenario(id="good-two"), tmp_path)
+    (tmp_path / "broken.json").write_text("{ this is not json", encoding="utf-8")
+
+    scenarios, problems = read_scenarios(tmp_path)
+
+    assert [s.id for s in scenarios] == ["good-one", "good-two"]
+    assert [p["file"] for p in problems] == ["broken.json"]
+
+
+def test_read_scenarios_names_the_file_and_the_reason(tmp_path):
+    """The message is shown verbatim, so it has to identify what to go and fix."""
+    save_scenario(make_scenario(id="fine"), tmp_path)
+    (tmp_path / "half-migrated.json").write_text(
+        json.dumps({"id": "x", "name": "X", "origins": ["PRG"], "stops": [],
+                    "window_start": "2027-01-05", "window_end": "2027-02-08",
+                    "moon_phase": "waxing"}),
+        encoding="utf-8",
+    )
+
+    _, problems = read_scenarios(tmp_path)
+
+    assert problems[0]["file"] == "half-migrated.json"
+    assert "moon_phase" in problems[0]["error"]
+
+
+def test_read_scenarios_on_a_missing_directory_is_empty_not_an_error(tmp_path):
+    assert read_scenarios(tmp_path / "nope") == ([], [])

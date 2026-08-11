@@ -165,14 +165,13 @@ def frequent_airports(
     were measured by hand and never swept - nothing sweeps an airport it cannot
     use, so sweep history alone would forget them.
     """
-    from .scenario import load_scenarios  # local: scenario imports nothing from here
+    from .scenario import read_scenarios  # local: scenario imports nothing from here
 
     departures: Counter[str] = Counter()
     destinations: Counter[str] = Counter()
-    try:
-        scenarios = load_scenarios(scenario_dir)
-    except (OSError, ValueError, TypeError, KeyError):
-        scenarios = []
+    # Per-file, so one unreadable trip costs you its own airports rather than
+    # every suggestion on the page.
+    scenarios, _ = read_scenarios(scenario_dir)
 
     for scenario in scenarios:
         departures.update(scenario.origins)

@@ -21,6 +21,8 @@ from pathlib import Path
 
 import requests
 
+from .webhook_store import SECRETS_DIR, load_webhook
+
 COLOR_GOOD = 0x27AB83   # palette green500
 COLOR_INFO = 0x1980D4   # palette blue600
 COLOR_ALERT = 0xE12D39  # palette red500
@@ -235,9 +237,18 @@ def notify_sweep(scenario, result, webhook_url: str | None = None) -> bool:
     from .alerts import select_alerts
     from .combine import combine_all
 
-    webhook_url = webhook_url or os.getenv("DISCORD_WEBHOOK_URL")
+    # Through the store rather than straight off the environment, so a webhook
+    # saved in the Sources tab reaches a local `python -m src.cli sweep`. In
+    # Actions nothing changes: the env var still wins.
     if not webhook_url:
-        print("[Discord] DISCORD_WEBHOOK_URL not set, skipping notification")
+        webhook_url, origin = load_webhook(SECRETS_DIR)
+        if webhook_url:
+            print(f"[Discord] using the webhook from the {origin}")
+    if not webhook_url:
+        print(
+            "[Discord] no webhook configured — set DISCORD_WEBHOOK_URL, or paste "
+            "one into the Sources tab, and nothing else has to change"
+        )
         return False
 
     health = build_health_alert(

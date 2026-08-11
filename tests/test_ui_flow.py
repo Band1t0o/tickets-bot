@@ -64,6 +64,10 @@ def ui(tmp_path, monkeypatch):
     data.mkdir()
     monkeypatch.setenv("SCENARIO_DIR", str(scenarios))
     monkeypatch.setenv("DATA_DIR", str(data))
+    # Without this the webhook test would write a fake URL over the real
+    # `.secrets/discord.json` of whoever ran `make test-ui`.
+    monkeypatch.setenv("SECRETS_DIR", str(tmp_path / ".secrets"))
+    monkeypatch.delenv("DISCORD_WEBHOOK_URL", raising=False)
     (data / "airports.json").write_text(json.dumps(AIRPORTS), encoding="utf-8")
     (data / "countries.json").write_text(json.dumps(COUNTRIES), encoding="utf-8")
 
@@ -525,3 +529,104 @@ def test_an_edit_survives_leaving_the_tab_and_coming_back(ui):
     assert page.locator('[data-source="PELIKAN"] [data-field="no_results_marker"]') \
         .input_value() == "Nothing found"
     assert not errors
+
+
+# ------------------------------------------------- talking to a stale server
+#
+# The failure these cover cost an afternoon. Two uvicorn processes were left
+# running from an older commit; static files are read from disk per request, so
+# both served the newest page against an old API. Every call the page needed
+# 404'd or 400'd, and the page drew the result as an empty trip picker and empty
+# charts - which is exactly what a deleted database looks like. Nothing on disk
+# had changed.
+
+
+def test_an_older_server_says_so_instead_of_showing_an_empty_app(ui):
+    page, _, _ = ui
+    page.route("**/api/version", lambda route: route.fulfill(
+        status=200, content_type="application/json", body=json.dumps({"contract": 0})
+    ))
+    page.reload(wait_until="networkidle")
+
+    assert page.locator("#blocker").is_visible()
+    assert "older code" in page.locator("#blocker-title").inner_text()
+    # The point of the banner is that the app is not drawn at all: a page of
+    # convincing emptiness is worse than no page.
+    assert page.locator("#tabs").is_hidden()
+    assert "untouched" in page.locator("#blocker-detail").inner_text()
+
+
+def test_a_server_too_old_to_have_the_version_endpoint_is_still_caught(ui):
+    """The stale processes predated the endpoint itself, so a 404 has to mean
+    the same thing as a mismatch - otherwise the check misses the exact case
+    that prompted it."""
+    page, _, _ = ui
+    page.route("**/api/version", lambda route: route.fulfill(
+        status=404, content_type="application/json", body='{"detail":"Not Found"}'
+    ))
+    page.reload(wait_until="networkidle")
+
+    assert page.locator("#blocker").is_visible()
+    assert "no version endpoint" in page.locator("#blocker-detail").inner_text()
+
+
+def test_a_trip_file_that_will_not_parse_does_not_empty_the_picker(ui):
+    page, scenarios, _ = ui
+    (scenarios / "broken.json").write_text("{ not json at all", encoding="utf-8")
+    page.reload(wait_until="networkidle")
+    page.wait_for_selector("#origins .chip__code")
+
+    assert page.locator("#scenario-select option").all_inner_texts() == [
+        "Japan then Philippines"
+    ]
+    assert "broken.json" in page.locator("#save-error").inner_text()
+
+
+def test_an_unreachable_scenario_list_is_named_not_drawn_as_emptiness(ui):
+    page, _, _ = ui
+    page.route("**/api/scenarios", lambda route: route.fulfill(
+        status=500, content_type="application/json", body='{"detail":"disk on fire"}'
+    ))
+    page.reload(wait_until="networkidle")
+
+    assert page.locator("#blocker").is_visible()
+    assert "disk on fire" in page.locator("#blocker-detail").inner_text()
+    assert "still there" in page.locator("#blocker-detail").inner_text()
+
+
+# ------------------------------------------------------------ webhook panel
+
+
+def test_a_pasted_channel_url_is_refused_with_the_instruction(ui):
+    """The URL from the address bar is the thing people paste. It is not a
+    webhook, and Discord answers a 404 hours later inside a scheduled run."""
+    page, _, _ = ui
+    page.click("#tabs button[data-tab='sources']")
+    page.wait_for_selector("#webhook-url")
+
+    page.locator("#webhook-url").click()
+    page.keyboard.type("https://discord.com/channels/123/456", delay=10)
+    page.click("#webhook-save")
+    page.wait_for_timeout(600)
+
+    assert "Copy Webhook URL" in page.locator("#webhook-result").inner_text()
+    assert "not set" in page.locator("#notify-origin").inner_text()
+
+
+def test_a_saved_webhook_is_never_shown_back(ui):
+    page, _, _ = ui
+    token = "xY2bkQ7fLpZ9wA3tR6vN1sD4gH8j"
+    page.click("#tabs button[data-tab='sources']")
+    page.wait_for_selector("#webhook-url")
+
+    page.locator("#webhook-url").click()
+    page.keyboard.type(f"https://discord.com/api/webhooks/1409876543210987654/{token}", delay=5)
+    page.click("#webhook-save")
+    page.wait_for_timeout(800)
+
+    assert "saved on this machine" in page.locator("#notify-origin").inner_text()
+    assert page.locator("#webhook-url").input_value() == ""
+    placeholder = page.locator("#webhook-url").get_attribute("placeholder")
+    assert token not in placeholder
+    assert "1409876543210987654" in placeholder
+    assert token not in page.content()

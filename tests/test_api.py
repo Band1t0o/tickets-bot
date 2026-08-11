@@ -50,6 +50,10 @@ def client(tmp_path, monkeypatch):
     data.mkdir()
     monkeypatch.setenv("SCENARIO_DIR", str(scenarios))
     monkeypatch.setenv("DATA_DIR", str(data))
+    monkeypatch.setenv("SECRETS_DIR", str(tmp_path / ".secrets"))
+    # Otherwise a webhook exported in the shell running the tests would win
+    # over the file under test, and the store would look broken.
+    monkeypatch.delenv("DISCORD_WEBHOOK_URL", raising=False)
 
     (data / "airports.json").write_text(json.dumps(AIRPORTS), encoding="utf-8")
     (data / "countries.json").write_text(json.dumps(COUNTRIES), encoding="utf-8")
@@ -204,7 +208,21 @@ def test_viability_derives_verdicts_from_sweep_history(client):
 
 def test_lists_seeded_scenarios(client):
     api, _ = client
-    assert [s["id"] for s in api.get("/api/scenarios").json()] == ["jp-ph"]
+    body = api.get("/api/scenarios").json()
+    assert [s["id"] for s in body["trips"]] == ["jp-ph"]
+    assert body["problems"] == []
+
+
+def test_one_unreadable_trip_does_not_hide_the_others(client, tmp_path):
+    """The whole listing used to 400 on one bad file, which the UI drew as an
+    empty picker - the same thing it draws when you genuinely have no trips."""
+    api, _ = client
+    (tmp_path / "scenarios" / "broken.json").write_text("{ nope", encoding="utf-8")
+
+    body = api.get("/api/scenarios").json()
+
+    assert [s["id"] for s in body["trips"]] == ["jp-ph"]
+    assert body["problems"][0]["file"] == "broken.json"
 
 
 def test_rejects_an_invalid_scenario_with_a_readable_message(client):
@@ -790,3 +808,94 @@ def test_a_corrupt_verification_file_does_not_break_the_results(client):
     body = api.get(f"/api/sweeps/jp-ph/{stamp}/results")
     assert body.status_code == 200
     assert body.json()["verification"] is None
+
+
+# ------------------------------------------------------------ notify target
+#
+# The webhook URL is a bearer token: it never leaves the server whole, in any
+# response, at any point. Everything the page needs to show is derivable from
+# the masked form.
+
+
+def test_notify_reports_nothing_configured(client):
+    api, _ = client
+    body = api.get("/api/notify").json()
+    assert body["configured"] is False
+    assert body["origin"] == "none"
+    assert body["masked"] == ""
+
+
+def test_saving_a_webhook_never_hands_it_back(client):
+    api, _ = client
+    real = "https://discord.com/api/webhooks/1409876543210987654/xY2bkQ7fLpZ9wA3tR6vN1sD4gH8j"
+
+    assert api.put("/api/notify", json={"url": real}).status_code == 200
+
+    body = api.get("/api/notify")
+    assert body.json()["configured"] is True
+    assert "xY2bkQ7fLpZ9wA3tR6vN1sD4gH8j" not in body.text
+
+
+def test_saving_a_webhook_writes_outside_data(client, tmp_path):
+    """`data/` is committed by the scheduled workflow. This must not land there."""
+    api, data = client
+    real = "https://discord.com/api/webhooks/1409876543210987654/xY2bkQ7fLpZ9wA3tR6vN1sD4gH8j"
+    api.put("/api/notify", json={"url": real})
+
+    written = [p for p in data.rglob("*") if "xY2b" in p.read_text(errors="ignore")]
+    assert written == []
+    assert (tmp_path / ".secrets" / "discord.json").exists()
+
+
+def test_a_url_that_is_not_a_webhook_is_refused_with_advice(client):
+    api, _ = client
+    response = api.put("/api/notify", json={"url": "https://discord.com/channels/1/2"})
+    assert response.status_code == 400
+    assert "Copy Webhook URL" in response.json()["detail"]
+
+
+def test_removing_a_webhook_leaves_nothing_behind(client, tmp_path):
+    api, _ = client
+    real = "https://discord.com/api/webhooks/1409876543210987654/xY2bkQ7fLpZ9wA3tR6vN1sD4gH8j"
+    api.put("/api/notify", json={"url": real})
+
+    assert api.delete("/api/notify").status_code == 200
+    assert api.get("/api/notify").json()["configured"] is False
+    assert not (tmp_path / ".secrets" / "discord.json").exists()
+
+
+def test_testing_the_webhook_before_setting_one_says_so(client):
+    api, _ = client
+    body = api.post("/api/notify/test")
+    assert body.status_code == 400
+    assert "no webhook" in body.json()["detail"].lower()
+
+
+def test_test_message_reports_what_discord_said(client, monkeypatch):
+    api, _ = client
+    real = "https://discord.com/api/webhooks/1409876543210987654/xY2bkQ7fLpZ9wA3tR6vN1sD4gH8j"
+    api.put("/api/notify", json={"url": real})
+
+    import src.web.app as app_module
+
+    sent: list = []
+    monkeypatch.setattr(app_module, "post", lambda url, embeds: sent.append(embeds) or True)
+
+    body = api.post("/api/notify/test").json()
+    assert body["sent"] is True
+    assert "test" in sent[0][0]["title"].lower()
+
+
+def test_a_refused_test_message_is_reported_not_raised(client, monkeypatch):
+    """Discord 404s a deleted webhook. That is an answer worth showing, not a 500."""
+    api, _ = client
+    real = "https://discord.com/api/webhooks/1409876543210987654/xY2bkQ7fLpZ9wA3tR6vN1sD4gH8j"
+    api.put("/api/notify", json={"url": real})
+
+    import src.web.app as app_module
+
+    monkeypatch.setattr(app_module, "post", lambda url, embeds: False)
+
+    body = api.post("/api/notify/test").json()
+    assert body["sent"] is False
+    assert body["message"]

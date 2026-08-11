@@ -108,6 +108,29 @@ table.data th.num,
   color: var(--color-pageTextLight);
 }
 
+/* Shown instead of the tabs when the page cannot trust what it would draw.
+   Deliberately loud: the failure it replaces used to look like an empty app. */
+.notice {
+  border: 1px solid var(--color-tableBorder);
+  border-radius: 10px;
+  padding: 18px 20px;
+  margin-bottom: 20px;
+}
+
+.notice--error {
+  background: var(--color-errorBackground);
+  color: var(--color-errorText);
+  border-color: var(--color-errorText);
+}
+
+.notice h2 { margin: 0 0 8px; font-size: 16px; }
+.notice p  { margin: 0 0 10px; max-width: 80ch; }
+.notice code {
+  background: var(--color-panelBackground);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
 /* -------------------------------------------------------------------- tabs */
 
 .tabs {
