@@ -26,7 +26,14 @@ from ..combine import combine_all, series_from_result
 from ..notify_discord import COLOR_INFO, post
 from ..scenario import Scenario, load_scenario, read_scenarios, save_scenario
 from ..sources import DEFAULTS as DEFAULT_SOURCES
-from ..sources import Source, load_source, load_sources, save_sources
+from ..sources import (
+    Source,
+    load_checks,
+    load_source,
+    load_sources,
+    save_check,
+    save_sources,
+)
 from ..sweep.explore import explore_report
 from ..sweep.planner import (
     SECONDS_PER_SEARCH,
@@ -719,7 +726,18 @@ TEST_ROUTE = ("PRG", "NRT")
 
 @app.get("/api/sources")
 def get_sources() -> dict:
-    return {name: source.to_dict() for name, source in load_sources(DATA_DIR).items()}
+    """Every source, with whatever the last check of it found.
+
+    The check travels with the source so the tab can show a state on load. A
+    card that says "unknown until you press the button" is a card you have to
+    press a button on to learn anything, which is most of why the old one was
+    not worth opening.
+    """
+    checks = load_checks(DATA_DIR)
+    return {
+        name: {**source.to_dict(), "last_check": checks.get(name)}
+        for name, source in load_sources(DATA_DIR).items()
+    }
 
 
 @app.put("/api/sources")
@@ -731,6 +749,15 @@ def put_sources(payload: dict = Body(...)) -> dict:
             f"unknown source(s): {', '.join(sorted(unknown))}. "
             f"Known sources are {', '.join(sorted(DEFAULT_SOURCES))}",
         )
+    # A site driven through its form has its steps in code, so accepting
+    # selectors for it would save a repair that cannot take effect - and then
+    # report success. Refusing names the reason instead.
+    for name in payload:
+        if not DEFAULT_SOURCES[name].repairable:
+            raise HTTPException(
+                400,
+                f"{name} has no selectors to edit: {DEFAULT_SOURCES[name].note}",
+            )
 
     sources = {}
     for name, body in payload.items():
@@ -750,9 +777,15 @@ def put_sources(payload: dict = Body(...)) -> dict:
             no_results_marker=body.get("no_results_marker", ""),
             result_timeout_s=int(body.get("result_timeout_s", 120)),
             enabled=bool(body.get("enabled", True)),
+            role=DEFAULT_SOURCES[name].role,
+            label=DEFAULT_SOURCES[name].label,
+            note=DEFAULT_SOURCES[name].note,
+            repairable=DEFAULT_SOURCES[name].repairable,
         )
 
-    save_sources(sources, DATA_DIR)
+    # The sources not being edited are written back as they stand, so saving one
+    # never silently reverts another to its built-in defaults.
+    save_sources({**load_sources(DATA_DIR), **sources}, DATA_DIR)
     return {name: source.to_dict() for name, source in sources.items()}
 
 
@@ -795,16 +828,117 @@ def _fetch_for_test(source, url: str) -> tuple[int, str, str]:
         return status, page.url, page.content()
 
 
+def _record_check(name: str, outcome: dict) -> dict:
+    """Stamp a check with when it happened and write it down.
+
+    Timed here rather than in each branch so no outcome can reach the page
+    without a time on it - "working" with no date is a claim about now that may
+    be a fortnight old.
+    """
+    stamped = {**outcome, "checked_at": datetime.now(UTC).isoformat(timespec="seconds")}
+    save_check(name, stamped, DATA_DIR)
+    return stamped
+
+
+def _test_check_source(name: str) -> dict:
+    """Price one leg on a form-driven source, and report what happened.
+
+    Deliberately not a selector report. There is no selector map to be right or
+    wrong about here - the steps live in the provider - so the only honest
+    question is whether asking it for a price still works.
+    """
+    from ..providers.letuska import LetuskaProvider, LetuskaSearchFailed
+
+    # One check source exists. Named rather than assumed, so adding a second one
+    # fails here instead of quietly reporting letuska's health under its name.
+    if name != "LETUSKA":
+        raise HTTPException(500, f"no check is implemented for {name!r}")
+
+    origin, destination = TEST_ROUTE
+    depart = date.today() + timedelta(days=45)
+    route = f"{origin}→{destination} {depart.isoformat()}"
+    try:
+        legs = LetuskaProvider().check_price(origin, destination, depart)
+    except LetuskaSearchFailed as exc:
+        return {
+            "ok": False,
+            "route": route,
+            "legs_parsed": 0,
+            "cards_found": 0,
+            "sample": None,
+            "message": (
+                f"The search did not complete: {exc}. This site is driven through its "
+                "form rather than a deep link, so the usual cause is the form itself "
+                "changing - which is a code fix in src/providers/letuska.py, not a "
+                "selector you can type here."
+            ),
+        }
+    except Exception as exc:  # noqa: BLE001 - the failure is the answer here
+        return {
+            "ok": False,
+            "route": route,
+            "legs_parsed": 0,
+            "cards_found": 0,
+            "sample": None,
+            "message": f"Could not run the search at all: {type(exc).__name__}: {exc}",
+        }
+
+    if not legs:
+        return {
+            "ok": False,
+            "route": route,
+            "legs_parsed": 0,
+            "cards_found": 0,
+            "sample": None,
+            "message": (
+                "The search completed and the site offered nothing on this route. That "
+                "is data rather than breakage, but it leaves the check unproven - try "
+                "again on a route it definitely sells."
+            ),
+        }
+    cheapest = min(legs, key=lambda leg: leg.price_amount)
+    return {
+        "ok": True,
+        "route": route,
+        "legs_parsed": len(legs),
+        "cards_found": len(legs),
+        "sample": cheapest.to_dict(),
+        "message": (
+            f"Priced {len(legs)} offer(s); cheapest {cheapest.price_amount:,.0f} "
+            f"{cheapest.price_currency}. The second opinion still works."
+        ),
+    }
+
+
 @app.post("/api/sources/{name}/test")
 def test_source(name: str) -> dict:
-    """Run one real search and report exactly what these selectors parsed.
+    """Run one real search against this source and record what came back.
 
-    The single question this answers is "is it the URL or the markup?", which
-    otherwise costs an afternoon. It reports rather than raises: a zero count
-    *is* the finding.
+    Three kinds of source, three kinds of answer:
+
+    - A **sweep** source is checked by parsing a real results page, because the
+      single question worth answering is "is it the URL or the markup?", which
+      otherwise costs an afternoon.
+    - A **check** source has no deep link and no selector map; it is checked by
+      asking it to price one leg, which is the only thing it is ever asked to do.
+    - A source that is **not connected** is not checked at all. Pretending to
+      test one would be the same lie as a sweep reporting `error_count: 0`.
+
+    Reports rather than raises: a zero count *is* the finding. The outcome is
+    written to disk so the card shows it again on the next load.
     """
     if name not in DEFAULT_SOURCES:
         raise HTTPException(404, f"No source named {name!r}")
+
+    role = DEFAULT_SOURCES[name].role
+    if role == "none":
+        raise HTTPException(
+            400,
+            f"{DEFAULT_SOURCES[name].label or name} is not connected, so there is "
+            "nothing to check. Nothing in this app reads it.",
+        )
+    if role == "check":
+        return _record_check(name, _test_check_source(name))
 
     from ..providers.pelikan import parse_results_html
     from ..providers.pelikan_url import build_search_url
@@ -816,7 +950,7 @@ def test_source(name: str) -> dict:
 
     def outcome(message: str, cards: int = 0, legs: list | None = None) -> dict:
         legs = legs or []
-        return {
+        return _record_check(name, {
             "ok": bool(legs),
             "url": url,
             "route": f"{origin}→{destination} {depart.isoformat()}",
@@ -824,7 +958,7 @@ def test_source(name: str) -> dict:
             "legs_parsed": len(legs),
             "sample": legs[0].to_dict() if legs else None,
             "message": message,
-        }
+        })
 
     try:
         status, final_url, html = _fetch_for_test(source, url)

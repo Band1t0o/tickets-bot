@@ -834,3 +834,19 @@ def test_shards_still_deal_every_route_when_dates_are_few():
     routes = {(s.origin, s.destination) for s in plan}
     for index in range(3):
         assert {(s.origin, s.destination) for s in shard_of(plan, index, 3)} == routes
+
+
+def test_a_committed_sweep_is_not_mistaken_for_a_shard(tmp_path):
+    """What actually went wrong on the first sharded run.
+
+    The upload step took all of `data/sweeps/<id>/`, so the merge was handed 24
+    directories - seven of them committed sweeps from a fortnight earlier, which
+    have a status.json and no scenario.json. Merging those would have summed a
+    fortnight of prices into one run and reported it as tonight's.
+    """
+    shards = run_shards(tmp_path, count=2)
+    old = tmp_path / "history" / "2026-08-06T18-08-34Z"
+    old.mkdir(parents=True)
+    (old / "status.json").write_text(json.dumps({"state": "done"}), encoding="utf-8")
+    with pytest.raises(ShardMismatch, match="not shards of one run"):
+        merge_shards([*shards, old], tmp_path / "merged")

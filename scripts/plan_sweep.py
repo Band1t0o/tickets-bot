@@ -66,8 +66,13 @@ def main() -> None:
     args = parser.parse_args()
 
     chosen = choose(Path(args.scenarios), args.only, args.focused, args.data_dir)
+    count = max(1, args.shards)
     print("scenarios=" + json.dumps(chosen))
-    print("shards=" + json.dumps(list(range(max(1, args.shards)))))
+    print("shards=" + json.dumps(list(range(count))))
+    # Emitted as well as the list, so the sweep job passes the same count to
+    # `--shard i/n` that the matrix was built from. Reading it from a workflow
+    # env var in two places is how the two drift.
+    print(f"shard_count={count}")
 
 
 if __name__ == "__main__":

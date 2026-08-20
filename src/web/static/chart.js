@@ -83,6 +83,26 @@ export function lineChart(points, opts = {}) {
     'aria-label': opts.ariaLabel || 'Price chart',
   });
 
+  // The band of dates being watched closely, drawn behind everything so it
+  // reads as ground rather than as another series. Half-open ranges are drawn
+  // too: while you are picking, one end is chosen and the other is not, and a
+  // band that only appeared once both were set would leave the first click
+  // looking like it did nothing.
+  if (opts.band && opts.band.length) {
+    const marks = opts.band
+      .map((label) => points.findIndex((p) => p.label === label))
+      .filter((i) => i >= 0);
+    if (marks.length) {
+      const from = x(Math.min(...marks));
+      const to = x(Math.max(...marks));
+      svg.appendChild(svgEl('rect', {
+        x: Math.min(from, to) - 6, y: PAD.top,
+        width: Math.abs(to - from) + 12, height: plotH,
+        fill: 'var(--color-chart1)', opacity: 0.12, rx: 4,
+      }));
+    }
+  }
+
   // Recessive grid and axis, per the design tokens.
   for (const tick of niceTicks(yMin, yMax)) {
     svg.appendChild(svgEl('line', {
@@ -173,17 +193,32 @@ export function lineChart(points, opts = {}) {
   });
   svg.appendChild(crosshair);
 
-  svg.addEventListener('mousemove', (event) => {
+  // Nearest point to a mouse event, so the hit target is far bigger than the
+  // 4px marker. Shared by hover and click: two copies of this would let the
+  // tooltip name one date while a click picked its neighbour.
+  const nearestTo = (event) => {
     const box = svg.getBoundingClientRect();
     const scale = width / box.width;
     const px = (event.clientX - box.left) * scale;
-    // Nearest point, so the hit target is far bigger than the 4px marker.
     let nearest = 0;
     let bestDist = Infinity;
     points.forEach((_, i) => {
       const d = Math.abs(x(i) - px);
       if (d < bestDist) { bestDist = d; nearest = i; }
     });
+    return { nearest, scale };
+  };
+
+  if (opts.onPick) {
+    svg.style.cursor = 'pointer';
+    svg.addEventListener('click', (event) => {
+      const { nearest } = nearestTo(event);
+      opts.onPick(points[nearest].label, nearest, event);
+    });
+  }
+
+  svg.addEventListener('mousemove', (event) => {
+    const { nearest, scale } = nearestTo(event);
     const point = points[nearest];
     crosshair.setAttribute('x1', x(nearest));
     crosshair.setAttribute('x2', x(nearest));

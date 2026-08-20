@@ -173,7 +173,10 @@ def merge_shards_command(
     shard_root = Path(shard_root)
     # Any directory holding a status.json is a shard, however the artifact
     # download nested it. Sorted so a merge is reproducible.
-    shards = sorted(p.parent for p in shard_root.rglob("status.json"))
+    # Discovered by the snapshot every shard writes before its first search,
+    # not by status.json: an older committed sweep has a status and no snapshot,
+    # and the first sharded run merged seven of those by mistake.
+    shards = sorted(p.parent for p in shard_root.rglob("scenario.json"))
     if not shards:
         print(f"[merge] no shards under {shard_root}; nothing to merge")
         raise SystemExit(2)
@@ -355,6 +358,9 @@ def main():
     p_sweep.add_argument("--max-minutes", type=float,
                          help="Wall-clock budget. The sweep stops cleanly when it runs out, "
                               "keeping what it found, instead of being killed mid-search")
+    p_sweep.add_argument("--data-dir", default="data",
+                         help="Where to write the sweep. A shard writes outside data/ so its "
+                              "artifact holds one sweep rather than the whole committed history")
     p_sweep.add_argument("--shard", metavar="INDEX/COUNT",
                          help="Run one runner's share of the plan, e.g. 0/3. The shards "
                               "partition it exactly; merge them with merge-shards")
@@ -431,6 +437,7 @@ def main():
         args.dry_run,
         args.mode,
         args.max_minutes,
+        data_dir=args.data_dir,
         shard=shard,
         # A shard has only part of the result, so it has nothing true to say
         # about the cheapest trip. The merge is what reports.
