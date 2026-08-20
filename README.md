@@ -128,11 +128,11 @@ whose real price is a bag fee higher.
 
 Counts are for the `japan-philippines` scenario; they scale with airports × dates.
 
-| Depth | Date step | Searches | One runner | Three shards |
-|---|---|---:|---:|---:|
-| `quick` | every 7 days | 84 | ~21 min | ~7 min |
-| `standard` | every 3 days | 168 | ~41 min | ~14 min |
-| `deep` | every day | 483 | ~119 min | ~40 min |
+| Depth | Date step | Searches | Time |
+|---|---|---:|---:|
+| `quick` | every 7 days | 84 | ~21 min |
+| `standard` | every 3 days | 168 | ~41 min |
+| `deep` | every day | 483 | ~119 min |
 
 Deep was 615 until every leg started reserving the minimum stays that still have to happen after
 it. The first leg was being searched twelve days past the last departure that can reach a searched
@@ -175,8 +175,8 @@ pricing again tonight.
 Click two points on the **Prices** chart and press **Watch these dates**. That writes `focus_start`
 and `focus_end` onto the trip, and the planner bounds the *first* leg to them -- the later legs
 follow through the stay ranges, so the three can never contradict each other and a focused sweep can
-still complete a whole trip. Five departure days on the trip above is **195 searches, ~16 min on
-three shards**, against 483.
+still complete a whole trip. Five departure days on the trip above is **195 searches, ~48 min**,
+against 483 and ~119.
 
 The picking is done on the chart rather than in two date boxes because that is where the decision is
 made, and a date box beside a chart is a second place to get the same answer wrong.
@@ -411,18 +411,24 @@ The repo is **public**, so Actions minutes are free and depth is no longer ratio
 
 | Job | Schedule | Runtime |
 |---|---|---:|
-| Sweep ([scrape.yml](.github/workflows/scrape.yml)) | daily 02:00 UTC, `deep`, 3 shards | ~40 min |
-| Focused watch (same workflow) | daily 13:00 UTC, only with a focus set | ~15 min |
+| Sweep ([scrape.yml](.github/workflows/scrape.yml)) | daily 02:00 UTC, `deep` | ~119 min |
+| Focused watch (same workflow) | daily 13:00 UTC, only with a focus set | ~48 min |
 | Volatility probe ([probe.yml](.github/workflows/probe.yml)) | every 2 h | ~2 min |
 | Tests ([test.yml](.github/workflows/test.yml)) | every push | ~1 min |
 
-**Sharding is how depth and politeness stopped competing.** A deep sweep is split across three
-runners with `--shard i/3` and stitched back together by `merge-shards`. Each runner is a separate
-VM with its own address, so three of them at the unchanged two workers and four-second delay put
-exactly the per-address load that measured zero timeouts over 350 searches -- while finishing in a
-third of the wall clock. Shards are dealt per route rather than strided off the top of the plan:
-`searches[i::3]` would have handed each runner the same three routes, so a throttled shard would
-delete routes from the merged sweep and read downstream as dead routes rather than as a lost shard.
+**The limit is on this client as a whole, not per address.** Sharding (`--shard i/n`, stitched back
+by `merge-shards`) was built believing otherwise -- three runners, three addresses, three times the
+speed. The first sharded run disproved it in one reading: three shards on three separate runner
+addresses were each cut off at **search 120, within 90 seconds of one another**, with zero timeouts
+up to that point. 360 searches in 21 minutes is 17/min; the clean single-runner sweep of 11 August
+held 4.1/min for 86 minutes without a single timeout.
+
+So the sweep runs on **one runner** (`DEFAULT_SHARDS: 1`), and `SAFE_SEARCHES_PER_MINUTE = 4.1` in
+the planner records why. The machinery stays, because it is the right tool if the site changes and
+because shards are dealt per route -- `searches[i::n]` would hand each runner the same few routes,
+so a throttled shard would delete routes from the merged sweep and read downstream as dead routes
+rather than as a lost shard. Raising the count is a `workflow_dispatch` input, so an experiment
+does not need a commit; it also does not make the sweep faster.
 
 **`timeout-minutes` is a ceiling above the budget, never the budget.** It used to be the budget, set
 from an estimate that was wrong by half, and thirteen consecutive nightly runs -- 8 to 20 August --

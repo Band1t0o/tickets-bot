@@ -36,6 +36,26 @@ from ..scenario import Scenario
 # one. `is_comparable` and the circuit breaker are what handle the other case.
 SECONDS_PER_SEARCH = 29.5
 
+# Searches per minute this client may run *in total*, across every machine at
+# once, before pelikan.cz stops answering.
+#
+# Measured twice, and the second measurement is the one that matters:
+#
+# - 11 Aug, one cloud runner: 350 searches over 86 min = 4.1/min, zero timeouts.
+# - 20 Aug, three cloud runners in parallel: 360 searches over 21 min = 17/min.
+#   All three were cut off at search 120, within 90 seconds of one another, on
+#   three different runner addresses.
+#
+# Three separate addresses hitting the same wall at the same moment is not a
+# per-address limit, which is what sharding was introduced on the assumption of.
+# It buys wall clock only up to this ceiling - and one runner at two workers with
+# a four-second delay already sits at it. So the default shard count is 1, and
+# raising it means lowering the rate per shard by the same factor for no net
+# gain. The machinery is kept because it is the right tool if the site's
+# behaviour changes, and because a lost shard thins the date grid evenly rather
+# than truncating the sweep.
+SAFE_SEARCHES_PER_MINUTE = 4.1
+
 # The site substitutes nearby dates, so the final leg is searched past the end
 # of the window - otherwise the latest valid itineraries are never seen.
 RETURN_SLACK_DAYS = 4
@@ -196,6 +216,12 @@ def planned_routes(scenario: Scenario) -> set[tuple[str, str]]:
 
 def shard_of(searches: list[LegSearch], index: int, count: int) -> list[LegSearch]:
     """This runner's share of the plan: every `count`-th date of every route.
+
+    **Read `SAFE_SEARCHES_PER_MINUTE` before raising the shard count.** Three
+    shards on three separate runner addresses were each cut off at search 120,
+    within 90 seconds of one another, so the site limits this client as a whole
+    and not per address. Shards buy wall clock only while their combined rate
+    stays under what one runner has already proven.
 
     Dealt per route rather than off the top of the list. `searches[index::count]`
     looks equivalent and is not: `_searches_for` emits routes as its innermost

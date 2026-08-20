@@ -487,6 +487,13 @@ def run_sweep(
             "answered": result.answered,
             "planned": planned,
             "coverage": result.coverage,
+            # Stated as its own number because `error_count` cannot carry it. A
+            # run the circuit breaker abandons never attempts what is left, so
+            # nothing is recorded as an error and the count reads 0 - which is
+            # precisely the reading that hid 70% failure once before. The 20 Aug
+            # sharded run posted `error_count: 0` beside 48 searches it never
+            # made.
+            "unanswered": max(0, planned - result.answered),
             "shard": list(shard) if shard is not None else None,
             # The focus this sweep searched under, so a narrowed run is never
             # charted as though it had priced the whole window.
@@ -785,6 +792,15 @@ def merge_shards(shard_dirs: list[Path], destination: Path) -> dict:
     shard_dirs = [Path(d) for d in shard_dirs]
     if not shard_dirs:
         raise ShardMismatch("no shards to merge")
+    # A shard is a directory holding a scenario.json snapshot. Anything else
+    # under the download is not one - the first sharded run uploaded the whole
+    # of `data/sweeps/<id>/`, so the merge was handed 24 "shards", seven of them
+    # committed sweeps from a fortnight earlier.
+    missing = [d.name for d in shard_dirs if not (d / "scenario.json").exists()]
+    if missing:
+        raise ShardMismatch(
+            "these are not shards of one run - no scenario.json in: " + ", ".join(missing)
+        )
 
     snapshots = {}
     for directory in shard_dirs:
@@ -885,6 +901,7 @@ def _merged_status(statuses: list[dict], destination: Path) -> dict:
         "answered": answered,
         "planned": planned,
         "coverage": round(answered / planned, 4) if planned else 0.0,
+        "unanswered": max(0, planned - answered),
         # Merged, so the shard field is spent. What it becomes is the roll call:
         # which shards were merged, so a run that lost one says so rather than
         # reporting a smaller sweep that looks complete.
