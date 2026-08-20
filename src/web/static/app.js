@@ -10,6 +10,13 @@ const state = {
   // A trip being created has no file behind it yet, so Save must POST and the
   // sweep buttons have nothing to run against until it does.
   isNew: false,
+  // True between seeing a run start and seeing it end, so the page can show the
+  // sweep it just watched rather than whichever one was selected before.
+  watching: false,
+  // Which run the Explore tab reads verdicts from — its own selection, since
+  // the best sweep to judge airports by is rarely the one you are pricing.
+  exploreStamp: null,
+  exploreCost: null,
 };
 
 /* Must equal `API_CONTRACT` in src/web/app.py; a test fails if it does not.
@@ -20,7 +27,7 @@ const state = {
    was lost: the page rendered an empty trip picker and empty charts, which is
    exactly what a deleted database looks like, when in fact nothing on disk had
    changed and the answer was `make ui` again. */
-const EXPECTED_CONTRACT = 1;
+const EXPECTED_CONTRACT = 5;
 
 const api = async (path, options) => {
   const response = await fetch(path, options);
@@ -119,16 +126,20 @@ $('theme-toggle').onclick = () => {
 
 /* ------------------------------------------------------------------- tabs */
 
+function showTab(name) {
+  for (const b of $('tabs').children) b.classList.toggle('is-active', b.dataset.tab === name);
+  for (const section of document.querySelectorAll('section[data-panel]')) {
+    section.hidden = section.dataset.panel !== name;
+  }
+  if (name === 'explore') renderExplore();
+  if (name === 'results') renderResults();
+  if (name === 'prices') renderPrices();
+  if (name === 'sources') { renderSources(); renderNotifyTarget(); }
+}
+
 $('tabs').onclick = (event) => {
   const button = event.target.closest('button[data-tab]');
-  if (!button) return;
-  for (const b of $('tabs').children) b.classList.toggle('is-active', b === button);
-  for (const section of document.querySelectorAll('section[data-panel]')) {
-    section.hidden = section.dataset.panel !== button.dataset.tab;
-  }
-  if (button.dataset.tab === 'results') renderResults();
-  if (button.dataset.tab === 'prices') renderPrices();
-  if (button.dataset.tab === 'sources') { renderSources(); renderNotifyTarget(); }
+  if (button) showTab(button.dataset.tab);
 };
 
 /* --------------------------------------------------------- route editor --
@@ -676,6 +687,10 @@ function derivedName() {
 
 let estimateTimer;
 const scheduleEstimate = () => {
+  // The cost is debounced because it costs a round trip; the unsaved marker is
+  // not, because it is the answer to "what would that button search?" and has
+  // to be true the moment the trip stops matching what is saved.
+  renderDirty();
   clearTimeout(estimateTimer);
   estimateTimer = setTimeout(refreshEstimate, 300);
 };
@@ -687,18 +702,18 @@ async function refreshEstimate() {
     $('estimate').textContent = 'Save the trip to price the sweep';
     $('estimate').className = 'badge badge--muted';
     $('leg-breakdown').textContent = '';
+    $('explore-cost').textContent = 'a few minutes';
     return;
   }
-  // The estimate is served for the *saved* scenario, so an unsaved edit shows
-  // the last saved cost. Say so rather than implying the number is live.
-  const dirty = JSON.stringify(formToScenario()) !== JSON.stringify(state.scenario);
+  renderDirty();
+  refreshExploreCost();
   try {
     const body = await api(
       `/api/scenarios/${state.scenario.id}/estimate?depth=${$('depth').value}`,
-      { method: 'POST' },
+      { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(formToScenario()) },
     );
-    $('estimate').textContent =
-      `${body.searches} searches · ~${body.minutes} min` + (dirty ? ' (saved version)' : '');
+    $('estimate').textContent = `${body.searches} searches · ~${body.minutes} min`;
     $('estimate').className = 'badge badge--muted';
     $('leg-breakdown').innerHTML = (body.leg_labels ?? [])
       .map((label, index) => `${escapeHtml(label)} — ${body.per_leg[index] ?? 0} searches`)
@@ -710,15 +725,70 @@ async function refreshEstimate() {
   }
 }
 
+/* The probe's own price, asked of the same endpoint the run will use. A number
+   in the sentence is what makes "explore first" an obvious trade rather than
+   another button of unknown cost. */
+async function refreshExploreCost() {
+  try {
+    const body = await api(
+      `/api/scenarios/${state.scenario.id}/estimate?mode=explore`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(formToScenario()) },
+    );
+    state.exploreCost = `${body.searches} searches, ~${body.minutes} min`;
+  } catch {
+    state.exploreCost = 'a few minutes';
+  }
+  $('explore-cost').textContent = state.exploreCost;
+  $('explore-run-note').textContent = state.exploreCost;
+}
+
 /* -------------------------------------------------------------- save/run */
 
-const showError = (message) => {
-  $('save-error').textContent = message;
-  $('save-error').hidden = false;
+/* Whether the form holds edits the saved trip does not. A run searches the
+   saved trip, so this is the difference between what you are looking at and
+   what would actually be searched. */
+function isDirty() {
+  if (state.isNew || !state.scenario) return false;
+  return JSON.stringify(formToScenario()) !== JSON.stringify(state.scenario);
+}
+
+function renderDirty() {
+  const note = $('dirty-note');
+  const dirty = isDirty();
+  note.hidden = !dirty;
+  note.textContent = dirty ? 'Unsaved changes — a run will save them first' : '';
+  const inline = $('explore-dirty');
+  if (inline) inline.textContent = dirty ? ' · unsaved changes will be saved first' : '';
+}
+
+/* Where a message about the trip belongs: the panel you are looking at. The
+   Search panel's box is on a tab you cannot see from Explore, so a refused save
+   used to render into hidden markup and the button read as broken.
+
+   `tone` exists because not everything said here is a failure — "I took CEB
+   out, now save it" is an instruction, and printing it in red reads as
+   something having gone wrong. */
+const clearError = () => {
+  for (const box of document.querySelectorAll('.panel-error')) box.hidden = true;
 };
 
-$('save-btn').onclick = async () => {
-  $('save-error').hidden = true;
+const showError = (message, tone = 'error') => {
+  clearError();
+  const panel = document.querySelector('section[data-panel]:not([hidden])');
+  const box = panel?.querySelector('.panel-error') ?? $('save-error');
+  box.textContent = message;
+  box.className = `panel-error badge badge--${tone}`;
+  box.hidden = false;
+  box.scrollIntoView({ block: 'nearest' });
+  return box;
+};
+
+/* Write the edited trip back. Shared with the Explore tab's pending-changes
+   bar, which drops airports and then has to save them the same way. Returns
+   true when it stuck, so a caller can clear its own state only if it did. */
+async function saveTrip() {
+  clearError();
   const payload = formToScenario();
   try {
     let saved;
@@ -746,16 +816,28 @@ $('save-btn').onclick = async () => {
     fillForm(saved);
     state.frequent = await api('/api/airports/frequent').catch(() => state.frequent);
     renderRoute();
+    // Whatever was waiting in the pending bar is on disk now, however the save
+    // was triggered — the bar itself, or a run that saved on the way past.
+    pending.length = 0;
+    renderPending();
     await refreshEstimate();
+    // Editing the trip is exactly what turns an existing run into a run of a
+    // different trip, so the flags in the sweep picker are stale the instant a
+    // save lands. Re-read them rather than waiting for the next poll.
+    await pollStatus();
     $('save-btn').textContent = 'Saved';
     setTimeout(() => ($('save-btn').textContent = 'Save trip'), 1500);
+    return true;
   } catch (error) {
     showError(error.message);
+    return false;
   }
-};
+}
+
+$('save-btn').onclick = saveTrip;
 
 $('delete-trip-btn').onclick = async () => {
-  $('save-error').hidden = true;
+  clearError();
   if (state.isNew) { await reloadScenarioList(); return; }
   if (!confirm(`Delete “${state.scenario.name}”? Sweep results already gathered are kept.`)) return;
   try {
@@ -767,7 +849,7 @@ $('delete-trip-btn').onclick = async () => {
 };
 
 $('new-trip-btn').onclick = () => {
-  $('save-error').hidden = true;
+  clearError();
   state.isNew = true;
   state.stamp = null;
   state.sweeps = [];
@@ -830,22 +912,52 @@ async function freeId(base) {
 
 function updateNewTripUi() {
   // Nothing to sweep until the trip exists on disk.
-  for (const id of ['run-local-btn', 'run-cloud-btn']) $(id).disabled = state.isNew;
+  for (const id of ['run-local-btn', 'run-cloud-btn', 'explore-btn']) $(id).disabled = state.isNew;
   $('delete-trip-btn').textContent = state.isNew ? 'Discard' : 'Delete';
 }
 
-$('run-local-btn').onclick = async () => {
-  $('save-error').hidden = true;
+/* A run searches the trip on disk, so the edits on screen have to reach disk
+   before it starts. Without this the app happily spent two 25-minute probes
+   searching the previous day's airports and reported on them as if they were
+   the trip — the tool being confidently wrong, which is worse than no tool.
+
+   A trip that will not save does not run: the reason appears on whichever tab
+   the button was pressed from. */
+async function startRun(mode) {
+  clearError();
+  if (isDirty() && !(await saveTrip())) return false;
   try {
-    await api(`/api/scenarios/${state.scenario.id}/run?depth=${$('depth').value}`, { method: 'POST' });
+    await api(
+      `/api/scenarios/${state.scenario.id}/run?depth=${$('depth').value}&mode=${mode}`,
+      { method: 'POST' },
+    );
     pollStatus();
+    return true;
   } catch (error) {
     showError(error.message);
+    return false;
   }
+}
+
+$('run-local-btn').onclick = () => startRun('sweep');
+$('explore-btn').onclick = () => startRun('explore');
+
+$('stop-btn').onclick = async () => {
+  $('stop-btn').disabled = true;
+  try {
+    await api(`/api/scenarios/${state.scenario.id}/stop`, { method: 'POST' });
+  } catch (error) {
+    // Most often 409: it finished between the render and the click.
+    $('status-text').textContent = error.message;
+  }
+  pollStatus();
 };
 
 $('run-cloud-btn').onclick = async () => {
-  $('save-error').hidden = true;
+  clearError();
+  // The cloud reads the trip out of the repo, so an unsaved edit is even
+  // further from what would be searched than it is locally.
+  if (isDirty() && !(await saveTrip())) return;
   try {
     await api(`/api/scenarios/${state.scenario.id}/run-cloud?depth=${$('depth').value}`, { method: 'POST' });
     $('status-text').textContent = 'Dispatched to GitHub Actions';
@@ -869,6 +981,12 @@ async function pollStatus() {
     state.sweeps = body.sweeps;
     const latest = body.sweeps[0];
 
+    // Only offered while there is something to stop, and disabled once asked -
+    // a second click cannot make it stop any sooner.
+    $('stop-btn').hidden = !body.running;
+    $('stop-btn').disabled = Boolean(body.stopping);
+    if (body.running) state.watching = true;
+
     // A sweep thread that died has no status.json to show, so without this the
     // strip would sit on "No sweeps yet" forever after a failed launch.
     if (body.error) {
@@ -878,7 +996,15 @@ async function pollStatus() {
       return;
     }
 
-    if (body.running && latest) {
+    if (body.stopping && latest) {
+      // The search in flight has to finish or hit the site's 120s timeout.
+      // Saying "stopped" here would be a lie the next poll exposes.
+      strip.className = 'status-strip is-running';
+      $('status-text').textContent =
+        `Stopping — finishing the search in flight · ${latest.completed}/${latest.total} done, ` +
+        `${latest.legs_found ?? 0} flights kept`;
+      setTimeout(pollStatus, 2000);
+    } else if (body.running && latest) {
       // Pace constants come from the server. Keeping local copies is how the
       // countdown ended up claiming half the real wait after the sweep was
       // slowed from 4 workers to 2.
@@ -893,10 +1019,31 @@ async function pollStatus() {
       setTimeout(pollStatus, 2000);
     } else if (latest) {
       const broken = latest.state === 'unhealthy';
+      const what = latest.mode === 'explore' ? 'probe' : 'sweep';
       strip.className = `status-strip${broken ? ' is-error' : ''}`;
-      $('status-text').textContent = broken
-        ? `Last sweep looked broken — ${latest.legs_found ?? 0} flights found`
-        : `Last sweep ${latest.stamp.replace('T', ' ').replace('Z', '')} · ${latest.legs_found ?? 0} flights`;
+      if (broken) {
+        $('status-text').textContent = `Last ${what} looked broken — ${latest.legs_found ?? 0} flights found`;
+      } else if (latest.state === 'stopped') {
+        // Stopped is neither success nor breakage, and reading it as either
+        // would be wrong: it is exactly as much of a sweep as you asked for.
+        $('status-text').textContent =
+          `Stopped at ${latest.completed}/${latest.total} · ${latest.legs_found ?? 0} flights kept`;
+      } else {
+        $('status-text').textContent =
+          `Last ${what} ${latest.stamp.replace('T', ' ').replace('Z', '')} · ${latest.legs_found ?? 0} flights`;
+      }
+      // A run this page watched start should be the one it shows when it ends.
+      // Otherwise you explore, open Results, and read yesterday's deep sweep.
+      if (state.watching) {
+        state.watching = false;
+        state.stamp = latest.stamp;
+        state.exploreStamp = latest.stamp;
+        populateSweepSelect();
+        // A probe answers in the Explore tab, a sweep in Results. Show whichever
+        // one the run you just watched actually filled in.
+        showTab(latest.mode === 'explore' ? 'explore' : 'results');
+        return;
+      }
       populateSweepSelect();
     } else {
       strip.className = 'status-strip';
@@ -918,9 +1065,13 @@ function populateSweepSelect() {
     // test and a 204-search real sweep are otherwise indistinguishable here -
     // and reading the wrong one produced a headline price 7,000 Kč too high.
     const dark = (sweep.routes_with_no_results || []).length;
+    // A probe and a stopped run are both "not a sweep of this trip", and
+    // reading either as one is how a headline price ends up 7,000 Kč wrong.
+    const kind = sweep.mode === 'explore' ? 'probe' : (sweep.depth ?? '?');
     option.textContent =
       `${sweep.stamp.replace('T', ' ').replace('Z', '')} · ` +
-      `${sweep.depth ?? '?'} · ${sweep.total ?? 0} searches · ${sweep.legs_found ?? 0} flights` +
+      `${kind} · ${sweep.total ?? 0} searches · ${sweep.legs_found ?? 0} flights` +
+      (sweep.state === 'stopped' ? ` · stopped at ${sweep.completed ?? '?'}` : '') +
       (dark ? ` · ⚠ ${dark} dead route(s)` : '');
     select.appendChild(option);
   }
@@ -975,6 +1126,296 @@ function renderVerification(report) {
       : '');
 }
 
+/* --------------------------------------------------------- explore report --
+
+   What a reconnaissance pass has to say. Not itineraries — three dates a leg
+   rarely chain into a whole trip — but a verdict per airport, and a button to
+   act on it.
+
+   The verdicts deliberately separate "measured and bad" from "not measured".
+   With the site throttling this client into mass timeouts, an airport with no
+   price is far more often unanswered than genuinely empty, and dropping one on
+   that basis would be throwing away a good route on four timeouts.
+*/
+
+const VERDICT_TEXT = {
+  best: ['good', 'cheapest here'],
+  close: ['good', 'within reach'],
+  worse: ['warning', 'dearer'],
+  poor: ['error', 'not worth it'],
+  no_offers: ['error', 'nothing sold'],
+  unproven: ['muted', 'not measured'],
+};
+
+const DROPPABLE = new Set(['poor', 'no_offers']);
+
+/* Airports dropped here but not yet saved. Removals accumulate rather than
+   taking effect one at a time: you are deciding about a pool of airports at
+   once, and six removals should be one review and one save. */
+const pending = [];
+
+function removeFromTrip(pool, code) {
+  if (pool.role === 'origins') route.origins = route.origins.filter((c) => c !== code);
+  else if (pool.role === 'return_to') route.returnTo = route.returnTo.filter((c) => c !== code);
+  else if (pool.role === 'stop') {
+    const stop = route.stops[pool.stop_index];
+    if (stop) stop.airports = stop.airports.filter((c) => c !== code);
+  }
+  pending.push(code);
+  renderRoute();
+  scheduleEstimate();
+  renderPending();
+  renderExplore();   // the dropped airport should leave the table it was in
+}
+
+function renderPending() {
+  const bar = $('explore-pending');
+  bar.hidden = pending.length === 0;
+  if (pending.length) {
+    // Named rather than counted: "dropping 2 airports" is not something you can
+    // check, and this is the last screen before the trip changes.
+    $('explore-pending-text').innerHTML =
+      `Dropping <strong>${escapeHtml([...new Set(pending)].join(', '))}</strong> — ` +
+      'not saved yet.';
+  }
+}
+
+$('explore-undo').onclick = async () => {
+  // Reload the saved trip rather than re-adding codes: whatever else was edited
+  // in the meantime goes back too, which is what "undo" has to mean here.
+  pending.length = 0;
+  fillForm(state.scenario);
+  renderPending();
+  await refreshEstimate();
+  renderExplore();
+};
+
+$('explore-save').onclick = async () => {
+  if (await saveTrip()) {
+    pending.length = 0;
+    renderPending();
+    renderExplore();
+  }
+};
+
+$('explore-run-btn').onclick = () => startRun('explore');
+
+/* Whether the *edited* trip still contains this airport. The report describes
+   a sweep, so it keeps listing airports you have just dropped; without this
+   they would sit there still offering a Remove button that does nothing. */
+function stillInTrip(pool, code) {
+  if (pool.role === 'origins') return route.origins.includes(code);
+  if (pool.role === 'return_to') return route.returnTo.includes(code);
+  return Boolean(route.stops[pool.stop_index]?.airports.includes(code));
+}
+
+function exploreRow(pool, row, currency) {
+  const [tone, text] = VERDICT_TEXT[row.verdict] ?? ['muted', row.verdict];
+  // Struck through only for an airport *you* took out just now, in this
+  // session. An airport that was simply never in your trip is a different
+  // statement, and reading a whole table as "dropped" — which is what a report
+  // of somebody else's trip looked like — implied six decisions never made.
+  const dropped = pending.includes(row.iata) && !stillInTrip(pool, row.iata);
+  const outside = !dropped && !stillInTrip(pool, row.iata);
+  const tr = document.createElement('tr');
+  if (dropped) tr.className = 'is-dropped';
+  else if (outside) tr.className = 'is-outside';
+
+  const price = (amount, stops) =>
+    amount === null || amount === undefined
+      ? '<span class="muted">—</span>'
+      : `${escapeHtml(money(amount, currency))}` +
+        (stops === null || stops === undefined
+          ? ''
+          : ` <span class="muted small">${stops === 0 ? 'direct' : `${stops} stop${stops === 1 ? '' : 's'}`}</span>`);
+
+  const gap = row.vs_best_pct
+    ? `<span class="trend trend--up">+${Number(row.vs_best_pct).toFixed(0)}%</span>`
+    : (row.verdict === 'best' ? '<span class="muted">benchmark</span>' : '<span class="muted">—</span>');
+
+  tr.innerHTML =
+    `<td><strong>${escapeHtml(row.iata)}</strong> ` +
+    `<span class="muted small">${escapeHtml(airportLabel(row.iata))}</span></td>` +
+    `<td><span class="badge badge--${tone}">${escapeHtml(text)}</span></td>` +
+    `<td class="num">${price(row.in_min_price, row.in_min_stops)}</td>` +
+    `<td class="num">${price(row.out_min_price, row.out_min_stops)}</td>` +
+    `<td class="num">${row.total_min === null ? '<span class="muted">—</span>' : escapeHtml(money(row.total_min, currency))}</td>` +
+    `<td class="num">${gap}</td>` +
+    // Sweeps written before per-route accounting existed have no attempt counts
+    // at all. "0 asked" would read as a measurement; it is an absence.
+    `<td class="num small muted">${row.searches
+      ? `${row.searches} asked · ${row.errors} failed`
+      : 'attempts not recorded'}</td>`;
+
+  const action = document.createElement('td');
+  if (dropped) {
+    action.innerHTML = '<span class="muted small">dropped</span>';
+  } else if (outside) {
+    action.innerHTML = '<span class="muted small">not in this trip</span>';
+  } else if (DROPPABLE.has(row.verdict)) {
+    const drop = document.createElement('button');
+    drop.type = 'button';
+    drop.className = 'small';
+    drop.textContent = 'Remove from trip';
+    drop.onclick = () => removeFromTrip(pool, row.iata);
+    action.appendChild(drop);
+  } else if (row.verdict === 'unproven') {
+    // The one case where the right advice is to do nothing yet.
+    action.innerHTML = '<span class="muted small">probe again</span>';
+  }
+  tr.appendChild(action);
+  return tr;
+}
+
+/* Which run the verdicts are read from. Deliberately every sweep, not only
+   probes: a real sweep has priced the same routes on many more dates, so its
+   verdict is the better one whenever you have it. */
+function populateExploreSelect() {
+  const select = $('explore-select');
+  const previous = state.exploreStamp;
+  select.innerHTML = '';
+  // `has_legs` and not `legs_found`: the latter is what a run found, and a run
+  // killed before legs were written to disk still reports thousands of them.
+  // Offering one of those would draw a report of nothing but "not measured".
+  const usable = state.sweeps.filter((sweep) => sweep.has_legs);
+  for (const sweep of usable) {
+    const option = document.createElement('option');
+    option.value = sweep.stamp;
+    const kind = sweep.mode === 'explore' ? 'probe' : `${sweep.depth ?? '?'} sweep`;
+    option.textContent =
+      `${sweep.stamp.replace('T', ' ').replace('Z', '')} · ${kind} · ` +
+      `${sweep.total ?? 0} searches · ${sweep.legs_found ?? 0} flights` +
+      (sweep.state === 'throttled' ? ' · site refused' : '') +
+      (sweep.state === 'stopped' ? ' · stopped early' : '') +
+      // Before it is opened, not after: a run of other airports reads exactly
+      // like a run of yours once its verdicts are on screen.
+      (sweep.searched_another_trip ? ' · different trip' : '');
+    select.appendChild(option);
+  }
+  state.exploreStamp = usable.some((s) => s.stamp === previous) ? previous : usable[0]?.stamp;
+  if (state.exploreStamp) select.value = state.exploreStamp;
+  return usable.length > 0;
+}
+
+$('explore-select').onchange = (event) => {
+  state.exploreStamp = event.target.value;
+  renderExplore();
+};
+
+async function renderExplore() {
+  if (state.isNew) return;
+  const anything = populateExploreSelect();
+  $('explore-empty').hidden = anything;
+  $('explore-report').hidden = !anything;
+  $('explore-run-note').textContent = state.exploreCost ?? '';
+  if (!anything) {
+    $('explore-report').innerHTML = '';
+    $('explore-intro').textContent = '';
+    $('explore-mismatch').hidden = true;
+    return;
+  }
+  try {
+    renderExploreReport(
+      await api(`/api/sweeps/${state.scenario.id}/${state.exploreStamp}/explore`),
+    );
+  } catch (error) {
+    $('explore-report').innerHTML = '';
+    $('explore-mismatch').hidden = true;
+    $('explore-empty').hidden = false;
+    $('explore-empty').textContent = `Could not read that run — ${error.message}`;
+  }
+}
+
+function renderExploreReport(body) {
+  const host = $('explore-report');
+  host.innerHTML = '';
+  host.hidden = false;
+
+  const probe = body.mode === 'explore';
+  $('explore-intro').innerHTML =
+    (probe
+      ? 'A probe, not a sweep: every route on three spread-out dates. '
+      : 'Read from a full sweep, so these prices come from many more dates than a probe. ') +
+    'Prices are the cheapest seen, so they are a floor to compare airports by, never a fare ' +
+    'to book. <strong>Not measured</strong> means the site never answered — run it again ' +
+    'rather than ruling that airport out.' +
+    (body.state === 'stopped' ? ' <strong>This run was stopped early</strong>, so some routes went unasked.' : '') +
+    (body.state === 'throttled' ? ' <strong>The site stopped answering during this run</strong>, so treat thin rows as unmeasured.' : '');
+
+  renderMismatch(body, probe);
+
+  for (const pool of body.pools) {
+    const block = document.createElement('div');
+    block.className = 'panel__section';
+
+    const heading = document.createElement('h3');
+    heading.textContent = pool.role === 'origins' && pool.index === 0
+      ? 'Flying from'
+      : `${pool.label}`;
+    block.appendChild(heading);
+
+    const scroll = document.createElement('div');
+    scroll.className = 'table-scroll';
+    const table = document.createElement('table');
+    table.className = 'data';
+    table.innerHTML =
+      '<thead><tr><th>Airport</th><th>Verdict</th><th class="num">Cheapest in</th>' +
+      '<th class="num">Cheapest out</th><th class="num">Together</th>' +
+      '<th class="num">vs best</th><th class="num">Searches</th><th></th></tr></thead>';
+    const tbody = document.createElement('tbody');
+    for (const row of pool.airports) tbody.appendChild(exploreRow(pool, row, body.currency));
+    table.appendChild(tbody);
+    scroll.appendChild(table);
+    block.appendChild(scroll);
+
+    // Answered rather than left to inference. An airport missing from a table
+    // says nothing at all, and the question you came here with is "what about
+    // this one?" — the absence of a row is not an answer to it.
+    if (pool.not_searched?.length) {
+      const missing = document.createElement('p');
+      missing.className = 'panel__hint small';
+      missing.innerHTML =
+        `<strong>${escapeHtml(pool.not_searched.join(', '))}</strong> ` +
+        'never searched in this run — run a probe to price them.';
+      block.appendChild(missing);
+    }
+    host.appendChild(block);
+  }
+}
+
+/* Says, before any table is read, that this run is about a different trip.
+
+   This is the whole failure being fixed: two probes searched the previous
+   day's airports, and the tab drew their verdicts as though they were the
+   answer for the trip on screen. Nothing here is subtle by design — the number
+   in a table is believed, and a wrong one is worse than a blank tab. */
+function renderMismatch(body, probe) {
+  const notice = $('explore-mismatch');
+  if (body.matches_current_trip) { notice.hidden = true; return; }
+
+  const kind = probe ? 'probe' : 'sweep';
+  const missing = [...new Set((body.pools ?? []).flatMap((pool) => pool.not_searched ?? []))];
+  notice.innerHTML =
+    `<strong>This ${kind} searched a different trip.</strong> ` +
+    (body.shape_changed
+      ? 'Your trip has gained or lost a stop since it ran, so its airports cannot be lined '
+        + 'up against yours at all. '
+      : '') +
+    (missing.length
+      ? `Nothing here priced <strong>${escapeHtml(missing.join(', '))}</strong>. `
+      : '') +
+    'The rows below are the airports that run actually searched.';
+
+  const again = document.createElement('button');
+  again.type = 'button';
+  again.className = 'small primary';
+  again.textContent = 'Run a probe for this trip';
+  again.onclick = () => startRun('explore');
+  notice.appendChild(document.createElement('br'));
+  notice.appendChild(again);
+  notice.hidden = false;
+}
+
 async function renderResults() {
   const tbody = $('results-table').querySelector('tbody');
   tbody.innerHTML = '';
@@ -985,6 +1426,20 @@ async function renderResults() {
     $('results-empty').textContent = 'Run a sweep to see itineraries.';
     return;
   }
+
+  // A probe prices three dates a leg, so it almost never chains into a whole
+  // trip. An empty table here would read as "the probe found nothing" rather
+  // than "that is not what it is for", so say where its answer actually is.
+  if (state.sweeps.find((sweep) => sweep.stamp === state.stamp)?.mode === 'explore') {
+    $('verification').innerHTML = '';
+    $('results-scroll').hidden = true;
+    $('results-empty').hidden = false;
+    $('results-empty').textContent =
+      'That run was a probe — it prices a few dates per leg to compare airports, not to '
+      + 'build trips. Its verdicts are in the Explore tab.';
+    return;
+  }
+  $('results-scroll').hidden = false;
 
   // Every other call site catches; these two did not, so a 500 left a blank
   // table and an explanation only in the browser console.

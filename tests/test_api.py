@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import threading
 from datetime import date
 
 import pytest
@@ -203,6 +204,27 @@ def test_viability_derives_verdicts_from_sweep_history(client):
     assert body["airports"]["NRT"]["min_price"] == 4000.0
 
 
+def test_viability_calls_a_route_dead_once_it_has_been_asked_enough_times(client):
+    """Pins the endpoint's half of a contract that was only ever half kept.
+
+    This has always worked given a status file with attempts in it. Nothing
+    wrote one: the runner omitted `route_searches`, so in practice every route
+    sat at zero attempts, below the threshold for any verdict, and
+    `dead_routes` came back empty however many empty searches were behind it.
+    The runner's side is guarded by
+    `test_status_records_the_attempts_and_legs_of_every_route`.
+    """
+    api, data = client
+    directory = data / "sweeps" / "jp-ph" / "2026-08-09T02-00-00Z"
+    directory.mkdir(parents=True)
+    (directory / "legs.jsonl").write_text("", encoding="utf-8")
+    (directory / "status.json").write_text(
+        json.dumps({"state": "done", "route_searches": {"VIE->NRT": 4}, "route_errors": {}})
+    )
+    body = api.get("/api/viability").json()
+    assert body["dead_routes"] == ["VIE->NRT"]
+
+
 # ------------------------------------------------------------------ scenarios
 
 
@@ -345,6 +367,302 @@ def test_deeper_estimate_costs_more(client):
 def test_an_unknown_depth_is_rejected(client):
     api, _ = client
     assert api.post("/api/scenarios/jp-ph/estimate?depth=exhaustive").status_code == 400
+
+
+# -------------------------------------------------------------------- explore
+
+
+ROUTES = ["PRG->NRT", "VIE->NRT", "NRT->MNL", "MNL->PRG", "MNL->VIE"]
+
+
+def seed_explore(data_dir, stamp="2026-08-11T09-00-00Z", errors=None):
+    """A reconnaissance pass where Vienna is dear and everything was answered."""
+    directory = data_dir / "sweeps" / "jp-ph" / stamp
+    directory.mkdir(parents=True)
+    legs = [
+        Leg("T", "PRG", "NRT", date(2027, 1, 10), "QR", None, 1, "CZK", 11000.0, "u"),
+        Leg("T", "VIE", "NRT", date(2027, 1, 10), "QR", None, 2, "CZK", 22000.0, "u"),
+        Leg("T", "NRT", "MNL", date(2027, 1, 20), "PR", None, 0, "CZK", 4000.0, "u"),
+        Leg("T", "MNL", "PRG", date(2027, 1, 30), "QR", None, 1, "CZK", 14000.0, "u"),
+        Leg("T", "MNL", "VIE", date(2027, 1, 30), "EY", None, 1, "CZK", 15000.0, "u"),
+    ]
+    with (directory / "legs.jsonl").open("w") as handle:
+        for leg in legs:
+            handle.write(json.dumps(leg.to_dict()) + "\n")
+    (directory / "status.json").write_text(
+        json.dumps(
+            {
+                "state": "done",
+                "mode": "explore",
+                "total": 15,
+                "route_searches": {route: 3 for route in ROUTES},
+                "route_errors": {route: (errors or {}).get(route, 0) for route in ROUTES},
+            }
+        )
+    )
+    return stamp
+
+
+def test_the_explore_report_ranks_the_origins_against_each_other(client):
+    api, data = client
+    stamp = seed_explore(data)
+    body = api.get(f"/api/sweeps/jp-ph/{stamp}/explore").json()
+    origins = {row["iata"]: row for row in body["pools"][0]["airports"]}
+    assert origins["PRG"]["verdict"] == "best"
+    assert origins["VIE"]["verdict"] == "poor"
+    assert origins["VIE"]["out_min_stops"] == 2
+
+
+def test_the_explore_report_names_the_list_each_airport_belongs_to(client):
+    api, data = client
+    stamp = seed_explore(data)
+    body = api.get(f"/api/sweeps/jp-ph/{stamp}/explore").json()
+    assert [pool["role"] for pool in body["pools"]] == ["origins", "stop", "stop", "origins"]
+
+
+# --------------------------------------------- reading a sweep of an older trip
+#
+# Every reader used to load whatever the trip is *now* and read the legs
+# through it. Change an airport and the run that found those legs stops making
+# sense: the Explore tab lists airports the run never searched, and Results and
+# Prices empty out because the itineraries no longer chain through the pools.
+
+
+def snapshot(data_dir, stamp, scenario: Scenario) -> None:
+    """Record which trip a seeded sweep searched, as `run_sweep` now does."""
+    path = data_dir / "sweeps" / "jp-ph" / stamp / "scenario.json"
+    path.write_text(json.dumps(scenario.to_dict()), encoding="utf-8")
+
+
+def searched_trip() -> Scenario:
+    """The trip the seeded sweeps actually flew: out of Prague and Vienna."""
+    return Scenario(
+        id="jp-ph",
+        name="Japan then Philippines",
+        origins=["PRG", "VIE"],
+        stops=[
+            Stop(airports=["NRT"], stay_days=(9, 11), label="Japan"),
+            Stop(airports=["MNL"], stay_days=(9, 11), label="Philippines"),
+        ],
+        window_start=date(2027, 1, 5),
+        window_end=date(2027, 2, 8),
+        depth="quick",
+    )
+
+
+def move_the_trip_to(api, **changes) -> None:
+    """Edit the saved trip after the sweep, the way the user did."""
+    trip = api.get("/api/scenarios/jp-ph").json()
+    trip.update(changes)
+    assert api.put("/api/scenarios/jp-ph", json=trip).status_code == 200
+
+
+def test_a_report_describes_the_trip_its_run_searched_not_the_trip_now(client):
+    api, data = client
+    stamp = seed_explore(data)
+    snapshot(data, stamp, searched_trip())
+    move_the_trip_to(api, origins=["KRK"], return_to=None)
+
+    body = api.get(f"/api/sweeps/jp-ph/{stamp}/explore").json()
+    origins = {row["iata"]: row for row in body["pools"][0]["airports"]}
+    assert set(origins) == {"PRG", "VIE"}, "the airports this run actually priced"
+    assert origins["PRG"]["out_min_price"] == 11000, "its legs must not be discarded"
+
+
+def test_a_report_names_the_airports_of_the_current_trip_it_never_priced(client):
+    api, data = client
+    stamp = seed_explore(data)
+    snapshot(data, stamp, searched_trip())
+    move_the_trip_to(api, origins=["KRK"], return_to=None)
+
+    body = api.get(f"/api/sweeps/jp-ph/{stamp}/explore").json()
+    assert body["matches_current_trip"] is False
+    assert body["pools"][0]["not_searched"] == ["KRK"]
+
+
+def test_results_of_an_older_sweep_survive_an_edit_to_the_trip(client):
+    """The itineraries chain through the pools, so reading them against a trip
+    that no longer contains those airports silently returns nothing."""
+    api, data = client
+    stamp = seed_sweep(data)
+    snapshot(data, stamp, searched_trip())
+    move_the_trip_to(api, origins=["KRK"], return_to=None)
+    assert api.get(f"/api/sweeps/jp-ph/{stamp}/results").json()["itineraries"]
+
+
+def test_the_price_chart_of_an_older_sweep_survives_an_edit_to_the_trip(client):
+    api, data = client
+    stamp = seed_sweep(data)
+    snapshot(data, stamp, searched_trip())
+    move_the_trip_to(api, origins=["KRK"], return_to=None)
+    assert api.get(f"/api/sweeps/jp-ph/{stamp}/by-date").json()
+
+
+def test_the_sweep_listing_flags_runs_that_searched_another_trip(client):
+    """The picker is where a run is chosen, so it has to say which runs are
+    about the trip you are looking at before one is opened and believed."""
+    api, data = client
+    stamp = seed_explore(data)
+    snapshot(data, stamp, searched_trip())
+    move_the_trip_to(api, origins=["KRK"], return_to=None)
+    listed = {s["stamp"]: s for s in api.get("/api/sweeps/jp-ph").json()["sweeps"]}
+    assert listed[stamp]["searched_another_trip"] is True
+
+
+def test_a_sweep_of_the_current_trip_is_not_flagged_in_the_listing(client):
+    api, data = client
+    stamp = seed_explore(data)
+    snapshot(data, stamp, searched_trip())
+    listed = {s["stamp"]: s for s in api.get("/api/sweeps/jp-ph").json()["sweeps"]}
+    assert listed[stamp]["searched_another_trip"] is False
+
+
+def test_a_sweep_from_before_snapshots_existed_is_read_against_the_live_trip(client):
+    """Seven of these are already on disk. They must keep working."""
+    api, data = client
+    stamp = seed_explore(data)
+    body = api.get(f"/api/sweeps/jp-ph/{stamp}/explore").json()
+    assert body["matches_current_trip"] is True
+    assert body["pools"][0]["not_searched"] == []
+
+
+def test_todays_bag_estimate_is_applied_to_an_older_sweep(client):
+    """Shape is frozen; how you *read* a result is not. Changing the bag
+    estimate must still move the totals of a sweep already on disk."""
+    api, data = client
+    stamp = seed_sweep(data)
+    snapshot(data, stamp, searched_trip())
+    before = api.get(f"/api/sweeps/jp-ph/{stamp}/by-date").json()
+    move_the_trip_to(api, bag_estimate=3000)
+    after = api.get(f"/api/sweeps/jp-ph/{stamp}/by-date").json()
+    assert after[0]["cheapest_total_with_bags"] > before[0]["cheapest_total_with_bags"]
+
+
+def test_the_explore_report_is_404_for_a_sweep_that_does_not_exist(client):
+    api, _ = client
+    assert api.get("/api/sweeps/jp-ph/2026-01-01T00-00-00Z/explore").status_code == 404
+
+
+def test_the_exploration_estimate_is_a_fraction_of_a_deep_sweep(client):
+    api, _ = client
+    explore = api.post("/api/scenarios/jp-ph/estimate?mode=explore").json()
+    deep = api.post("/api/scenarios/jp-ph/estimate?depth=deep").json()
+    assert explore["searches"] < deep["searches"] / 5
+    assert explore["mode"] == "explore"
+
+
+def test_an_estimate_can_price_an_edited_trip_that_has_not_been_saved(client):
+    """The cost badge sits next to the run buttons, so it has to describe the
+    trip on screen. Reading it off the file said "63 searches" for a trip the
+    user had just narrowed to 42."""
+    api, _ = client
+    saved = api.post("/api/scenarios/jp-ph/estimate").json()
+    edited = api.get("/api/scenarios/jp-ph").json() | {"origins": ["PRG", "VIE", "KRK"]}
+    live = api.post("/api/scenarios/jp-ph/estimate", json=edited).json()
+    assert live["searches"] > saved["searches"]
+
+
+def test_estimating_an_edited_trip_does_not_save_it(client):
+    api, _ = client
+    edited = api.get("/api/scenarios/jp-ph").json() | {"origins": ["PRG", "VIE", "KRK"]}
+    api.post("/api/scenarios/jp-ph/estimate", json=edited)
+    assert api.get("/api/scenarios/jp-ph").json()["origins"] == ["PRG", "VIE"]
+
+
+def test_an_estimate_of_an_impossible_trip_is_a_400_not_a_crash(client):
+    api, _ = client
+    broken = api.get("/api/scenarios/jp-ph").json() | {"origins": []}
+    assert api.post("/api/scenarios/jp-ph/estimate", json=broken).status_code == 400
+
+
+def test_an_unknown_run_mode_is_rejected(client):
+    api, _ = client
+    assert api.post("/api/scenarios/jp-ph/estimate?mode=guess").status_code == 400
+    assert api.post("/api/scenarios/jp-ph/run?mode=guess").status_code == 400
+
+
+# ----------------------------------------------------------------- stopping
+
+
+def test_stopping_a_scenario_that_is_not_running_says_so(client):
+    api, _ = client
+    response = api.post("/api/scenarios/jp-ph/stop")
+    assert response.status_code == 409
+    assert "running" in response.json()["detail"].lower()
+
+
+def test_stopping_an_unknown_scenario_is_404(client):
+    api, _ = client
+    assert api.post("/api/scenarios/nope/stop").status_code == 404
+
+
+def test_stop_reaches_the_sweep_that_is_actually_running(client, monkeypatch):
+    """The wiring, which neither half's own tests can see.
+
+    The runner honours an event and the endpoint sets one; this is the only
+    check that it is the *same* event. A real sweep is stood in for, because
+    the alternative is launching Chromium at a site that has already throttled
+    this client into mass timeouts.
+    """
+    import src.web.app as app_module
+
+    started, finished = threading.Event(), threading.Event()
+
+    def fake_sweep(scenario, *, stop=None, **kwargs):
+        started.set()
+        assert stop is not None, "the endpoint launched a sweep with no way to stop it"
+        stop.wait(timeout=10)
+        finished.set()
+
+    monkeypatch.setattr(app_module, "run_sweep", fake_sweep)
+    api, _ = client
+
+    assert api.post("/api/scenarios/jp-ph/run").json()["started"] is True
+    assert started.wait(timeout=5), "the sweep thread never started"
+    assert api.get("/api/sweeps/jp-ph").json()["running"] is True
+
+    assert api.post("/api/scenarios/jp-ph/stop").json()["stopping"] is True
+    assert finished.wait(timeout=5), "the running sweep never saw the stop"
+
+
+def test_the_listing_says_whether_a_sweeps_legs_are_actually_on_disk(client):
+    """`legs_found` is what a run found, not what survived it.
+
+    The 11 Aug local sweep reports 1,167 flights and has no legs.jsonl at all -
+    it predated incremental writing, so they only ever existed in the process
+    that was killed. Anything reading that number as data to work from gets a
+    report with every airport unmeasured, and the Explore tab offered it first
+    because it looked like the richest run available.
+    """
+    api, data = client
+    directory = data / "sweeps" / "jp-ph" / "2026-08-11T14-31-07Z"
+    directory.mkdir(parents=True)
+    (directory / "status.json").write_text(
+        json.dumps({"state": "stopped", "total": 615, "legs_found": 1167})
+    )
+    seed_explore(data)
+
+    sweeps = {sweep["stamp"]: sweep for sweep in api.get("/api/sweeps/jp-ph").json()["sweeps"]}
+    assert sweeps["2026-08-11T14-31-07Z"]["has_legs"] is False
+    assert sweeps["2026-08-11T09-00-00Z"]["has_legs"] is True
+
+
+def test_an_empty_legs_file_does_not_count_as_having_legs(client):
+    api, data = client
+    directory = data / "sweeps" / "jp-ph" / "2026-08-09T02-00-00Z"
+    directory.mkdir(parents=True)
+    (directory / "legs.jsonl").write_text("", encoding="utf-8")
+    (directory / "status.json").write_text(json.dumps({"state": "done", "legs_found": 0}))
+    sweeps = {sweep["stamp"]: sweep for sweep in api.get("/api/sweeps/jp-ph").json()["sweeps"]}
+    assert sweeps["2026-08-09T02-00-00Z"]["has_legs"] is False
+
+
+def test_the_sweep_listing_reports_whether_a_stop_was_asked_for(client):
+    api, data = client
+    seed_explore(data)
+    body = api.get("/api/sweeps/jp-ph").json()
+    assert body["stopping"] is False
+    assert body["sweeps"][0]["mode"] == "explore"
 
 
 # -------------------------------------------------------------------- results
@@ -899,3 +1217,65 @@ def test_a_refused_test_message_is_reported_not_raised(client, monkeypatch):
     body = api.post("/api/notify/test").json()
     assert body["sent"] is False
     assert body["message"]
+
+
+# --------------------------------------------------- focus and completeness
+#
+# Two figures a price has to be read with: how much of the plan was actually
+# answered to find it, and whether the sweep priced the whole window or a few
+# chosen days of it.
+
+
+def test_history_marks_a_focused_sweep_incomparable_with_a_broad_trip(client, tmp_path):
+    """A focused sweep prices a handful of dates, so its cheapest is the
+    cheapest of those days - plotting it beside a broad sweep draws a step no
+    fare ever made."""
+    from src.sweep.runner import is_comparable
+
+    broad = {"state": "done", "legs_per_search": 9.0, "focus": None}
+    narrow = {"state": "done", "legs_per_search": 9.0, "focus": ["2027-01-12", "2027-01-16"]}
+    assert is_comparable(broad, 21, 21, None)
+    assert not is_comparable(narrow, 21, 21, None)
+    assert is_comparable(narrow, 21, 21, ["2027-01-12", "2027-01-16"])
+    assert not is_comparable(broad, 21, 21, ["2027-01-12", "2027-01-16"])
+
+
+def test_a_focused_trip_estimates_far_fewer_searches(client):
+    client, _ = client
+    """The whole point of narrowing: the same depth, a fraction of the cost."""
+    trip = client.get("/api/scenarios/jp-ph").json()
+    broad = client.post(
+        "/api/scenarios/jp-ph/estimate?depth=deep", json=trip
+    ).json()
+    trip["focus_start"] = "2027-01-12"
+    trip["focus_end"] = "2027-01-16"
+    narrow = client.post(
+        "/api/scenarios/jp-ph/estimate?depth=deep", json=trip
+    ).json()
+    assert 0 < narrow["searches"] < broad["searches"] / 2
+    assert narrow["minutes"] < broad["minutes"]
+
+
+def test_a_focus_outside_the_window_is_refused_with_the_reason(client):
+    client, _ = client
+    trip = client.get("/api/scenarios/jp-ph").json()
+    trip["focus_start"] = "2026-12-01"
+    trip["focus_end"] = "2027-01-16"
+    response = client.put("/api/scenarios/jp-ph", json=trip)
+    assert response.status_code == 400
+    assert "outside the window" in response.json()["detail"]
+
+
+def test_a_focus_saves_and_comes_back(client):
+    client, _ = client
+    trip = client.get("/api/scenarios/jp-ph").json()
+    trip["focus_start"] = "2027-01-12"
+    trip["focus_end"] = "2027-01-16"
+    assert client.put("/api/scenarios/jp-ph", json=trip).status_code == 200
+    saved = client.get("/api/scenarios/jp-ph").json()
+    assert (saved["focus_start"], saved["focus_end"]) == ("2027-01-12", "2027-01-16")
+
+    # And clearing it goes back to the whole window rather than half a focus.
+    saved["focus_start"] = saved["focus_end"] = None
+    assert client.put("/api/scenarios/jp-ph", json=saved).status_code == 200
+    assert client.get("/api/scenarios/jp-ph").json()["focus_start"] is None

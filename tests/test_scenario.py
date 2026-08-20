@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
@@ -14,7 +14,13 @@ from src.scenario import (
     read_scenarios,
     save_scenario,
 )
-from tests.conftest import make_round_trip, make_scenario, make_three_stop
+from tests.conftest import (
+    WINDOW_END,
+    WINDOW_START,
+    make_round_trip,
+    make_scenario,
+    make_three_stop,
+)
 
 
 def test_round_trips_through_json(tmp_path):
@@ -311,3 +317,58 @@ def test_read_scenarios_names_the_file_and_the_reason(tmp_path):
 
 def test_read_scenarios_on_a_missing_directory_is_empty_not_an_error(tmp_path):
     assert read_scenarios(tmp_path / "nope") == ([], [])
+
+
+# --------------------------------------------------------------------- focus
+
+
+def test_a_focus_needs_both_ends():
+    with pytest.raises(ValueError, match="both a first and a last"):
+        make_scenario(focus_start=WINDOW_START).validate()
+    with pytest.raises(ValueError, match="both a first and a last"):
+        make_scenario(focus_end=WINDOW_END).validate()
+
+
+def test_a_focus_may_not_run_backwards():
+    with pytest.raises(ValueError, match="must not precede"):
+        make_scenario(
+            focus_start=WINDOW_START + timedelta(days=5), focus_end=WINDOW_START
+        ).validate()
+
+
+def test_a_focus_must_sit_inside_the_window():
+    """Outside it, it is not a narrowing but a different trip - and its sweeps
+    would be charted against sweeps of a window it was never part of."""
+    with pytest.raises(ValueError, match="falls outside the window"):
+        make_scenario(
+            focus_start=WINDOW_START - timedelta(days=1), focus_end=WINDOW_END
+        ).validate()
+    with pytest.raises(ValueError, match="falls outside the window"):
+        make_scenario(
+            focus_start=WINDOW_START, focus_end=WINDOW_END + timedelta(days=1)
+        ).validate()
+
+
+def test_no_focus_is_valid_and_is_the_default():
+    scenario = make_scenario()
+    assert scenario.focus_start is None and scenario.focus_end is None
+    scenario.validate()
+
+
+def test_a_focus_survives_a_round_trip_through_json():
+    scenario = make_scenario(
+        focus_start=WINDOW_START + timedelta(days=7),
+        focus_end=WINDOW_START + timedelta(days=11),
+    )
+    restored = Scenario.from_dict(scenario.to_dict())
+    assert (restored.focus_start, restored.focus_end) == (
+        scenario.focus_start,
+        scenario.focus_end,
+    )
+
+
+def test_a_trip_saved_before_focus_existed_still_loads():
+    """Every scenario file on disk predates the field."""
+    payload = make_scenario().to_dict()
+    del payload["focus_start"], payload["focus_end"]
+    assert Scenario.from_dict(payload).focus_start is None

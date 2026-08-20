@@ -6,11 +6,23 @@ browser or touch the network.
 from __future__ import annotations
 
 import json
+import threading
+import time
 from datetime import date
+
+import pytest
 
 from src.models import Leg
 from src.scenario import Scenario, Stop
-from src.sweep.runner import run_sweep
+from src.sweep.planner import plan_exploration, plan_searches, planned_routes, shard_of
+from src.sweep.runner import (
+    THROTTLE_STREAK,
+    ShardMismatch,
+    is_comparable,
+    load_legs,
+    merge_shards,
+    run_sweep,
+)
 from tests.conftest import make_scenario
 
 
@@ -85,6 +97,7 @@ def test_progress_callback_fires_once_per_search(tmp_path):
         provider=FakeProvider(),
         data_dir=tmp_path,
         workers=2,
+        delay_s=0,
         on_progress=lambda done, total, label: seen.append(done),
     )
     assert len(seen) == max(seen)
@@ -164,6 +177,374 @@ def test_a_fully_covered_sweep_reports_complete_coverage(tmp_path):
     assert result.route_coverage == 1.0
 
 
+# ---------------------------------------------------------------- explore mode
+
+
+def test_explore_mode_runs_the_exploration_plan(tmp_path):
+    trip = scenario(depth="deep")
+    result = run_sweep(
+        trip, provider=FakeProvider(), data_dir=tmp_path, workers=2, delay_s=0, mode="explore"
+    )
+    assert result.total == len(plan_exploration(trip))
+    assert result.total < len(plan_searches(trip))
+
+
+def test_two_sweeps_started_in_the_same_second_do_not_share_a_directory(tmp_path):
+    """The stamp names the directory and is only accurate to the second.
+
+    Harmless when legs were written once at the end - the loser's results were
+    simply replaced. Now that legs are appended as they are found, the second
+    run opens the first run's file and truncates it mid-sweep.
+    """
+    first = run_sweep(scenario(), provider=FakeProvider(), data_dir=tmp_path, workers=1, delay_s=0)
+    second = run_sweep(scenario(), provider=FakeProvider(), data_dir=tmp_path, workers=1, delay_s=0)
+    assert first.directory != second.directory
+    assert len(load_legs(first.directory)) == len(first.legs)
+
+
+def test_the_mode_is_recorded_so_a_probe_is_never_mistaken_for_a_sweep(tmp_path):
+    explore = run_sweep(
+        scenario(), provider=FakeProvider(), data_dir=tmp_path, workers=1, delay_s=0,
+        mode="explore",
+    )
+    sweep = run_sweep(scenario(), provider=FakeProvider(), data_dir=tmp_path, workers=1, delay_s=0)
+    assert json.loads((explore.directory / "status.json").read_text())["mode"] == "explore"
+    assert json.loads((sweep.directory / "status.json").read_text())["mode"] == "sweep"
+
+
+# ------------------------------------------------- the trip a sweep searched
+
+
+def test_a_sweep_records_the_trip_it_searched(tmp_path):
+    """Without this a sweep is a pile of legs with no idea what was asked.
+
+    A trip edited after the run is then read back over the old results: rows
+    appear for airports that were never searched, and the ones that were get
+    dropped. Two probes were spent on that before it was noticed.
+    """
+    trip = scenario()
+    result = run_sweep(trip, provider=FakeProvider(), data_dir=tmp_path, workers=1, delay_s=0)
+    snapshot = json.loads((result.directory / "scenario.json").read_text(encoding="utf-8"))
+    assert Scenario.from_dict(snapshot) == trip
+
+
+def test_the_recorded_trip_survives_a_run_that_never_finished(tmp_path):
+    """Written before the first search, not after the last: a stopped or killed
+    run is exactly the one whose contents most need explaining."""
+    stop = threading.Event()
+    result = run_sweep(
+        scenario(), provider=StoppingProvider(stop, after=1), data_dir=tmp_path,
+        workers=1, delay_s=0, stop=stop,
+    )
+    assert (result.directory / "scenario.json").exists()
+
+
+def test_an_explore_run_is_never_plotted_beside_real_sweeps():
+    """It covers every route and can look perfectly healthy while pricing three
+    dates. Charting its best total against a deep sweep's is comparing a
+    reconnaissance photo with a survey."""
+    status = {"state": "done", "legs_per_search": 9.7, "mode": "explore"}
+    assert not is_comparable(status, routes_covered=21, routes_planned=21)
+    assert is_comparable({**status, "mode": "sweep"}, routes_covered=21, routes_planned=21)
+
+
+# --------------------------------------------------------------------- stopping
+
+
+class StoppingProvider(FakeProvider):
+    """Asks for the sweep to stop once it has answered `after` searches."""
+
+    def __init__(self, stop: threading.Event, after: int):
+        super().__init__()
+        self.stop = stop
+        self.after = after
+
+    def search_leg(self, page, origin, destination, depart, ret=None, adults=1):
+        legs = super().search_leg(page, origin, destination, depart, ret, adults)
+        if len(self.calls) >= self.after:
+            self.stop.set()
+        return legs
+
+
+def test_stopping_halts_the_sweep_before_its_next_search(tmp_path):
+    stop = threading.Event()
+    provider = StoppingProvider(stop, after=3)
+    result = run_sweep(
+        scenario(), provider=provider, data_dir=tmp_path, workers=1, delay_s=0, stop=stop
+    )
+    assert result.completed == 3
+    assert result.completed < result.total
+
+
+def test_a_stopped_sweep_says_so_rather_than_claiming_to_be_done(tmp_path):
+    stop = threading.Event()
+    result = run_sweep(
+        scenario(), provider=StoppingProvider(stop, after=3), data_dir=tmp_path,
+        workers=1, delay_s=0, stop=stop,
+    )
+    assert json.loads((result.directory / "status.json").read_text())["state"] == "stopped"
+
+
+def test_a_stopped_sweep_keeps_every_leg_it_had_already_found(tmp_path):
+    stop = threading.Event()
+    result = run_sweep(
+        scenario(), provider=StoppingProvider(stop, after=3), data_dir=tmp_path,
+        workers=1, delay_s=0, stop=stop,
+    )
+    rows = (result.directory / "legs.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len([r for r in rows if r.strip()]) == 3
+
+
+def test_a_stopped_sweep_is_not_comparable_with_a_finished_one():
+    status = {"state": "stopped", "legs_per_search": 9.7, "mode": "sweep"}
+    assert not is_comparable(status, routes_covered=21, routes_planned=21)
+
+
+class WatchingProvider(FakeProvider):
+    """Counts the legs already on disk each time it is asked for another."""
+
+    def __init__(self, directory_holder: dict):
+        super().__init__()
+        self.holder = directory_holder
+        self.rows_seen: list[int] = []
+
+    def search_leg(self, page, origin, destination, depart, ret=None, adults=1):
+        path = self.holder.get("directory")
+        if path is not None:
+            legs_file = path / "legs.jsonl"
+            text = legs_file.read_text(encoding="utf-8") if legs_file.exists() else ""
+            self.rows_seen.append(len([line for line in text.splitlines() if line.strip()]))
+        return super().search_leg(page, origin, destination, depart, ret, adults)
+
+
+def test_legs_reach_disk_while_the_sweep_is_still_running(tmp_path):
+    """Otherwise stopping - or a crash, or a restart - costs the whole run.
+
+    A deep sweep runs 97 minutes and used to write `legs.jsonl` once, at the
+    very end.
+    """
+    holder: dict = {}
+    provider = WatchingProvider(holder)
+
+    def on_progress(done, total, label):
+        holder["directory"] = next((tmp_path / "sweeps" / "test-scenario").iterdir())
+
+    run_sweep(
+        scenario(), provider=provider, data_dir=tmp_path, workers=1, delay_s=0,
+        on_progress=on_progress,
+    )
+    assert max(provider.rows_seen) > 0, "legs.jsonl was empty for the whole run"
+
+
+# ------------------------------------------------------- refusing to grind
+#
+# The 11 Aug local sweep spent 4.5 hours to complete 245 of 615 searches, 125 of
+# them timeouts, and would have kept going. 93% of its worker time went on
+# searches that returned nothing: a timeout waits 120s, is retried immediately
+# into the same throttle for another 120s, and nothing ever concludes that the
+# site is simply refusing this client.
+
+
+class TimeoutProvider(FakeProvider):
+    """Times out on the first `failures` searches, then answers normally."""
+
+    def __init__(self, failures: int, fail_routes: set[str] | None = None):
+        super().__init__()
+        self.failures = failures
+        self.fail_routes = fail_routes
+        self.attempts: list[tuple[str, str, date]] = []
+
+    def search_leg(self, page, origin, destination, depart, ret=None, adults=1):
+        from src.providers.pelikan import SearchTimeout
+
+        self.attempts.append((origin, destination, depart))
+        route = f"{origin}->{destination}"
+        wanted = self.fail_routes is None or route in self.fail_routes
+        if wanted and self.failures > 0:
+            self.failures -= 1
+            raise SearchTimeout(f"{route} {depart}: no results within 120s")
+        return super().search_leg(page, origin, destination, depart, ret, adults)
+
+
+def test_a_timed_out_search_is_retried_after_the_others_not_immediately(tmp_path):
+    """Retrying a timeout on the spot doubles the load at the worst moment.
+
+    It also doubles what a failure costs, from ~124s to ~248s. The retry is
+    still worth having - a genuinely transient timeout recovers - but only once
+    the site has had the rest of the chunk to breathe.
+    """
+    provider = TimeoutProvider(failures=1, fail_routes={"PRG->NRT"})
+    run_sweep(scenario(), provider=provider, data_dir=tmp_path, workers=1, delay_s=0)
+
+    first = provider.attempts[0]
+    assert first[:2] == ("PRG", "NRT")
+    # The same search appears again, but not as the second thing attempted.
+    assert provider.attempts[1] != first
+    assert first in provider.attempts[1:], "the timed-out search was never retried"
+
+
+def test_a_deferred_retry_that_succeeds_keeps_its_legs(tmp_path):
+    provider = TimeoutProvider(failures=1, fail_routes={"PRG->NRT"})
+    result = run_sweep(scenario(), provider=provider, data_dir=tmp_path, workers=1, delay_s=0)
+    assert result.route_legs["PRG->NRT"] > 0
+    assert result.errors == []
+
+
+def test_a_wall_of_timeouts_ends_the_sweep_instead_of_grinding_on(tmp_path):
+    """The behaviour the 4.5-hour run needed and did not have.
+
+    A deep trip, so there is a long way left to grind when the site starts
+    refusing - which is exactly the situation that cost 4.5 hours.
+    """
+    provider = TimeoutProvider(failures=10_000)
+    result = run_sweep(
+        scenario(depth="deep"), provider=provider, data_dir=tmp_path,
+        workers=1, delay_s=0, backoff_s=[0, 0],
+    )
+    assert result.throttled
+    assert result.total > 50, "the trip must be big enough to have something to abandon"
+    # Three streaks of five is all it takes to reach a verdict, against a plan
+    # of dozens. At the real pace that is ~25 minutes rather than 4.5 hours.
+    assert len(provider.attempts) <= THROTTLE_STREAK * 3
+    assert result.completed == 0
+
+
+def test_a_throttled_sweep_says_the_site_refused_not_that_it_broke(tmp_path):
+    """`unhealthy` means the scraper is broken and someone must fix a selector.
+
+    A throttled sweep needs no fix at all - it needs to be run later, or from
+    somewhere else - and reporting the two the same way sends you debugging code
+    that is working.
+    """
+    provider = TimeoutProvider(failures=10_000)
+    result = run_sweep(
+        scenario(), provider=provider, data_dir=tmp_path, workers=1, delay_s=0, backoff_s=[0, 0],
+    )
+    status = json.loads((result.directory / "status.json").read_text())
+    assert status["state"] == "throttled"
+
+
+def test_the_breaker_pauses_before_it_gives_up(tmp_path):
+    """Backing off is the cheap move: a 2-minute pause costs less than one
+    timed-out search, and may be all the site wants."""
+    waits: list[float] = []
+    provider = TimeoutProvider(failures=10_000)
+    run_sweep(
+        scenario(), provider=provider, data_dir=tmp_path, workers=1, delay_s=0,
+        backoff_s=[0, 0, 0], on_backoff=waits.append,
+    )
+    assert waits == [0, 0, 0], waits
+
+
+def test_a_run_that_recovers_after_a_pause_is_not_marked_throttled(tmp_path):
+    """A bad patch is not a refusal. Only failing again after the longest pause
+    is evidence enough to abandon the run."""
+    provider = TimeoutProvider(failures=THROTTLE_STREAK)
+    result = run_sweep(
+        scenario(), provider=provider, data_dir=tmp_path, workers=1, delay_s=0, backoff_s=[0, 0],
+    )
+    assert not result.throttled
+    assert result.completed == result.total
+    assert json.loads((result.directory / "status.json").read_text())["state"] == "done"
+
+
+def test_scattered_timeouts_never_trip_the_breaker(tmp_path):
+    """One search in three failing is a bad day, not a wall. The breaker must
+    count *consecutive* failures or it would abandon runs worth finishing."""
+    provider = TimeoutProvider(failures=10_000, fail_routes={"NRT->MNL"})
+    result = run_sweep(
+        scenario(), provider=provider, data_dir=tmp_path, workers=1, delay_s=0, backoff_s=[0, 0],
+    )
+    assert not result.throttled
+    assert result.completed == result.total
+
+
+# ----------------------------------------------------------------- time budget
+#
+# Five nightly cloud runs in a row were cancelled at 1h30m and committed
+# nothing: the job timeout killed them mid-sweep, before the commit step. A
+# sweep that knows its own budget stops itself in time, and the results it
+# already has get written back.
+
+
+class UnhurriedProvider(FakeProvider):
+    """Answers, but slowly enough that a budget can expire mid-sweep."""
+
+    def search_leg(self, page, origin, destination, depart, ret=None, adults=1):
+        time.sleep(0.005)
+        return super().search_leg(page, origin, destination, depart, ret, adults)
+
+
+def test_a_budget_ends_the_sweep_and_keeps_what_it_found(tmp_path):
+    from src.cli import run_sweep_command
+
+    # 63 searches at 5 ms each against a 60 ms budget: it expires early enough
+    # to leave most of the plan unrun, whatever the machine.
+    result = run_sweep_command(
+        "japan-philippines", None, dry_run=False, mode="explore",
+        max_minutes=0.001, provider=UnhurriedProvider(), data_dir=tmp_path, delay_s=0,
+    )
+    assert result.stopped
+    assert result.completed < result.total
+    status = json.loads((result.directory / "status.json").read_text())
+    assert status["state"] == "stopped"
+
+
+def test_without_a_budget_the_sweep_runs_to_the_end(tmp_path):
+    from src.cli import run_sweep_command
+
+    result = run_sweep_command(
+        "japan-philippines", None, dry_run=False, mode="explore",
+        max_minutes=None, provider=FakeProvider(), data_dir=tmp_path, delay_s=0,
+    )
+    assert not result.stopped
+    assert result.completed == result.total
+
+
+# ------------------------------------------------------------- route accounting
+#
+# Attempts per route are what separate "nothing is sold on this route" from "we
+# never got an answer". `viability.route_stats` has always read them out of
+# status.json; they were never written there, so every route counted zero
+# attempts and no route could ever be judged dead.
+
+
+def test_status_records_the_attempts_and_legs_of_every_route(tmp_path):
+    result = run_sweep(scenario(), provider=FakeProvider(), data_dir=tmp_path, workers=2, delay_s=0)
+    status = json.loads((result.directory / "status.json").read_text())
+    assert status["route_searches"] == result.route_searches
+    assert status["route_legs"] == result.route_legs
+    assert sum(status["route_searches"].values()) == result.total
+
+
+def test_a_route_that_only_ever_failed_still_records_its_attempts(tmp_path):
+    """The distinction the report rests on: asked repeatedly, never answered."""
+    result = run_sweep(
+        scenario(), provider=FakeProvider(fail_on={"MNL"}), data_dir=tmp_path,
+        workers=2, delay_s=0,
+    )
+    status = json.loads((result.directory / "status.json").read_text())
+    assert status["route_searches"]["NRT->MNL"] > 0
+    assert status["route_legs"]["NRT->MNL"] == 0
+
+
+def test_status_counts_failures_per_route_not_just_the_last_twenty(tmp_path):
+    """`errors` keeps 20 messages; a starved sweep produces hundreds.
+
+    Without a count per route, a route that timed out every time is
+    indistinguishable from one the site answered with an empty page - and those
+    two mean opposite things.
+    """
+    result = run_sweep(
+        scenario(), provider=FakeProvider(fail_on={"MNL"}), data_dir=tmp_path,
+        workers=2, delay_s=0,
+    )
+    status = json.loads((result.directory / "status.json").read_text())
+    assert status["route_errors"]["NRT->MNL"] == status["route_searches"]["NRT->MNL"]
+    assert status["route_errors"].get("PRG->NRT", 0) == 0
+    assert sum(status["route_errors"].values()) == status["error_count"]
+
+
 # ------------------------------------------------------- observed_at back-fill
 
 
@@ -198,3 +579,258 @@ def test_a_legs_own_timestamp_is_never_overwritten_by_the_fallback(tmp_path):
     (directory / "legs.jsonl").write_text(json.dumps(payload) + "\n", encoding="utf-8")
 
     assert load_legs(directory)[0].observed_at == "2026-08-10T12:44:01+00:00"
+
+
+# ------------------------------------------------------------------ coverage
+#
+# "Did this sweep ask everything it planned to ask?" - the question `state:
+# done`, `legs_found` and `error_count` between them could never answer. A route
+# that answered on nine dates and never on the tenth reports perfect health on
+# every per-route figure while having a hole in the grid.
+
+
+def test_a_clean_sweep_answers_everything_it_planned(tmp_path):
+    result = run_sweep(scenario(), provider=FakeProvider(), data_dir=tmp_path, workers=2, delay_s=0)
+    assert result.answered == result.total
+    assert result.coverage == 1.0
+
+
+def test_coverage_falls_when_a_search_is_never_answered(tmp_path):
+    provider = FakeProvider(fail_on={"MNL"})
+    result = run_sweep(scenario(), provider=provider, data_dir=tmp_path, workers=2, delay_s=0)
+    assert result.answered < result.total
+    assert 0 < result.coverage < 1.0
+    assert result.answered == result.total - len(result.errors)
+
+
+def test_every_search_writes_a_line_whatever_the_outcome(tmp_path):
+    """Legs alone cannot say which dates were asked about, so a date the site
+    had nothing on and a date that was never searched read the same."""
+    provider = FakeProvider(fail_on={"MNL"})
+    result = run_sweep(provider=provider, scenario=scenario(), data_dir=tmp_path, workers=2, delay_s=0)
+    rows = [
+        json.loads(line)
+        for line in (result.directory / "searches.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(rows) == result.completed
+    assert sum(1 for row in rows if row["answered"]) == result.answered
+    assert {row["origin"] for row in rows} >= {"PRG"}
+
+
+def test_status_records_coverage_for_a_later_reader(tmp_path):
+    result = run_sweep(scenario(), provider=FakeProvider(), data_dir=tmp_path, workers=2, delay_s=0)
+    status = json.loads((result.directory / "status.json").read_text(encoding="utf-8"))
+    assert status["answered"] == status["planned"] == result.total
+    assert status["coverage"] == 1.0
+
+
+# ---------------------------------------------------------------- fill passes
+
+
+class FlakyProvider(FakeProvider):
+    """Fails a route the first `times` attempts, then answers normally."""
+
+    def __init__(self, flaky: str, times: int):
+        super().__init__()
+        self.flaky = flaky
+        self.times = times
+        self.seen: dict[tuple, int] = {}
+
+    def search_leg(self, page, origin, destination, depart, ret=None, adults=1):
+        key = (origin, destination, depart)
+        self.seen[key] = self.seen.get(key, 0) + 1
+        if destination == self.flaky and self.seen[key] <= self.times:
+            self.calls.append(key)
+            raise RuntimeError("transient")
+        return super().search_leg(page, origin, destination, depart, ret, adults)
+
+
+def test_a_search_that_fails_twice_is_still_answered_on_the_third_pass(tmp_path):
+    """One retry was not enough to call a sweep complete.
+
+    A search that failed twice, or failed with anything other than a timeout,
+    used to be dropped for good - a permanent hole in the date grid that no
+    downstream figure could see.
+    """
+    provider = FlakyProvider(flaky="MNL", times=2)
+    result = run_sweep(scenario(), provider=provider, data_dir=tmp_path, workers=1, delay_s=0)
+    assert result.coverage == 1.0
+    assert not result.errors
+
+
+def test_a_search_that_never_answers_is_counted_once_not_once_per_pass(tmp_path):
+    """Retries must not inflate `completed` past the number of searches."""
+    provider = FakeProvider(fail_on={"MNL"})
+    result = run_sweep(scenario(), provider=provider, data_dir=tmp_path, workers=1, delay_s=0)
+    assert result.completed == result.total
+
+
+def test_retries_cost_only_what_is_still_failing(tmp_path):
+    """Each pass is smaller than the last, so the bound is the failures."""
+    provider = FakeProvider(fail_on={"MNL"})
+    result = run_sweep(scenario(), provider=provider, data_dir=tmp_path, workers=1, delay_s=0)
+    failing = sum(1 for origin, destination, _ in provider.calls if destination == "MNL")
+    clean = sum(1 for origin, destination, _ in provider.calls if destination != "MNL")
+    assert clean == result.total - len(result.errors)
+    assert failing == len(result.errors) * 3
+
+
+# --------------------------------------------------------------------- shards
+#
+# A deep sweep is split across several cloud runners so it finishes inside its
+# budget without asking pelikan.cz for anything faster than the rate that has
+# measured zero timeouts. Each runner is a separate address, so the per-address
+# load is unchanged - only the wall clock moves.
+
+
+def test_shards_partition_the_plan_exactly():
+    """No search dropped and none run twice, or coverage means nothing."""
+    plan = plan_searches(make_scenario(depth="deep"))
+    pieces = [shard_of(plan, index, 3) for index in range(3)]
+    assert sum(len(piece) for piece in pieces) == len(plan)
+    assert [s for piece in pieces for s in piece].count(plan[0]) == 1
+    assert set().union(*(set(piece) for piece in pieces)) == set(plan)
+
+
+def test_every_shard_gets_a_spread_of_routes():
+    """A contiguous slice would hand one runner most of a single route, leaving
+    it unable to tell a dead route from its own bad luck."""
+    plan = plan_searches(make_scenario(depth="deep"))
+    routes = {(s.origin, s.destination) for s in plan}
+    for index in range(3):
+        assert {(s.origin, s.destination) for s in shard_of(plan, index, 3)} == routes
+
+
+def test_one_shard_of_one_is_the_whole_plan():
+    plan = plan_searches(make_scenario())
+    assert shard_of(plan, 0, 1) == plan
+
+
+def test_an_impossible_shard_is_refused_rather_than_swept():
+    """A typo here silently sweeps a fraction of the trip and reports success."""
+    plan = plan_searches(make_scenario())
+    for index, count in ((0, 0), (3, 3), (-1, 3)):
+        with pytest.raises(ValueError):
+            shard_of(plan, index, count)
+
+
+def test_a_sharded_run_searches_only_its_share(tmp_path):
+    provider = FakeProvider()
+    result = run_sweep(
+        scenario(), provider=provider, data_dir=tmp_path, workers=1, delay_s=0, shard=(0, 3)
+    )
+    whole = len(plan_searches(scenario()))
+    assert result.total == len(shard_of(plan_searches(scenario()), 0, 3))
+    assert result.total < whole
+
+
+def test_a_shard_records_the_whole_plan_it_is_a_share_of(tmp_path):
+    """Its own coverage is over its share; `planned` says what the share is of,
+    so the merge can report against the trip rather than against the shard."""
+    result = run_sweep(
+        scenario(), provider=FakeProvider(), data_dir=tmp_path, workers=1, delay_s=0, shard=(1, 3)
+    )
+    status = json.loads((result.directory / "status.json").read_text(encoding="utf-8"))
+    assert status["shard"] == [1, 3]
+    assert status["planned"] == len(plan_searches(scenario()))
+    assert status["total"] == result.total < status["planned"]
+
+
+# --------------------------------------------------------------- merging them
+
+
+def run_shards(tmp_path, count=3, provider=None, **kwargs):
+    return [
+        run_sweep(
+            scenario(),
+            provider=provider or FakeProvider(),
+            data_dir=tmp_path / f"shard{index}",
+            workers=1,
+            delay_s=0,
+            shard=(index, count),
+            **kwargs,
+        ).directory
+        for index in range(count)
+    ]
+
+
+def test_merging_shards_reconstructs_the_whole_sweep(tmp_path):
+    shards = run_shards(tmp_path)
+    status = merge_shards(shards, tmp_path / "merged")
+    whole = len(plan_searches(scenario()))
+    assert status["total"] == status["answered"] == status["planned"] == whole
+    assert status["coverage"] == 1.0
+    assert len(load_legs(tmp_path / "merged")) == whole
+
+
+def test_merging_sums_the_per_route_counters(tmp_path):
+    shards = run_shards(tmp_path)
+    status = merge_shards(shards, tmp_path / "merged")
+    assert sum(status["route_searches"].values()) == status["completed"]
+    assert set(status["route_searches"]) == {
+        f"{origin}->{destination}" for origin, destination in planned_routes(scenario())
+    }
+    assert not status["routes_with_no_results"]
+
+
+def test_a_merged_sweep_is_only_as_good_as_its_unhappiest_shard(tmp_path):
+    """Calling the whole thing done because two of three finished is how a
+    starved sweep gets charted as a price."""
+    shards = run_shards(tmp_path)
+    broken = json.loads((shards[1] / "status.json").read_text(encoding="utf-8"))
+    broken["state"] = "throttled"
+    (shards[1] / "status.json").write_text(json.dumps(broken), encoding="utf-8")
+    assert merge_shards(shards, tmp_path / "merged")["state"] == "throttled"
+
+
+def test_merging_shards_of_different_trips_is_refused(tmp_path):
+    """Possible whenever a run is dispatched mid-edit: two runners check out
+    different commits, and the merge would invent a trip that never existed."""
+    shards = run_shards(tmp_path, count=2)
+    other = json.loads((shards[1] / "scenario.json").read_text(encoding="utf-8"))
+    other["origins"] = ["KTW"]
+    (shards[1] / "scenario.json").write_text(json.dumps(other), encoding="utf-8")
+    with pytest.raises(ShardMismatch, match="different trips"):
+        merge_shards(shards, tmp_path / "merged")
+
+
+def test_a_shard_whose_job_died_does_not_read_as_a_clean_one(tmp_path):
+    shards = run_shards(tmp_path)
+    (shards[2] / "status.json").unlink()
+    status = merge_shards(shards, tmp_path / "merged")
+    assert status["state"] != "done"
+    assert status["coverage"] < 1.0
+
+
+def test_the_merged_sweep_carries_the_shard_roll_call(tmp_path):
+    """A run that lost a shard must say so, not report a smaller sweep that
+    looks complete."""
+    status = merge_shards(run_shards(tmp_path), tmp_path / "merged")
+    assert sorted(status["shards"]) == [[0, 3], [1, 3], [2, 3]]
+    assert status["shard"] is None
+
+
+def test_a_lost_shard_thins_every_route_rather_than_deleting_some(tmp_path):
+    """The failure this deal is shaped around.
+
+    A shard that is throttled and dies takes its searches with it. If shards
+    owned whole routes, those routes would vanish from the merged sweep and read
+    downstream as dead routes - the exact confusion between breakage and a quiet
+    market this project keeps having to design against.
+    """
+    shards = run_shards(tmp_path)
+    status = merge_shards(shards[:2], tmp_path / "merged")
+    assert status["coverage"] < 1.0
+    assert not status["routes_with_no_results"]
+    assert set(status["route_searches"]) == {
+        f"{origin}->{destination}" for origin, destination in planned_routes(scenario())
+    }
+
+
+def test_shards_still_deal_every_route_when_dates_are_few():
+    """The exploration plan is three dates a route; three shards get one each."""
+    plan = plan_exploration(make_scenario())
+    routes = {(s.origin, s.destination) for s in plan}
+    for index in range(3):
+        assert {(s.origin, s.destination) for s in shard_of(plan, index, 3)} == routes

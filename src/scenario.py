@@ -71,6 +71,13 @@ class Scenario:
     return_to: list[str] | None = None
     # True drops the final leg entirely: a one-way chain that just ends.
     one_way: bool = False
+    # Narrows the sweep to first-leg departures inside this range, once a broad
+    # sweep has shown which dates are worth watching closely. Both None means the
+    # whole window. Deliberately a bound on the *first* leg only: the later legs
+    # are derived from it through the stay ranges, so a focus stays a statement
+    # about when you leave rather than three ranges that can contradict.
+    focus_start: date | None = None
+    focus_end: date | None = None
     adults: int = 1
     depth: str = "standard"
     currency: str = "CZK"
@@ -113,6 +120,31 @@ class Scenario:
         return pools
 
     @property
+    def pool_roles(self) -> list[dict]:
+        """What each entry of `airport_pools` is, positionally aligned with it.
+
+        Exists because knowing an airport is bad is only half of acting on it -
+        something has to know *which list to take it out of*. Derived from the
+        same fields as `airport_pools` so the two cannot drift.
+
+        The last pool reports itself as `origins` when `return_to` is None,
+        because that is literally the list it is: editing "the way home" of a
+        trip that has no separate return airports means editing the origins.
+        """
+        roles: list[dict] = [{"role": "origins", "stop_index": None, "label": "Departure"}]
+        roles += [
+            {"role": "stop", "stop_index": index, "label": stop.describe(index)}
+            for index, stop in enumerate(self.stops)
+        ]
+        if not self.one_way:
+            roles.append(
+                {"role": "return_to", "stop_index": None, "label": "Back to"}
+                if self.return_to is not None
+                else {"role": "origins", "stop_index": None, "label": "Back home"}
+            )
+        return roles
+
+    @property
     def leg_count(self) -> int:
         return len(self.airport_pools) - 1
 
@@ -127,6 +159,29 @@ class Scenario:
         stays of every stop before it.
         """
         return sum(stop.stay_days[0] for stop in self.stops[:leg_index])
+
+    def remaining_min_stay(self, leg_index: int) -> int:
+        """Days that must still be spent at stops before the *final* leg departs.
+
+        The mirror image of `earliest_departure`, and the bound that was missing.
+        A leg planned any later than `horizon - remaining_min_stay(leg)` cannot
+        reach a final leg the sweep also searched, so every offer found on it is
+        an orphan: measured on the real trip, 132 of a deep sweep's 615 searches
+        were spent on dates no itinerary could ever use.
+
+        The slice stops one short of the end on purpose. The last leg arrives
+        wherever the trip finishes and nothing has to happen after it, so it
+        reserves nothing - true for a one-way chain as much as for a return.
+        """
+        return sum(stop.stay_days[0] for stop in self.stops[leg_index : self.leg_count - 1])
+
+    def max_stay_before(self, leg_index: int) -> int:
+        """Most days this leg can trail the first leg's departure.
+
+        Only meaningful with a focus set: it converts "depart between these two
+        dates" into how late each later leg could still legitimately be.
+        """
+        return sum(stop.stay_days[1] for stop in self.stops[:leg_index])
 
     @property
     def min_trip_days(self) -> int:
@@ -188,6 +243,26 @@ class Scenario:
                     )
                 seen[code] = rank
 
+        if (self.focus_start is None) != (self.focus_end is None):
+            raise ValueError(
+                "a focus needs both a first and a last departure date; "
+                "clear both to watch the whole window"
+            )
+        if self.focus_start is not None:
+            if self.focus_end < self.focus_start:
+                raise ValueError(
+                    f"focus_end ({self.focus_end}) must not precede "
+                    f"focus_start ({self.focus_start})"
+                )
+            # Outside the window the focus is not a narrowing but a different
+            # trip, and the sweep it plans would not be comparable with any of
+            # the sweeps of the window it claims to be part of.
+            if self.focus_start < self.window_start or self.focus_end > self.window_end:
+                raise ValueError(
+                    f"the focus {self.focus_start}..{self.focus_end} falls outside the "
+                    f"window {self.window_start}..{self.window_end}; widen the window first"
+                )
+
         unknown = [name for name in self.notify if name not in NOTIFY_SELECTIONS]
         if unknown:
             raise ValueError(
@@ -213,6 +288,8 @@ class Scenario:
         data = asdict(self)
         data["window_start"] = self.window_start.isoformat()
         data["window_end"] = self.window_end.isoformat()
+        data["focus_start"] = self.focus_start.isoformat() if self.focus_start else None
+        data["focus_end"] = self.focus_end.isoformat() if self.focus_end else None
         data["stops"] = [
             {"label": s.label, "airports": list(s.airports), "stay_days": list(s.stay_days)}
             for s in self.stops
@@ -224,6 +301,9 @@ class Scenario:
         payload = _migrate(dict(data))
         payload["window_start"] = date.fromisoformat(payload["window_start"])
         payload["window_end"] = date.fromisoformat(payload["window_end"])
+        for key in ("focus_start", "focus_end"):
+            value = payload.get(key)
+            payload[key] = date.fromisoformat(value) if value else None
         payload["stops"] = [
             Stop(
                 airports=list(s["airports"]),

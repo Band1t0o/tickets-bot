@@ -262,3 +262,26 @@ def _empty_result(tmp_path):
         legs=[], errors=["boom"], total=4, directory=directory,
         routes_with_no_results=[],
     )
+
+
+def test_a_sweep_with_holes_says_so_beside_its_price():
+    """A price you might book on has to come with how much was priced to find it.
+
+    A sweep that answered 460 of 483 searches reports its cheapest total in
+    exactly the same words as a complete one, and the difference is whether a
+    cheaper trip was ever looked at.
+    """
+    picks = [pick("cheapest", 27000)]
+    embed = build_price_embed("Trip", picks, bag_estimate=1500, coverage=0.87)
+    assert "87%" in embed["description"]
+
+
+def test_a_complete_sweep_does_not_caveat_its_price():
+    embed = build_price_embed("Trip", [pick("cheapest", 27000)], bag_estimate=1500, coverage=1.0)
+    assert "answered" not in embed["description"]
+
+
+def test_a_sweep_that_never_recorded_coverage_does_not_caveat_either():
+    """Every sweep committed before the field existed."""
+    embed = build_price_embed("Trip", [pick("cheapest", 27000)], bag_estimate=1500, coverage=None)
+    assert "answered" not in embed["description"]

@@ -62,6 +62,7 @@ itinerary built from it. A three-leg trip is ~200 searches this way and tens of 
 |---|---|---|
 | Planner | Scenario → list of one-way searches | [src/sweep/planner.py](src/sweep/planner.py) |
 | Runner | Runs them across 2 browsers, writes `legs.jsonl` | [src/sweep/runner.py](src/sweep/runner.py) |
+| Explorer | Scores each airport from a cheap probe | [src/sweep/explore.py](src/sweep/explore.py) |
 | Combiner | Chains legs into valid itineraries | [src/combine.py](src/combine.py) |
 | Selector | Picks which itineraries are worth reporting | [src/alerts.py](src/alerts.py) |
 | Notifier | Posts to Discord when a pick improves | [src/notify_discord.py](src/notify_discord.py) |
@@ -132,6 +133,104 @@ Counts are for the `japan-philippines` scenario; they scale with airports × dat
 | `quick` | every 7 days | 93 | ~15 min |
 | `standard` | every 3 days | 210 | ~33 min |
 | `deep` | every day | 615 | ~97 min |
+
+### Explore first
+
+Depth decides how finely a trip is priced. It does nothing about the other multiplier — the number
+of airports — and that is usually where a sweep's cost goes. Three origins, three Japanese airports
+and two Philippine ones is 21 routes, and a deep sweep prices every one of them on every date
+whether or not it could ever win.
+
+**Explore first** (`--mode explore`) searches every route on three spread-out dates: **63 searches,
+~10 min**, against 615 and ~97. It will not find you a trip. It tells you, per airport, what the
+cheapest flight in and out of it costs against the alternatives standing in the same place — so the
+real sweep can leave the hopeless ones out. On the trip above it says Frankfurt is the benchmark and
+Prague is 57% dearer to leave from, and that Cebu costs 67% more than Manila once you count getting
+home again.
+
+Verdicts distinguish **measured** from **unmeasured**, which is the only part that matters:
+
+| Verdict | Means |
+|---|---|
+| `best` / `close` / `worse` / `poor` | Priced, and this far above the cheapest airport in the same pool |
+| `no_offers` | Asked at least three times, answered every time, nothing sold |
+| `unproven` | The site never answered — **not** a verdict on the airport |
+
+The probe never edits a trip. Removing an airport is a button in **Explore** that drops the chip in
+the route editor and gathers it in a pending bar for you to confirm. Three sampled dates is enough
+to show you an airport is hopeless and nowhere near enough for a tool to narrow your trip on its own.
+
+### A run searches the trip on screen
+
+The route editor keeps its edits in the browser, and a run reads the trip from disk. Nothing joined
+those two facts up, so two probes were spent searching the *previous day's* airports and the Explore
+tab reported their verdicts as the answer for a trip that no longer contained them — Prague, Vienna
+and Frankfurt priced in detail, Katowice and Kraków not mentioned at all.
+
+Two changes, because either alone still leaves a way to be misled:
+
+- **Run saves first.** Pressing *Explore first*, *Run locally* or *Run in cloud* writes the trip
+  before starting, so what is on screen is what gets searched. A trip that will not save does not
+  run, and the reason appears on whichever tab you pressed the button from. An `Unsaved changes`
+  marker sits beside the buttons in the meantime, and the cost badge prices the edited trip rather
+  than the last saved one.
+- **Every sweep records its trip.** `scenario.json` is written into the sweep directory before the
+  first search, and Explore, Results and Prices all read a run against *that* — so an old sweep keeps
+  showing its flights after you change airports, and the Explore tab says
+  `BER, KRK, KTW, MUC never searched in this run` instead of leaving them out. Runs whose airports
+  differ from the current trip are marked `· different trip` in the picker, before they are opened.
+  Bag estimate, preferred origins and the alert threshold are still read from the current trip:
+  those are how a result is read, not what was searched.
+
+### Stopping a run
+
+A sweep in progress can be stopped from the status strip. It stops after the searches already in
+flight — one can be sitting on the site's timeout — and keeps everything it found: legs are appended
+to `legs.jsonl` as they arrive rather than written once at the end, so a stop, a crash or a restart
+no longer costs the whole run. A stopped sweep records `state: "stopped"`, is labelled as such in
+the sweep picker, and is never plotted on the price chart.
+
+`--max-minutes` is the same mechanism on a timer: the sweep stops itself inside a budget and its
+results reach disk, instead of a job timeout killing it with everything still in memory.
+
+---
+
+## Where sweeping works, and where it does not
+
+**Sweep from GitHub Actions. Do not sweep from home.** Measured on 11 August, same code, same trip:
+
+| | searches | wall clock | timeouts |
+|---|---|---|---:|
+| Cloud runner, 03:24 | 350 | 5,156 s | **0** |
+| This machine, 14:31 | 240 | 4.5 h | **120** |
+
+pelikan.cz throttles *this connection*. It is not the scraper, not concurrency, and not the width of
+the trip — a local run fails about half its searches whatever you do, while the cloud sweeps the
+same routes without a single timeout at 14.7 s/search.
+
+Local runs are for the Explore probe and for spot checks. Anything long belongs in Actions.
+
+### What a throttled run does now
+
+A timed-out search used to cost 248 s: the full timeout, then an immediate retry into the same
+throttle. The local sweep of 11 August spent **93% of its worker time** on searches that returned
+nothing, and would have carried on for hours. Three things changed:
+
+- **The retry waits its turn.** A timed-out search is re-run at the end of the worker's chunk, not
+  on the spot — same recovery for a transient timeout, without doubling the load at the one moment
+  the site is least willing.
+- **The wait is set from measurement.** Successful searches record how long they took; once there
+  are ten to go on, a search is abandoned at three times the recent median, floored at 60 s and
+  capped at the configured timeout. A flat cutoff would not do: the healthy cloud median is ~25–30 s,
+  so 45 s would start failing good searches.
+- **It gives up.** Five consecutive timeouts pauses every worker for 2, then 5, then 15 minutes.
+  Still failing after the longest pause ends the run as `state: "throttled"` — deliberately not
+  `unhealthy`, which means the scraper is broken and someone must fix a selector. A throttled sweep
+  needs no fix; it needs running later, or from the cloud.
+
+There is no IP, token or user-agent rotation here and there will not be. Changing identity to get
+around a limit a site has applied is evasion whatever the mechanism, and it is moot: the cloud path
+works without pretending to be anyone.
 
 ---
 
@@ -363,9 +462,25 @@ Two conclusions the data supports, both of which contradict the intuition that p
 
 `make ui`, or the **Flight watcher** desktop shortcut ([start-ui.bat](start-ui.bat)).
 
-Four tabs: **Search** (build a trip), **Results** (cheapest same-airport and cheapest open-jaw side
-by side, then every itinerary, expandable into legs), **Prices** (cheapest total by departure date —
-*when* to fly; best total over time — *whether to book now*; and the probe table).
+Five tabs: **Search** (build a trip), **Explore** (which airports are worth searching, and where you
+narrow the trip), **Results** (cheapest same-airport and cheapest open-jaw side by side, then every
+itinerary, expandable into legs), **Prices** (cheapest total by departure date — *when* to fly; best
+total over time — *whether to book now*; and the probe table), **Sources**.
+
+**Explore** reads verdicts from any run that still has its legs on disk, not only from probes — a
+full sweep priced the same routes on far more dates, so its verdict is the better one when you have
+one. Airports you drop gather in a bar at the top and are written in one save, so deciding about six
+airports is one pass rather than six. A run whose legs never reached disk is not offered at all,
+however many flights its status claims: the 11 August local sweep reports 1,167 and has none.
+
+A run of a trip you have since edited says so at the top of the tab, names the airports it never
+priced, and offers to probe the current trip — before any table is read. Rows are struck through
+only for airports *you* dropped in this session; one that was simply never in your trip reads
+`not in this trip`, because a whole table struck through as "dropped" looks like six decisions you
+made rather than a report of the wrong thing.
+
+Results points at the Explore tab when a probe is selected rather than drawing an empty itinerary
+table. The status strip carries a **Stop** button while a run is going.
 
 Every total on Results says when it was measured and how long ago, on the headline cards and on each
 leg — a figure from three days ago otherwise reads exactly like one from ten minutes ago. Both charts
@@ -426,6 +541,7 @@ src/
   sources.py              per-site URL grammar and selectors, with the defaults
   sweep/planner.py        scenario -> searches, and the routes a trip requires
   sweep/runner.py         concurrent execution, sweep quality, comparability
+  sweep/explore.py        one probe -> a verdict per airport, and what went unsearched
   combine.py              legs -> itineraries
   alerts.py               which itineraries are worth reporting
   verify.py               re-price the shortlist on a second site
@@ -443,7 +559,8 @@ data/countries.json       ISO code -> country name, so "Japan" is searchable
 data/airport_notes.json   hand-measured findings no sweep can reproduce
 data/sources.json         overrides for src/sources.py; delete to restore defaults
 .secrets/discord.json     the webhook URL — gitignored, never committed
-data/sweeps/<id>/<ts>/    legs.jsonl, status.json, best.json, verify.json
+data/sweeps/<id>/<ts>/    legs.jsonl, status.json, scenario.json (the trip it
+                          searched), best.json, verify.json
 data/probe/               observations.jsonl
 docs/superpowers/specs/   design documents
 ```

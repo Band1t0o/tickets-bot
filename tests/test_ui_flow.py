@@ -295,6 +295,373 @@ def test_the_headline_says_when_the_price_was_measured(ui):
     assert not errors
 
 
+# ----------------------------------------------------------- explore report
+#
+# The probe is only worth running if its verdict can be acted on, and the
+# acting is two clicks in this panel. Driven through the browser because the
+# Remove button reaches across into the route editor on the other tab, which no
+# unit test of either half would catch.
+
+EXPLORE_LEGS = [
+    ("PRG", "NRT", "2027-01-10", 11000.0),
+    ("VIE", "NRT", "2027-01-10", 22000.0),   # dear enough to be called poor
+    ("NRT", "MNL", "2027-01-20", 4000.0),
+    ("MNL", "PRG", "2027-01-30", 14000.0),
+    ("MNL", "VIE", "2027-01-30", 15000.0),
+]
+
+EXPLORE_ROUTES = ["PRG->NRT", "VIE->NRT", "NRT->MNL", "MNL->PRG", "MNL->VIE"]
+
+
+def explore_status(errors=None, state="done"):
+    return {
+        "state": state,
+        "mode": "explore",
+        "total": 15,
+        "completed": 15,
+        "legs_found": len(EXPLORE_LEGS),
+        "depth": "quick",
+        "route_searches": {route: 3 for route in EXPLORE_ROUTES},
+        "route_errors": {route: (errors or {}).get(route, 0) for route in EXPLORE_ROUTES},
+    }
+
+
+def open_explore(page):
+    page.locator('#tabs button[data-tab="explore"]').click()
+    page.wait_for_timeout(900)
+
+
+def open_results(page):
+    page.locator('#tabs button[data-tab="results"]').click()
+    page.wait_for_timeout(900)
+
+
+def seed_probe(scenarios, errors=None, legs=None, state="done"):
+    seed_sweep(
+        scenarios.parent / "data", "2026-08-11T09-00-00Z",
+        status=explore_status(errors, state), legs=EXPLORE_LEGS if legs is None else legs,
+    )
+
+
+def seed_searched_trip(scenarios, stamp="2026-08-11T09-00-00Z", **overrides):
+    """Record which trip a seeded sweep searched, as `run_sweep` now does."""
+    trip = json.loads((scenarios / "jp-ph.json").read_text(encoding="utf-8")) | overrides
+    path = scenarios.parent / "data" / "sweeps" / "jp-ph" / stamp / "scenario.json"
+    path.write_text(json.dumps(trip), encoding="utf-8")
+
+
+def test_the_explore_tab_shows_a_verdict_for_every_airport(ui):
+    page, scenarios, errors = ui
+    seed_probe(scenarios)
+    page.reload(wait_until="networkidle")
+    open_explore(page)
+
+    report = page.locator("#explore-report")
+    assert report.is_visible()
+    assert "not worth it" in report.inner_text()
+    assert not errors
+
+
+def test_a_dear_origin_is_named_and_the_cheap_one_is_the_benchmark(ui):
+    page, scenarios, errors = ui
+    seed_probe(scenarios)
+    page.reload(wait_until="networkidle")
+    open_explore(page)
+
+    # `.first` is the "Flying from" block; the same two airports appear again
+    # in the pool for the way home.
+    prague = page.locator("#explore-report tbody tr", has_text="PRG").first.inner_text()
+    vienna = page.locator("#explore-report tbody tr", has_text="VIE").first.inner_text()
+    assert "cheapest here" in prague, prague
+    assert "not worth it" in vienna, vienna
+    assert "100%" in vienna, vienna   # 22,000 against 11,000
+    assert not errors
+
+
+def test_a_probes_verdicts_are_pointed_to_rather_than_drawn_as_an_empty_table(ui):
+    """Results has nothing to show for a probe, and must not imply it found
+    nothing - three dates a leg rarely chain into a whole trip."""
+    page, scenarios, errors = ui
+    seed_probe(scenarios)
+    page.reload(wait_until="networkidle")
+    open_results(page)
+
+    assert page.locator("#results-scroll").is_hidden()
+    assert "Explore tab" in page.locator("#results-empty").inner_text()
+    assert not errors
+
+
+def test_dropped_airports_gather_up_instead_of_being_saved_one_at_a_time(ui):
+    """Deciding about a pool of airports is one review and one save.
+
+    Left unsaved on purpose: three sampled dates is enough to show you an
+    airport is hopeless and nowhere near enough for a tool to edit your trip
+    behind you.
+    """
+    page, scenarios, errors = ui
+    seed_probe(scenarios)
+    page.reload(wait_until="networkidle")
+    open_explore(page)
+
+    page.locator("#explore-report tbody tr", has_text="VIE").first.locator(
+        "button", has_text="Remove from trip"
+    ).click()
+    page.wait_for_timeout(500)
+
+    # Still on the Explore tab, with what you have decided in front of you.
+    assert page.locator('section[data-panel="explore"]').is_visible()
+    assert "VIE" in page.locator("#explore-pending").inner_text()
+    # The row stays, struck through: the table is the comparison you just made,
+    # and deleting rows from it would hide what you compared against.
+    vienna = page.locator("#explore-report tbody tr", has_text="VIE").first
+    assert "is-dropped" in (vienna.get_attribute("class") or "")
+    assert vienna.locator("button", has_text="Remove from trip").count() == 0
+    saved = json.loads((scenarios / "jp-ph.json").read_text(encoding="utf-8"))
+    assert saved["origins"] == ["PRG", "VIE"], "the trip must not change without a save"
+
+    page.locator("#explore-save").click()
+    page.wait_for_timeout(900)
+    saved = json.loads((scenarios / "jp-ph.json").read_text(encoding="utf-8"))
+    assert saved["origins"] == ["PRG"]
+    assert page.locator("#explore-pending").is_hidden()
+    assert not errors
+
+
+def test_undo_puts_back_everything_dropped_since_the_last_save(ui):
+    page, scenarios, errors = ui
+    seed_probe(scenarios)
+    page.reload(wait_until="networkidle")
+    open_explore(page)
+
+    page.locator("#explore-report tbody tr", has_text="VIE").first.locator(
+        "button", has_text="Remove from trip"
+    ).click()
+    page.wait_for_timeout(500)
+    page.locator("#explore-undo").click()
+    page.wait_for_timeout(700)
+
+    assert page.locator("#explore-pending").is_hidden()
+    page.locator('#tabs button[data-tab="search"]').click()
+    assert chips(page, "#origins") == ["PRG", "VIE"]
+    assert not errors
+
+
+def test_an_airport_the_site_never_answered_about_is_not_offered_for_removal(ui):
+    """1.9 legs per search: an empty result is usually a timeout, not a verdict.
+
+    Dropping an airport on that basis would retire a good route on the strength
+    of the site being slow.
+    """
+    page, scenarios, errors = ui
+    seed_probe(
+        scenarios,
+        errors={"VIE->NRT": 3, "MNL->VIE": 3},
+        legs=[leg for leg in EXPLORE_LEGS if "VIE" not in (leg[0], leg[1])],
+    )
+    page.reload(wait_until="networkidle")
+    open_explore(page)
+
+    vienna = page.locator("#explore-report tbody tr", has_text="VIE").first
+    assert "not measured" in vienna.inner_text()
+    assert vienna.locator("button", has_text="Remove from trip").count() == 0
+    assert not errors
+
+
+def test_the_explore_tab_can_judge_from_a_full_sweep_not_only_a_probe(ui):
+    """A real sweep priced the same routes on far more dates, so its verdict is
+    the better one whenever there is one."""
+    page, scenarios, errors = ui
+    seed_sweep(
+        scenarios.parent / "data", "2026-08-11T08-00-00Z",
+        status={
+            "state": "done", "mode": "sweep", "depth": "quick", "total": 93,
+            "legs_found": len(EXPLORE_LEGS),
+            "route_searches": {route: 9 for route in EXPLORE_ROUTES},
+            "route_errors": {},
+        },
+        legs=EXPLORE_LEGS,
+    )
+    page.reload(wait_until="networkidle")
+    open_explore(page)
+
+    assert "quick sweep" in page.locator("#explore-select").inner_text()
+    assert "not worth it" in page.locator("#explore-report").inner_text()
+    assert not errors
+
+
+def test_a_probe_is_labelled_as_one_in_the_sweep_picker(ui):
+    page, scenarios, errors = ui
+    seed_probe(scenarios)
+    page.reload(wait_until="networkidle")
+    open_results(page)
+    assert "probe" in page.locator("#sweep-select").inner_text()
+    assert not errors
+
+
+def test_a_stopped_run_says_it_was_stopped_rather_than_finished(ui):
+    page, scenarios, errors = ui
+    seed_sweep(
+        scenarios.parent / "data", "2026-08-11T09-00-00Z",
+        status={
+            "state": "stopped", "mode": "sweep", "total": 600, "completed": 40,
+            "legs_found": 120, "depth": "deep",
+        },
+    )
+    page.reload(wait_until="networkidle")
+    page.wait_for_timeout(600)
+    assert "Stopped at 40/600" in page.locator("#status-text").inner_text()
+    assert "stopped at 40" in page.locator("#sweep-select").inner_text()
+    assert not errors
+
+
+def test_the_explore_button_prices_itself_before_you_press_it(ui):
+    page, _, errors = ui
+    page.wait_for_timeout(700)
+    note = page.locator("#explore-note").inner_text()
+    assert "searches" in note and "min" in note, note
+    assert not errors
+
+
+# --------------------------------------------- what runs is what is on screen
+#
+# The run endpoint takes the trip from disk, and the route editor keeps its
+# edits in the browser until Save is pressed. Two 25-minute probes were spent
+# searching the previous day's trip because nothing joined those two facts up.
+
+
+def add_origin(page, code: str) -> None:
+    page.locator("#origins .typeahead input").click()
+    page.keyboard.type(code, delay=55)
+    page.keyboard.press("Enter")
+    page.wait_for_timeout(800)
+
+
+def catch_the_sweep(monkeypatch):
+    """Stand in for the sweep and record the trip it was handed."""
+    import src.web.app as app_module
+
+    seen: dict = {}
+    started = threading.Event()
+
+    def fake_sweep(scenario, **kwargs):
+        seen["origins"] = list(scenario.origins)
+        seen["mode"] = kwargs.get("mode")
+        started.set()
+
+    monkeypatch.setattr(app_module, "run_sweep", fake_sweep)
+    return seen, started
+
+
+def test_a_probe_searches_the_trip_on_screen_not_the_one_last_saved(ui, monkeypatch):
+    """The bug, frozen: BCN is on screen, so BCN is what gets searched."""
+    page, _, errors = ui
+    seen, started = catch_the_sweep(monkeypatch)
+
+    add_origin(page, "BCN")
+    page.locator("#explore-btn").click()          # no Save pressed first
+
+    assert started.wait(timeout=15), "the probe never started"
+    assert "BCN" in seen["origins"], f"the probe searched {seen['origins']}"
+    assert seen["mode"] == "explore"
+    assert not errors
+
+
+def test_the_probe_button_on_the_explore_tab_saves_the_edits_too(ui, monkeypatch):
+    """The tab whose whole design is "drop airports now, save later"."""
+    page, scenarios, errors = ui
+    seen, started = catch_the_sweep(monkeypatch)
+    seed_probe(scenarios)
+    page.reload(wait_until="networkidle")
+
+    add_origin(page, "BCN")
+    open_explore(page)
+    page.locator("#explore-run-btn").click()
+
+    assert started.wait(timeout=15), "the probe never started"
+    assert "BCN" in seen["origins"], f"the probe searched {seen['origins']}"
+    saved = json.loads((scenarios / "jp-ph.json").read_text(encoding="utf-8"))
+    assert "BCN" in saved["origins"], "the run saved the trip it was about to search"
+    assert not errors
+
+
+def test_an_unsaved_edit_is_visible_beside_the_button_that_will_run_it(ui):
+    page, _, errors = ui
+    assert page.locator("#dirty-note").is_hidden()
+    add_origin(page, "BCN")
+    assert page.locator("#dirty-note").is_visible()
+    assert "unsaved" in page.locator("#dirty-note").inner_text().lower()
+
+    page.locator("#save-btn").click()
+    page.wait_for_timeout(800)
+    assert page.locator("#dirty-note").is_hidden()
+    assert not errors
+
+
+def test_a_trip_that_cannot_be_saved_says_so_on_the_tab_you_pressed_run_from(ui, monkeypatch):
+    """A save failed from the Explore tab used to print into the Search
+    panel, which is hidden - so the button simply did nothing."""
+    page, _, errors = ui
+    seen, started = catch_the_sweep(monkeypatch)
+
+    for _ in range(2):
+        page.locator("#origins .chip__remove").first.click()
+        page.wait_for_timeout(300)
+    open_explore(page)
+    page.locator("#explore-run-btn").click()
+    page.wait_for_timeout(900)
+
+    assert not started.is_set(), "an unsavable trip must not be swept"
+    complaint = page.locator('section[data-panel="explore"] .badge--error')
+    assert complaint.is_visible(), "the reason must be readable where the button is"
+    assert "origin" in complaint.inner_text().lower()
+    assert not errors
+
+
+# ------------------------------------------ a report of a trip you have edited
+
+
+def test_a_probe_of_a_different_trip_says_so_instead_of_listing_its_airports(ui):
+    """Exactly what was on screen for two probes: rows for Prague and Vienna,
+    nothing at all about the airports the trip now flies from."""
+    page, scenarios, errors = ui
+    seed_probe(scenarios)
+    seed_searched_trip(scenarios, origins=["PRG", "VIE"])
+    page.reload(wait_until="networkidle")
+
+    add_origin(page, "BCN")
+    page.locator("#save-btn").click()
+    page.wait_for_timeout(900)
+    open_explore(page)
+
+    notice = page.locator("#explore-mismatch")
+    assert notice.is_visible()
+    assert "BCN" in notice.inner_text(), notice.inner_text()
+    assert "different trip" in page.locator("#explore-select").inner_text()
+    assert not errors
+
+
+def test_an_airport_that_was_never_in_your_trip_is_not_drawn_as_one_you_dropped(ui):
+    """Every row struck through as "dropped" is what the old code did when the
+    report was about another trip entirely - it read as six decisions you had
+    just made rather than as a report of the wrong thing. Reloading clears what
+    was dropped in this session, so anything still struck through is a lie."""
+    page, scenarios, errors = ui
+    seed_probe(scenarios)
+    seed_searched_trip(scenarios, origins=["PRG", "VIE"])
+
+    page.locator("#origins .chip__remove").last.click()   # VIE out of the trip
+    page.wait_for_timeout(300)
+    page.locator("#save-btn").click()
+    page.wait_for_timeout(900)
+    page.reload(wait_until="networkidle")
+    open_explore(page)
+
+    vienna = page.locator("#explore-report tbody tr", has_text="VIE").first
+    assert "is-dropped" not in (vienna.get_attribute("class") or "")
+    assert "not in this trip" in vienna.inner_text().lower(), vienna.inner_text()
+    assert not errors
+
+
 def test_a_starved_sweep_is_dimmed_out_of_the_trend(ui):
     """The 2.9-legs-per-search sweep must not be joined to the 9.7 one.
 

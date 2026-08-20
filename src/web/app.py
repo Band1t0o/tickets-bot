@@ -27,14 +27,17 @@ from ..notify_discord import COLOR_INFO, post
 from ..scenario import Scenario, load_scenario, read_scenarios, save_scenario
 from ..sources import DEFAULTS as DEFAULT_SOURCES
 from ..sources import Source, load_source, load_sources, save_sources
+from ..sweep.explore import explore_report
 from ..sweep.planner import (
     SECONDS_PER_SEARCH,
     estimate_minutes,
+    plan_exploration,
     plan_searches,
     planned_routes,
 )
 from ..sweep.runner import (
     DEFAULT_WORKERS,
+    MODES,
     is_comparable,
     legs_per_search_of,
     load_legs,
@@ -64,12 +67,15 @@ SAFE_STAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z$")
 # and 400s for things it needs, and renders them as emptiness - which is
 # indistinguishable from "you have no saved trips". `static/app.js` carries the
 # same number and refuses to render until they match.
-API_CONTRACT = 1
+API_CONTRACT = 5
 
 app = FastAPI(title="Flight scenario watcher")
 
 # One local sweep at a time; the UI reflects this state in its status strip.
 _running: dict[str, threading.Thread] = {}
+# Set to ask the sweep in `_running` to stop. Kept beside it rather than inside
+# the runner because the thread that asks is never the thread that runs.
+_stops: dict[str, threading.Event] = {}
 # A sweep thread that dies takes its traceback with it. Without this the
 # endpoint has already returned {"started": true}, no status.json is ever
 # written, and the UI polls forever showing "No sweeps yet".
@@ -241,19 +247,47 @@ def update_scenario(scenario_id: str, payload: dict = Body(...)) -> dict:
     return scenario.to_dict()
 
 
+def _checked_mode(mode: str | None) -> str:
+    if mode is None:
+        return "sweep"
+    if mode not in MODES:
+        raise HTTPException(400, f"mode must be one of {', '.join(MODES)}, got {mode!r}")
+    return mode
+
+
 @app.post("/api/scenarios/{scenario_id}/estimate")
-def estimate(scenario_id: str, depth: str | None = None) -> dict:
-    scenario = _scenario_or_404(scenario_id)
+def estimate(
+    scenario_id: str,
+    depth: str | None = None,
+    mode: str | None = None,
+    trip: dict | None = Body(default=None),
+) -> dict:
+    """What a run of this trip would cost, in searches and minutes.
+
+    `trip` prices an edited trip that has not been saved, without saving it.
+    The badge sits beside the run buttons, so reading the cost off the file
+    while the screen showed something else made the number quietly wrong.
+    """
+    saved = _scenario_or_404(scenario_id)
+    mode = _checked_mode(mode)
+    if trip:
+        try:
+            scenario = Scenario.from_dict(trip)
+        except (ValueError, KeyError, TypeError) as exc:
+            raise HTTPException(400, f"That trip cannot be read: {exc}") from exc
+    else:
+        scenario = saved
     if depth:
         scenario = replace(scenario, depth=depth)
-        try:
-            scenario.validate()
-        except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
-    searches = plan_searches(scenario)
+    try:
+        scenario.validate()
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    searches = plan_exploration(scenario) if mode == "explore" else plan_searches(scenario)
     return {
         "searches": len(searches),
         "minutes": estimate_minutes(searches),
+        "mode": mode,
         "depth": scenario.depth,
         "leg_count": scenario.leg_count,
         "per_leg": {
@@ -262,6 +296,13 @@ def estimate(scenario_id: str, depth: str | None = None) -> dict:
         },
         "leg_labels": _leg_labels(scenario),
     }
+
+
+def _focus_of(scenario: Scenario) -> list | None:
+    """A trip's focus as the two strings a sweep records, or None."""
+    if scenario.focus_start and scenario.focus_end:
+        return [scenario.focus_start.isoformat(), scenario.focus_end.isoformat()]
+    return None
 
 
 def _leg_labels(scenario: Scenario) -> list[str]:
@@ -275,10 +316,16 @@ def _leg_labels(scenario: Scenario) -> list[str]:
 # ----------------------------------------------------------------- running
 
 
+def _is_running(scenario_id: str) -> bool:
+    thread = _running.get(scenario_id)
+    return thread is not None and thread.is_alive()
+
+
 @app.post("/api/scenarios/{scenario_id}/run")
-def run_locally(scenario_id: str, depth: str | None = None) -> dict:
+def run_locally(scenario_id: str, depth: str | None = None, mode: str | None = None) -> dict:
     scenario = _scenario_or_404(scenario_id)
-    if scenario_id in _running and _running[scenario_id].is_alive():
+    mode = _checked_mode(mode)
+    if _is_running(scenario_id):
         raise HTTPException(409, "A sweep is already running for this scenario")
 
     if depth:
@@ -288,17 +335,39 @@ def run_locally(scenario_id: str, depth: str | None = None) -> dict:
             raise HTTPException(400, str(exc)) from exc
 
     _failures.pop(scenario_id, None)
+    stop = threading.Event()
 
     def work():
         try:
-            run_sweep(scenario, data_dir=DATA_DIR, depth=depth)
+            run_sweep(scenario, data_dir=DATA_DIR, depth=depth, mode=mode, stop=stop)
         except Exception as exc:  # noqa: BLE001 - recorded and surfaced, not swallowed
             _failures[scenario_id] = f"{type(exc).__name__}: {exc}"
 
     thread = threading.Thread(target=work, daemon=True)
     thread.start()
     _running[scenario_id] = thread
-    return {"started": True, "scenario_id": scenario_id, "depth": depth or scenario.depth}
+    _stops[scenario_id] = stop
+    return {
+        "started": True,
+        "scenario_id": scenario_id,
+        "mode": mode,
+        "depth": depth or scenario.depth,
+    }
+
+
+@app.post("/api/scenarios/{scenario_id}/stop")
+def stop_run(scenario_id: str) -> dict:
+    """Ask the running sweep to stop after the searches already in flight.
+
+    Not instant, and deliberately not pretending to be: a search can sit on the
+    site's 120s timeout, and killing it mid-page would lose the offers it is
+    part-way through reading. Everything found so far is already on disk.
+    """
+    _scenario_or_404(scenario_id)
+    if not _is_running(scenario_id):
+        raise HTTPException(409, "No sweep is running for this scenario")
+    _stops[scenario_id].set()
+    return {"stopping": True, "scenario_id": scenario_id}
 
 
 @app.post("/api/scenarios/{scenario_id}/run-cloud")
@@ -316,20 +385,60 @@ def run_in_cloud(scenario_id: str, depth: str | None = None) -> dict:
     return {"dispatched": True, "scenario_id": scenario_id}
 
 
+def _searched_another_trip(directory: Path, live: Scenario) -> bool:
+    """Whether this run swept a different set of airports than the trip now.
+
+    In the listing because the picker is where a run gets chosen, and a run of
+    the wrong trip has to be recognisable before it is opened and believed.
+    """
+    return _sweep_scenario(directory, live).airport_pools != live.airport_pools
+
+
 @app.get("/api/sweeps/{scenario_id}")
 def list_sweeps(scenario_id: str) -> dict:
     directories = _sweep_dirs(scenario_id)
+    stop = _stops.get(scenario_id)
+    live = _scenario_or_404(scenario_id)
     return {
         "scenario_id": scenario_id,
-        "running": scenario_id in _running and _running[scenario_id].is_alive(),
+        "running": _is_running(scenario_id),
+        # A stop that has been asked for but not yet reached. The strip says
+        # "stopping" for as long as this is true, because the alternative is a
+        # button that looks broken for two minutes.
+        "stopping": bool(stop is not None and stop.is_set() and _is_running(scenario_id)),
         "error": _failures.get(scenario_id),
         # The countdown used to recompute this from its own copies of the pace
         # constants. They were halved and re-measured without the UI following,
         # leaving "minutes left" reading roughly half the real wait.
         "seconds_per_search": SECONDS_PER_SEARCH,
         "workers": DEFAULT_WORKERS,
-        "sweeps": [{"stamp": d.name, **_read_status(d)} for d in directories[:30]],
+        "sweeps": [
+            {
+                "stamp": d.name,
+                "has_legs": _has_legs(d),
+                "searched_another_trip": _searched_another_trip(d, live),
+                **_read_status(d),
+            }
+            for d in directories[:30]
+        ],
     }
+
+
+def _has_legs(directory: Path) -> bool:
+    """Whether this sweep's legs are still on disk to be read.
+
+    `legs_found` in status.json says what a run found, which is not the same
+    thing. The 11 Aug local sweep reports 1,167 flights and has no legs.jsonl
+    at all: it predated incremental writing, so they lived only in the process
+    that was killed. Anything picking a sweep to work from has to know the
+    difference, or it offers the richest-looking run and reads nothing.
+
+    A stat, not a read - this is called for every sweep on every status poll.
+    """
+    try:
+        return (directory / "legs.jsonl").stat().st_size > 0
+    except OSError:
+        return False
 
 
 # ------------------------------------------------------------------- results
@@ -353,12 +462,42 @@ def _combination(scenario: Scenario, directory: Path):
     return cached
 
 
+def _sweep_scenario(directory: Path, live: Scenario) -> Scenario:
+    """The trip this sweep searched, read with today's preferences.
+
+    Shape - airports, stops, window, stays - comes from the snapshot the run
+    wrote, because a sweep is a record of searching one particular trip. Read
+    against a trip that has since been edited it silently stops making sense:
+    the Explore tab lists airports the run never asked about, and the
+    itineraries vanish because they no longer chain through the pools.
+
+    Bag estimate, preferred origins and the alert threshold are taken from the
+    live trip instead. Those are how a result is *read*, not what was searched,
+    and they have to stay adjustable on runs already on disk.
+    """
+    data = _read_json(directory / "scenario.json")
+    if data is None:
+        return live  # sweeps from before the snapshot existed
+    try:
+        searched = Scenario.from_dict(data)
+    except (ValueError, KeyError, TypeError):
+        return live
+    return replace(
+        searched,
+        bag_estimate=live.bag_estimate,
+        preferred_origins=live.preferred_origins,
+        alert_threshold=live.alert_threshold,
+    )
+
+
 def _sweep_dir_or_404(scenario_id: str, stamp: str) -> tuple[Scenario, Path]:
-    scenario = _scenario_or_404(scenario_id)
+    """The sweep's own trip and its directory. Callers wanting the trip as it
+    stands now - to compare against, or to edit - must load that separately."""
+    live = _scenario_or_404(scenario_id)
     directory = DATA_DIR / "sweeps" / scenario_id / _safe_stamp(stamp)
     if not directory.exists():
         raise HTTPException(404, f"No sweep {stamp!r} for {scenario_id!r}")
-    return scenario, directory
+    return _sweep_scenario(directory, live), directory
 
 
 @app.get("/api/sweeps/{scenario_id}/{stamp}/results")
@@ -378,6 +517,13 @@ def sweep_results(scenario_id: str, stamp: str, mode: str = "all", limit: int = 
         "stamp": stamp,
         "legs_found": result.legs_in,
         "bag_estimate": bag,
+        # How much of the plan this price was found by looking at. A sweep with
+        # holes in its date grid reports a cheapest total in the same words as a
+        # complete one, and the difference is whether a cheaper trip was ever
+        # looked at. None on sweeps committed before the figure was recorded,
+        # which must not read as "complete".
+        "coverage": _read_status(directory).get("coverage"),
+        "focus": _read_status(directory).get("focus"),
         # Absent until `python -m src.cli verify` has been run for this sweep.
         # None means "not checked", which must not read as "checked and fine".
         "verification": _read_json(directory / "verify.json"),
@@ -388,6 +534,28 @@ def sweep_results(scenario_id: str, stamp: str, mode: str = "all", limit: int = 
         ),
         "best_open_jaw": result.best_open_jaw.to_dict(bag) if result.best_open_jaw else None,
         "itineraries": [i.to_dict(bag) for i in itineraries[: min(max(limit, 1), 200)]],
+    }
+
+
+@app.get("/api/sweeps/{scenario_id}/{stamp}/explore")
+def sweep_explore(scenario_id: str, stamp: str) -> dict:
+    """Which airports of this trip are worth pricing properly.
+
+    Served for any sweep, not only an exploration one - a stopped deep sweep is
+    a perfectly good source of the same judgement, and refusing to summarise it
+    would throw away the hour it spent.
+    """
+    scenario, directory = _sweep_dir_or_404(scenario_id, stamp)
+    status = _read_status(directory)
+    return {
+        "stamp": stamp,
+        "mode": status.get("mode", "sweep"),
+        "state": status.get("state"),
+        # The trip as it stands now goes in only to be compared against, never
+        # to filter: the tab has to be able to say "this run never priced KTW".
+        **explore_report(
+            load_legs(directory), scenario, status, current=_scenario_or_404(scenario_id)
+        ),
     }
 
 
@@ -413,6 +581,10 @@ def history(scenario_id: str) -> list[dict]:
     # What the trip requires *now*, so a sweep taken under a narrower shape is
     # retired rather than plotted beside sweeps of the current one.
     required = planned_routes(scenario)
+    # Same idea along the date axis. A focused sweep prices a handful of
+    # departure dates, so its cheapest is the cheapest of those dates and not of
+    # the trip; charting it beside a broad sweep draws a step no fare made.
+    focus = _focus_of(scenario)
     series = []
     for directory in reversed(_sweep_dirs(scenario_id)):
         legs = load_legs(directory)
@@ -432,7 +604,9 @@ def history(scenario_id: str) -> list[dict]:
                 "legs_per_search": legs_per_search_of(status),
                 "routes_covered": covered,
                 "routes_planned": len(required),
-                "comparable": is_comparable(status, covered, len(required)),
+                "comparable": is_comparable(status, covered, len(required), focus),
+                "focus": status.get("focus"),
+                "coverage": status.get("coverage"),
             }
         )
     return series

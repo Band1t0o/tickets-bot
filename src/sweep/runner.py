@@ -17,13 +17,13 @@ import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 
 from ..models import Leg
 from ..scenario import Scenario
-from .planner import LegSearch, plan_searches
+from .planner import LegSearch, plan_exploration, plan_searches, shard_of
 
 # Politeness delay between searches on the same worker.
 #
@@ -40,6 +40,36 @@ from .planner import LegSearch, plan_searches
 # scheduled run is what should validate them - not more hammering.
 SEARCH_DELAY_S = 4.0
 DEFAULT_WORKERS = 2
+
+# "sweep" prices a trip; "explore" scouts which airports are worth pricing.
+MODES = ("sweep", "explore")
+
+# Times a worker will come back to a search that has not been answered.
+#
+# One retry was not enough to call a sweep complete: a search that timed out
+# twice, or raised anything other than a timeout, was simply lost - and a lost
+# search is a hole in the date grid that nothing downstream can see, because a
+# route that answered on other dates still looks perfectly healthy.
+#
+# Three, and each pass is smaller than the last, so the cost is bounded by what
+# is still failing rather than by the size of the sweep. The budget stop and the
+# circuit breaker end the passes early when the site is refusing outright.
+MAX_FILL_PASSES = 3
+
+# Consecutive timeouts that mean the site is refusing this client rather than
+# having one slow moment. Five, because a working sweep's failures are scattered
+# - the 10 Aug cloud run had none at all in 350 searches - while a throttled one
+# fails everything from the moment it starts.
+THROTTLE_STREAK = 5
+
+# How long to wait out a refusal, escalating. Backing off is the cheap move: a
+# 2-minute pause costs less than a single timed-out search, and the whole run is
+# abandoned only if the site is still refusing after the longest one.
+#
+# Sized against the measurement that prompted it: the 11 Aug local sweep spent
+# 4.5 hours to finish 245 of 615 searches with 125 timeouts, 93% of its worker
+# time waiting on nothing. With this it reaches the same verdict in ~25 minutes.
+BACKOFF_S = (120.0, 300.0, 900.0)
 
 ProgressFn = Callable[[int, int, str], None]
 
@@ -72,10 +102,22 @@ def legs_per_search_of(status: dict) -> float | None:
     return round(found / total, 2)
 
 
-def is_comparable(status: dict, routes_covered: int, routes_planned: int) -> bool:
+def focus_of(status: dict) -> list | None:
+    """The focus this sweep searched under, as `[start, end]`, or None.
+
+    Normalised to a list because it is compared across a JSON round trip, where
+    a tuple and a list are the same two strings.
+    """
+    focus = status.get("focus")
+    return list(focus) if focus else None
+
+
+def is_comparable(
+    status: dict, routes_covered: int, routes_planned: int, focus=None
+) -> bool:
     """Whether this sweep's best total may be plotted beside another's.
 
-    Two independent ways for a sweep to be incomparable, and both have happened:
+    Four independent ways for a sweep to be incomparable:
 
     - **Starved.** Enough searches failed or came back thin that the cheapest
       trip was simply never seen. `error_count` does not catch this; legs per
@@ -84,8 +126,23 @@ def is_comparable(status: dict, routes_covered: int, routes_planned: int) -> boo
       predates a widening of the trip and searched a smaller one. Measuring
       coverage against what the trip plans *now* handles both, and correctly
       retires old sweeps when the trip is edited.
+    - **Not a sweep at all.** An exploration pass covers every route and can
+      post a perfectly healthy legs-per-search while pricing three dates out of
+      seventy. Its cheapest total is a reconnaissance figure, and plotting it as
+      a price would put a spike in the chart that no fare ever made. Stopped
+      sweeps fall out through `state` for the same reason.
+    - **Focused differently.** A focused sweep prices a handful of departure
+      dates out of the window, so its cheapest is the cheapest *of those dates*
+      rather than of the trip. Plotting it beside a broad sweep draws a step no
+      fare ever made - the same mistake as charting an exploration pass, and
+      caught the same way. A sweep is only comparable with others carrying the
+      focus the trip has now.
     """
     if status.get("state") != "done":
+        return False
+    if status.get("mode") == "explore":
+        return False
+    if focus_of(status) != (list(focus) if focus else None):
         return False
     if not routes_planned or routes_covered < routes_planned:
         return False
@@ -106,15 +163,31 @@ class SweepResult:
     directory: Path
     total: int
     completed: int = 0
+    # Searches the site actually replied to, with offers or with its own "no
+    # flights" message. The figure `legs_found` and `error_count` between them
+    # could never give: a sweep that answered 460 of its 483 has 23 holes in the
+    # date grid, and no per-route number shows them, because the routes involved
+    # answered perfectly well on their other dates.
+    answered: int = 0
     legs: list[Leg] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     started_at: str = ""
     finished_at: str = ""
+    # True when the run ended because it was asked to, rather than because it
+    # ran out of searches.
+    stopped: bool = False
+    # True when it ended because the site kept refusing. Not the same as broken.
+    throttled: bool = False
     # Searches attempted and legs found, per "ORIGIN->DEST". A route that was
     # searched on many dates and yielded nothing on all of them is breakage,
     # not a quiet market - see routes_with_no_results.
     route_searches: dict[str, int] = field(default_factory=dict)
     route_legs: dict[str, int] = field(default_factory=dict)
+    # Failures per route. `errors` keeps only the last 20 messages, and a
+    # starved sweep produces hundreds - so without a count, a route that timed
+    # out on every attempt cannot be told from one the site answered with an
+    # empty page. Those two mean opposite things: broken, and no inventory.
+    route_errors: dict[str, int] = field(default_factory=dict)
 
     @property
     def routes_with_no_results(self) -> list[str]:
@@ -141,6 +214,18 @@ class SweepResult:
         if not self.total:
             return 0.0
         return round(len(self.legs) / self.total, 2)
+
+    @property
+    def coverage(self) -> float:
+        """Share of the planned searches that came back with an answer.
+
+        This is what "complete" means, and the only figure that can be checked
+        afterwards. `state: done` says the run finished; it has never said the
+        run asked everything it set out to ask.
+        """
+        if not self.total:
+            return 0.0
+        return round(self.answered / self.total, 4)
 
     @property
     def route_coverage(self) -> float:
@@ -171,31 +256,63 @@ class SweepResult:
         return len(self.errors) <= self.total / 2
 
 
-def _search_with_retry(provider, page, search: LegSearch, adults: int, delay_s: float):
-    """One retry on timeout before giving up on a search.
+def _search(provider, page, search: LegSearch, adults: int):
+    return provider.search_leg(
+        page,
+        search.origin,
+        search.destination,
+        search.depart_date,
+        search.ret_date,
+        adults,
+    )
 
-    Four workers hammering the site makes it noticeably slower to render, which
-    is the most likely reason a search times out. A single retry recovers those
-    without masking a genuinely broken selector, which fails both times.
+
+class _Breaker:
+    """Decides when the site is refusing, and how long to wait it out.
+
+    Shared by every worker, because a throttle is applied to the client and not
+    to a thread: two workers each failing three times in a row is the same wall
+    as one worker failing six times.
+
+    The distinction it exists to draw is between a bad patch and a refusal. A
+    working sweep's timeouts are scattered - the clean cloud run of 11 Aug had
+    none at all in 350 searches - so a *streak* is the signal, and a single
+    success anywhere resets it. Only still failing after the longest pause is
+    taken as evidence to abandon the run.
     """
-    from ..providers.pelikan import SearchTimeout
 
-    for attempt in (1, 2):
-        try:
-            return provider.search_leg(
-                page,
-                search.origin,
-                search.destination,
-                search.depart_date,
-                search.ret_date,
-                adults,
-            )
-        except SearchTimeout:
-            if attempt == 2:
-                raise
-            if delay_s:
-                time.sleep(delay_s)
-    return []
+    def __init__(self, backoff_s, on_backoff=None):
+        self._backoff = list(backoff_s)
+        self._on_backoff = on_backoff
+        self._lock = threading.Lock()
+        self._streak = 0
+        self._level = 0
+        self.tripped = False
+
+    def record_success(self) -> None:
+        with self._lock:
+            self._streak = 0
+            self._level = 0
+
+    def record_timeout(self) -> float | None:
+        """Seconds every worker should now pause for, or None to carry on."""
+        with self._lock:
+            self._streak += 1
+            if self._streak < THROTTLE_STREAK:
+                return None
+            self._streak = 0
+            if self._level >= len(self._backoff):
+                self.tripped = True
+                return None
+            wait = self._backoff[self._level]
+            self._level += 1
+            return wait
+
+    def wait(self, seconds: float) -> None:
+        if self._on_backoff:
+            self._on_backoff(seconds)
+        if seconds:
+            time.sleep(seconds)
 
 
 def _chunk(searches: list[LegSearch], workers: int) -> list[list[LegSearch]]:
@@ -229,8 +346,47 @@ def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
+def _new_sweep_directory(root: Path) -> Path:
+    """A directory no other sweep is using, named for the current second.
+
+    Two runs of one trip starting within the same second used to land in the
+    same directory. That was survivable while legs were written once at the end
+    - the loser's file was simply replaced - but now that they are appended as
+    they are found, the second run truncates a file the first is still writing.
+
+    The next free second is taken rather than a suffix, because the stamp is
+    also a URL segment: `src/web/app.py` validates it against a strict
+    `YYYY-MM-DDTHH-MM-SSZ` pattern, so a sweep named anything else could be run
+    but never opened.
+    """
+    started = datetime.now(UTC)
+    for offset in range(60):
+        stamp = (started + timedelta(seconds=offset)).strftime("%Y-%m-%dT%H-%M-%SZ")
+        directory = root / stamp
+        try:
+            directory.mkdir(parents=True, exist_ok=False)
+            return directory
+        except FileExistsError:
+            continue
+    raise RuntimeError(f"no free sweep directory under {root} within a minute of {started}")
+
+
 def _write_status(directory: Path, payload: dict) -> None:
     (directory / "status.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _write_scenario(directory: Path, scenario: Scenario) -> None:
+    """Record the trip this sweep is about to search.
+
+    Legs alone do not say what was asked for, so a trip edited afterwards used
+    to be read back over old results - listing airports that were never
+    searched and silently discarding the ones that were. Written before the
+    first search, because a run that is stopped or killed is exactly the one
+    whose contents most need explaining.
+    """
+    (directory / "scenario.json").write_text(
+        json.dumps(scenario.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8"
+    )
 
 
 def run_sweep(
@@ -241,8 +397,35 @@ def run_sweep(
     on_progress: ProgressFn | None = None,
     depth: str | None = None,
     delay_s: float = SEARCH_DELAY_S,
+    mode: str = "sweep",
+    stop: threading.Event | None = None,
+    backoff_s=BACKOFF_S,
+    on_backoff: Callable[[float], None] | None = None,
+    shard: tuple[int, int] | None = None,
 ) -> SweepResult:
-    """Run every search `scenario` implies and persist the legs found."""
+    """Run every search `scenario` implies and persist the legs found.
+
+    `mode="explore"` runs the reconnaissance plan instead: every route on a
+    handful of dates, to find out which airports are worth pricing at all.
+    Deliberately a separate argument from `depth` rather than a fourth depth -
+    depth is saved on the scenario and read by the nightly cloud workflow, so an
+    "explore" depth could be persisted and quietly turn the daily sweep into a
+    probe for good.
+
+    `stop`, once set, ends the run after the searches already in flight. The
+    sweep keeps everything it found and records itself as stopped.
+
+    `backoff_s` is how long to wait out a run of timeouts before giving up on
+    the site entirely; tests pass zeroes so they need not sleep.
+
+    `shard=(index, count)` runs only this machine's share of the plan, so a deep
+    sweep can be split across several cloud runners and merged afterwards. Each
+    runner is a separate VM with its own address, so three of them at the same
+    two workers and four-second delay put exactly the per-address load that has
+    measured zero timeouts - while finishing in a third of the wall clock.
+    """
+    if mode not in MODES:
+        raise ValueError(f"mode must be one of {MODES}, got {mode!r}")
     if depth:
         from dataclasses import replace
 
@@ -254,10 +437,12 @@ def run_sweep(
 
         provider = PelikanProvider()
 
-    searches = plan_searches(scenario)
-    stamp = datetime.now(UTC).strftime("%Y-%m-%dT%H-%M-%SZ")
-    directory = Path(data_dir) / "sweeps" / scenario.id / stamp
-    directory.mkdir(parents=True, exist_ok=True)
+    searches = plan_exploration(scenario) if mode == "explore" else plan_searches(scenario)
+    planned = len(searches)
+    if shard is not None:
+        searches = shard_of(searches, *shard)
+    directory = _new_sweep_directory(Path(data_dir) / "sweeps" / scenario.id)
+    _write_scenario(directory, scenario)
 
     result = SweepResult(
         scenario_id=scenario.id,
@@ -267,11 +452,13 @@ def run_sweep(
     )
 
     lock = threading.Lock()
+    breaker = _Breaker(backoff_s, on_backoff)
 
     def status_payload(state: str, current: str = "") -> dict:
         return {
             "scenario_id": scenario.id,
             "state": state,
+            "mode": mode,
             "total": result.total,
             "completed": result.completed,
             "current": current,
@@ -285,6 +472,29 @@ def run_sweep(
             "routes_planned": len(result.route_searches),
             "routes_with_legs": sum(1 for r in result.route_searches if result.route_legs.get(r)),
             "routes_with_no_results": result.routes_with_no_results,
+            # Attempts and offers per route. `viability.route_stats` has always
+            # read these two out of status.json; until they were written here it
+            # counted zero attempts for every route, so no route could ever be
+            # judged dead however many times it came back empty. The exploration
+            # report needs them for the same distinction: asked and answered
+            # with nothing is a finding, never asked is not.
+            "route_searches": dict(result.route_searches),
+            "route_legs": dict(result.route_legs),
+            "route_errors": dict(result.route_errors),
+            # What "complete" means, and the figure to read before any price.
+            # `planned` is the whole trip's plan even when this process ran one
+            # shard of it, so a shard's status says what it is a share of.
+            "answered": result.answered,
+            "planned": planned,
+            "coverage": result.coverage,
+            "shard": list(shard) if shard is not None else None,
+            # The focus this sweep searched under, so a narrowed run is never
+            # charted as though it had priced the whole window.
+            "focus": (
+                [scenario.focus_start.isoformat(), scenario.focus_end.isoformat()]
+                if scenario.focus_start and scenario.focus_end
+                else None
+            ),
             "started_at": result.started_at,
             "finished_at": result.finished_at,
             "depth": scenario.depth,
@@ -296,6 +506,9 @@ def run_sweep(
     # launched per worker rather than per search.
     chunks = _chunk(searches, workers)
 
+    log = _JsonlLog(directory / "legs.jsonl")
+    asked = _JsonlLog(directory / "searches.jsonl")
+
     def record(search: LegSearch, legs: list[Leg], error: str | None) -> None:
         label = f"{search.origin}→{search.destination} {search.depart_date}"
         route = f"{search.origin}->{search.destination}"
@@ -303,11 +516,26 @@ def run_sweep(
             result.completed += 1
             result.route_searches[route] = result.route_searches.get(route, 0) + 1
             result.route_legs.setdefault(route, 0)
+            result.route_errors.setdefault(route, 0)
             if error:
                 result.errors.append(f"{label}: {error}")
+                result.route_errors[route] += 1
             else:
+                result.answered += 1
                 result.legs.extend(legs)
                 result.route_legs[route] += len(legs)
+                log.add([leg.to_dict() for leg in legs])
+            # One line per search, whatever the outcome. Legs alone cannot say
+            # which dates were asked about, so a hole in the grid was
+            # indistinguishable from a date the site had nothing on.
+            asked.add([{
+                "origin": search.origin,
+                "destination": search.destination,
+                "depart_date": search.depart_date.isoformat(),
+                "leg_index": search.leg_index,
+                "answered": error is None,
+                "legs": 0 if error else len(legs),
+            }])
             if result.completed % 5 == 0 or result.completed == result.total:
                 _write_status(directory, status_payload("running", label))
             if on_progress:
@@ -316,29 +544,117 @@ def run_sweep(
     def worker(chunk: list[LegSearch]) -> None:
         if not chunk:
             return
-        with _browser_page(provider) as page:
-            for search in chunk:
+        from ..providers.pelikan import SearchTimeout
+
+        def run_pass(searches: list[LegSearch], last: bool) -> list[LegSearch]:
+            """Work through `searches`; return the ones still unanswered.
+
+            A failure is only *recorded* on the last pass. Until then the search
+            is simply still outstanding, so `completed` counts each search once
+            and `route_errors` ends up counting searches that were never
+            answered at all - which is exactly what the exploration report needs
+            to tell "asked and answered with nothing" from "never asked".
+
+            Retrying on the spot, which is what this used to do, doubles the load
+            at the one moment the site is least willing and doubles what a
+            failure costs from ~124s to ~248s. A transient timeout still
+            recovers; it just waits until the rest of the chunk is done.
+            """
+            outstanding: list[LegSearch] = []
+            for index, search in enumerate(searches):
+                # Checked between searches rather than during one: a search
+                # already in flight has to finish or time out, which is why the
+                # UI says "stopping" rather than pretending this is instant.
+                if (stop is not None and stop.is_set()) or breaker.tripped:
+                    # Everything not yet attempted stays unanswered, and says so
+                    # by being absent from searches.jsonl. Coverage is what
+                    # reports the shortfall.
+                    return outstanding + list(searches[index:])
                 try:
-                    legs = _search_with_retry(provider, page, search, scenario.adults, delay_s)
-                    record(search, legs, None)
+                    legs = _search(provider, page, search, scenario.adults)
+                except SearchTimeout as exc:
+                    wait = breaker.record_timeout()
+                    outstanding.append(search)
+                    if last:
+                        record(search, [], str(exc))
+                    if wait is not None:
+                        breaker.wait(wait)
                 except Exception as exc:  # one bad search must not kill the sweep
-                    record(search, [], str(exc))
+                    # Retried like a timeout. These used to be recorded and
+                    # dropped on the first attempt, so a single transient
+                    # navigation error left a permanent hole in the grid.
+                    outstanding.append(search)
+                    if last:
+                        record(search, [], str(exc))
+                else:
+                    breaker.record_success()
+                    record(search, legs, None)
                 if delay_s:
                     time.sleep(delay_s)
+            return outstanding
 
-    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-        list(pool.map(worker, chunks))
+        with _browser_page(provider) as page:
+            pending = chunk
+            for attempt in range(1, MAX_FILL_PASSES + 1):
+                pending = run_pass(pending, last=attempt == MAX_FILL_PASSES)
+                if not pending or (stop is not None and stop.is_set()) or breaker.tripped:
+                    break
 
+    try:
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+            list(pool.map(worker, chunks))
+    finally:
+        log.close()
+        asked.close()
+
+    result.throttled = breaker.tripped
+    result.stopped = stop is not None and stop.is_set()
     result.finished_at = _now()
-    _write_legs(directory, result.legs)
-    _write_status(directory, status_payload("done" if result.is_healthy else "unhealthy"))
+    if result.throttled:
+        # Reported ahead of "stopped" even when both are true, because it is the
+        # finding: the run ended because the site refused, and knowing that is
+        # what stops you debugging a scraper that is working. Distinct from
+        # "unhealthy" for the same reason - a throttled sweep needs running
+        # later or from somewhere else, not a fix.
+        state = "throttled"
+    elif result.stopped:
+        # Not "unhealthy": a sweep you stopped at search 40 of 600 is not
+        # broken, and calling it broken would hide the real thing that state is
+        # for. It is simply incomplete, and `is_comparable` already refuses
+        # anything that is not "done".
+        state = "stopped"
+    else:
+        state = "done" if result.is_healthy else "unhealthy"
+    _write_status(directory, status_payload(state))
     return result
 
 
-def _write_legs(directory: Path, legs: list[Leg]) -> None:
-    with (directory / "legs.jsonl").open("w", encoding="utf-8") as handle:
-        for leg in legs:
-            handle.write(json.dumps(leg.to_dict(), ensure_ascii=False) + "\n")
+class _JsonlLog:
+    """Appends rows to a `.jsonl` file as they are produced.
+
+    Legs used to be a single write at the end of the run. A deep sweep takes
+    around two hours, so anything that interrupted it - a stop, a crash, a
+    restart to pick up new code - threw away every flight it had found. Callers
+    hold the result lock, so no extra synchronisation is needed here.
+
+    Two files are written this way now. `legs.jsonl` is what was found;
+    `searches.jsonl` is what was asked, which is the only record that can later
+    prove the sweep asked everything it planned to.
+    """
+
+    def __init__(self, path: Path):
+        self._handle = path.open("w", encoding="utf-8")
+
+    def add(self, rows: list[dict]) -> None:
+        for row in rows:
+            self._handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+        # Flushed per search, not per row: the point is that a reader looking at
+        # a running sweep sees complete lines, and that a kill -9 costs at most
+        # the search in flight.
+        self._handle.flush()
+
+    def close(self) -> None:
+        self._handle.close()
 
 
 def _stamp_to_iso(name: str) -> str | None:
@@ -426,3 +742,156 @@ class _browser_page:
                 print(f"[sweep] browser teardown: {type(exc).__name__}: {exc}")
         self._context = self._browser = self._pw = None
         return False
+
+
+# ------------------------------------------------------------- merging shards
+#
+# A deep sweep is split across several cloud runners so it finishes inside its
+# budget without asking pelikan.cz for anything faster than the rate that has
+# measured zero timeouts. What comes back is N part-sweeps, and everything
+# downstream - the combiner, the charts, the report, `is_comparable` - reads one
+# sweep directory. So the shards are stitched into one before anything sees them.
+
+
+class ShardMismatch(RuntimeError):
+    """The shards did not search the same trip, so their legs cannot be summed.
+
+    Possible whenever a run is dispatched while `scenarios/` is being edited: two
+    runners check out different commits and the merge silently produces a sweep
+    of a trip that never existed. Refusing is the only honest answer - this is
+    the same failure as reading a sweep back against a trip edited since, which
+    twice presented a probe of Prague and Frankfurt as the answer for Katowice.
+    """
+
+
+def _sum_into(target: dict, source: dict) -> None:
+    for key, value in (source or {}).items():
+        target[key] = target.get(key, 0) + value
+
+
+# Worst first. A merged sweep is only as good as its unhappiest shard: one
+# runner that was throttled means the merged result has holes, and calling the
+# whole thing "done" because two shards finished is how a starved sweep gets
+# charted as a price.
+_STATE_ORDER = ("unhealthy", "throttled", "stopped", "running", "unknown", "done")
+
+
+def merge_shards(shard_dirs: list[Path], destination: Path) -> dict:
+    """Stitch shard directories into one sweep directory. Returns its status.
+
+    Shards are written by separate runners and carry a `scenario.json` snapshot
+    each; they must agree, or the merge refuses.
+    """
+    shard_dirs = [Path(d) for d in shard_dirs]
+    if not shard_dirs:
+        raise ShardMismatch("no shards to merge")
+
+    snapshots = {}
+    for directory in shard_dirs:
+        snapshot = (directory / "scenario.json").read_text(encoding="utf-8")
+        snapshots.setdefault(json.dumps(json.loads(snapshot), sort_keys=True), []).append(
+            directory.name
+        )
+    if len(snapshots) > 1:
+        raise ShardMismatch(
+            "the shards searched different trips and cannot be merged: "
+            + "; ".join(", ".join(names) for names in snapshots.values())
+        )
+
+    destination.mkdir(parents=True, exist_ok=True)
+    (destination / "scenario.json").write_text(
+        (shard_dirs[0] / "scenario.json").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+
+    for name in ("legs.jsonl", "searches.jsonl"):
+        lines: list[str] = []
+        for directory in shard_dirs:
+            path = directory / name
+            if path.exists():
+                lines += [ln for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        (destination / name).write_text(
+            "".join(line + "\n" for line in lines), encoding="utf-8"
+        )
+
+    statuses = [_read_status_file(d) for d in shard_dirs]
+    merged = _merged_status(statuses, destination)
+    _write_status(destination, merged)
+    return merged
+
+
+def _read_status_file(directory: Path) -> dict:
+    try:
+        return json.loads((directory / "status.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        # A shard whose job died before writing one is not a reason to lose the
+        # others, but it must not read as a clean shard either.
+        return {"state": "unknown"}
+
+
+def _merged_status(statuses: list[dict], destination: Path) -> dict:
+    route_searches: dict[str, int] = {}
+    route_legs: dict[str, int] = {}
+    route_errors: dict[str, int] = {}
+    errors: list[str] = []
+    for status in statuses:
+        _sum_into(route_searches, status.get("route_searches"))
+        _sum_into(route_legs, status.get("route_legs"))
+        _sum_into(route_errors, status.get("route_errors"))
+        errors += status.get("errors") or []
+
+    first = statuses[0]
+    # `planned` is the whole trip's plan, which every shard records identically;
+    # `total` sums what the shards were each handed. They agree when no shard was
+    # lost, and the difference is itself the finding when one was.
+    planned = max((s.get("planned") or 0) for s in statuses) or sum(
+        s.get("total") or 0 for s in statuses
+    )
+    total = sum(s.get("total") or 0 for s in statuses)
+    completed = sum(s.get("completed") or 0 for s in statuses)
+    answered = sum(s.get("answered") or 0 for s in statuses)
+    legs = sum(
+        1
+        for line in (destination / "legs.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    )
+
+    return {
+        "scenario_id": first.get("scenario_id"),
+        "state": min(
+            (s.get("state", "unknown") for s in statuses),
+            key=lambda name: _STATE_ORDER.index(name) if name in _STATE_ORDER else 0,
+        ),
+        "mode": first.get("mode", "sweep"),
+        "total": total,
+        "completed": completed,
+        "current": "",
+        "legs_found": legs,
+        "errors": errors[-20:],
+        "error_count": sum(s.get("error_count") or 0 for s in statuses),
+        "legs_per_search": round(legs / total, 2) if total else 0.0,
+        "route_coverage": (
+            round(sum(1 for r in route_searches if route_legs.get(r)) / len(route_searches), 3)
+            if route_searches
+            else 0.0
+        ),
+        "routes_planned": len(route_searches),
+        "routes_with_legs": sum(1 for r in route_searches if route_legs.get(r)),
+        "routes_with_no_results": sorted(
+            route for route, tries in route_searches.items() if tries and not route_legs.get(route)
+        ),
+        "route_searches": route_searches,
+        "route_legs": route_legs,
+        "route_errors": route_errors,
+        "answered": answered,
+        "planned": planned,
+        "coverage": round(answered / planned, 4) if planned else 0.0,
+        # Merged, so the shard field is spent. What it becomes is the roll call:
+        # which shards were merged, so a run that lost one says so rather than
+        # reporting a smaller sweep that looks complete.
+        "shard": None,
+        "shards": [s.get("shard") for s in statuses],
+        "focus": first.get("focus"),
+        "started_at": min((s.get("started_at") or "" for s in statuses), default=""),
+        "finished_at": max((s.get("finished_at") or "" for s in statuses), default=""),
+        "depth": first.get("depth"),
+    }

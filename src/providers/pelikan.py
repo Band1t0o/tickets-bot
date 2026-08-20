@@ -11,7 +11,9 @@ searches by the sweep runner.
 from __future__ import annotations
 
 import re
+import statistics
 import time
+from collections import deque
 from datetime import UTC, date, datetime
 
 from bs4 import BeautifulSoup
@@ -29,6 +31,32 @@ CARD_SELECTOR = DEFAULTS["PELIKAN"].selectors["card"]
 RESULT_TIMEOUT_S = DEFAULTS["PELIKAN"].result_timeout_s
 POLL_INTERVAL_S = 5
 NO_RESULTS_MARKER = DEFAULTS["PELIKAN"].no_results_marker
+
+# How long to keep waiting for results, decided from how fast this site has
+# actually been answering rather than from a fixed ceiling.
+#
+# The ceiling was costing whole afternoons. A timed-out search takes the full
+# `result_timeout_s`, and the local sweep of 11 Aug spent 93% of its worker time
+# on searches that never rendered. But it cannot simply be lowered: the clean
+# cloud run of the same trip rendered in ~25-30s, so a flat 45s cutoff would
+# have started failing perfectly good searches.
+#
+# So: wait three times as long as this site has recently needed, never less than
+# a minute and never more than the configured timeout. Once the site is
+# answering in 25s, a page still blank at 75s is not going to arrive.
+ADAPTIVE_MULTIPLE = 3.0
+# The floor was 60, and 60 is what every failure of the 12 Aug probe reported:
+# six searches killed at exactly "no results and no 'no flights' message within
+# 60s", four of them the same far-out return date. The adaptive rule is meant to
+# stop a *dead* page costing two minutes, not to fail a page that is merely slow
+# because the date is eighteen months out and thin. 90 still cuts a dead search
+# to three quarters of the ceiling, while leaving a slow one room to arrive.
+MIN_WAIT_S = 90
+# Below this many samples there is no baseline worth trusting, and a cold site
+# genuinely can be slow, so early searches get the full timeout.
+MIN_SAMPLES_FOR_ADAPTIVE = 10
+# Rolling, because what matters is how the site is behaving now, not at 02:00.
+RENDER_SAMPLE_SIZE = 40
 
 
 class SearchTimeout(RuntimeError):
@@ -233,6 +261,26 @@ class PelikanProvider(BaseProvider):
         # hundreds of searches, and re-reading the file for each would let an
         # edit take effect halfway through and make the results incomparable.
         self.source = source or load_source(self.NAME, data_dir)
+        # Shared across worker threads on purpose - they are all measuring the
+        # same site. `deque` because appends from several threads are safe and
+        # `maxlen` gives the rolling window for free.
+        self.render_times: deque[float] = deque(maxlen=RENDER_SAMPLE_SIZE)
+
+    def record_render_time(self, seconds: float) -> None:
+        self.render_times.append(seconds)
+
+    def wait_budget(self) -> float:
+        """Seconds to wait for results before calling this search failed."""
+        samples = list(self.render_times)
+        if len(samples) < MIN_SAMPLES_FOR_ADAPTIVE:
+            return float(self.source.result_timeout_s)
+        typical = statistics.median(samples)
+        return float(
+            min(
+                self.source.result_timeout_s,
+                max(MIN_WAIT_S, ADAPTIVE_MULTIPLE * typical),
+            )
+        )
 
     def search_leg(
         self,
@@ -255,16 +303,20 @@ class PelikanProvider(BaseProvider):
         # Race the offer cards against the site's explicit "no flights" message.
         # Whichever appears first is the answer; if neither does, the search
         # failed and must say so rather than masquerading as an empty route.
-        for _ in range(0, source.result_timeout_s, POLL_INTERVAL_S):
+        budget = self.wait_budget()
+        for poll in range(1, max(1, int(budget // POLL_INTERVAL_S)) + 1):
             time.sleep(POLL_INTERVAL_S)
             if page.locator(source.selectors["card"]).count():
+                # Coarse to the poll interval, which is fine for a figure only
+                # ever used as a multiple of itself.
+                self.record_render_time(poll * POLL_INTERVAL_S)
                 break
             if source.no_results_marker in page.inner_text("body"):
                 return []
         else:
             raise SearchTimeout(
                 f"{origin}->{destination} {depart}: no results and no "
-                f"'no flights' message within {source.result_timeout_s}s"
+                f"'no flights' message within {int(budget)}s"
             )
 
         # Let the last few cards settle before snapshotting the DOM.

@@ -140,12 +140,19 @@ def build_price_embed(
     picks: list,
     previous_best: float | None = None,
     bag_estimate: float = 0.0,
+    coverage: float | None = None,
 ) -> dict | None:
     """One embed carrying every pick worth reporting, or None if there are none.
 
     Picks replaced a fixed "same airport vs open jaw" pair, which answered a
     question about trip shape when the one actually being asked was where you
     would rather fly from.
+
+    `coverage` is stated whenever the sweep behind these prices did not answer
+    everything it planned to. A price you are about to book on has to come with
+    how much of the trip was actually priced to find it - a sweep with holes in
+    its date grid reports a cheapest total in exactly the same words as a
+    complete one.
     """
     if not picks:
         return None
@@ -158,6 +165,11 @@ def build_price_embed(
         delta = previous_best - headline
         if delta > 0:
             description += f" — down {delta:,.0f} from {previous_best:,.0f}"
+    if coverage is not None and coverage < 1.0:
+        description += (
+            f"\n⚠️ Only **{coverage:.0%}** of the planned searches were answered, "
+            "so a cheaper trip may simply not have been seen."
+        )
 
     return {
         "title": f"✈️ {scenario_name}",
@@ -301,7 +313,9 @@ def notify_sweep(scenario, result, webhook_url: str | None = None) -> bool:
         return False
 
     previous_best = load_best(state_dir, "cheapest")
-    embed = build_price_embed(scenario.name, reportable, previous_best, bag)
+    embed = build_price_embed(
+        scenario.name, reportable, previous_best, bag, getattr(result, "coverage", None)
+    )
     sent = post(webhook_url, [embed])
     if sent:
         for pick in reportable:

@@ -137,6 +137,88 @@ def test_timeout_raises_instead_of_returning_empty(monkeypatch):
         )
 
 
+# ------------------------------------------------------- how long to wait
+#
+# A timed-out search costs 120s, and the 11 Aug local sweep spent 93% of its
+# worker time on them. But the cutoff cannot simply be lowered: the clean cloud
+# run rendered in ~25-30s, so a flat 45s would start failing good searches. It
+# is set from what this site has actually been doing in the last few minutes.
+
+
+def _slow_page(cards=0):
+    return _StubPage(cards=cards, body="still loading")
+
+
+def polls_before_timeout(monkeypatch, provider) -> int:
+    """How many 5s polls a hanging search is given before it is abandoned."""
+    from src.providers import pelikan as mod
+
+    sleeps = []
+    monkeypatch.setattr(mod.time, "sleep", lambda s: sleeps.append(s))
+    with pytest.raises(mod.SearchTimeout):
+        provider.search_leg(_slow_page(), "MNL", "VIE", _DATE)
+    return sum(1 for s in sleeps if s == mod.POLL_INTERVAL_S)
+
+
+def test_with_nothing_to_compare_against_a_search_waits_the_full_timeout(monkeypatch):
+    """The first searches of a run have no baseline, so they get the benefit of
+    the doubt - a cold site genuinely can be slow."""
+    from src.providers import pelikan as mod
+
+    provider = mod.PelikanProvider()
+    assert polls_before_timeout(monkeypatch, provider) == 120 // mod.POLL_INTERVAL_S
+
+
+def test_once_the_site_is_known_to_be_quick_a_hanging_search_is_abandoned_early(monkeypatch):
+    """Waiting 120s for a page when everything else answered in 25 learns
+    nothing it did not know at 75."""
+    from src.providers import pelikan as mod
+
+    provider = mod.PelikanProvider()
+    for _ in range(mod.MIN_SAMPLES_FOR_ADAPTIVE):
+        provider.record_render_time(25.0)
+    # 3 x 25s is 75, under the floor, so the floor is what applies - and the
+    # point of the test survives it: a hanging search is still abandoned well
+    # inside the configured timeout rather than costing the full two minutes.
+    # The floor moved from 60 to 90 because 60 was failing slow-but-real
+    # searches: every error of the 12 Aug probe read "within 60s", four of them
+    # on the same far-out return date.
+    polls = polls_before_timeout(monkeypatch, provider)
+    assert polls * mod.POLL_INTERVAL_S == mod.MIN_WAIT_S
+    assert polls < mod.DEFAULTS["PELIKAN"].result_timeout_s // mod.POLL_INTERVAL_S
+
+
+def test_the_cutoff_never_falls_below_a_floor(monkeypatch):
+    """Three fast searches in a row must not set a cutoff so tight that the
+    next slightly slower one is called a failure."""
+    from src.providers import pelikan as mod
+
+    provider = mod.PelikanProvider()
+    for _ in range(mod.MIN_SAMPLES_FOR_ADAPTIVE):
+        provider.record_render_time(5.0)
+    assert polls_before_timeout(monkeypatch, provider) * mod.POLL_INTERVAL_S == mod.MIN_WAIT_S
+
+
+def test_the_cutoff_never_exceeds_the_configured_timeout(monkeypatch):
+    from src.providers import pelikan as mod
+
+    provider = mod.PelikanProvider()
+    for _ in range(mod.MIN_SAMPLES_FOR_ADAPTIVE):
+        provider.record_render_time(100.0)
+    assert polls_before_timeout(monkeypatch, provider) == 120 // mod.POLL_INTERVAL_S
+
+
+def test_a_successful_search_records_how_long_it_took(monkeypatch):
+    """The samples have to come from somewhere, and the only honest source is
+    searches that actually rendered."""
+    from src.providers import pelikan as mod
+
+    monkeypatch.setattr(mod.time, "sleep", lambda _s: None)
+    provider = mod.PelikanProvider()
+    provider.search_leg(_StubPage(cards=3), "PRG", "NRT", _DATE)
+    assert provider.render_times, "a search that rendered recorded nothing"
+
+
 def test_genuine_no_results_page_returns_empty_list(monkeypatch):
     # A route the site really has no inventory for (verified live with BRQ->NRT)
     # renders this message. That is data, not breakage.
