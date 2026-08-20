@@ -430,6 +430,22 @@ label.field > select { font-weight: 400; color: var(--color-formInputText); }
 
 .chart-wrap { position: relative; }
 
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--color-pageTextSubdued, var(--color-chartAxis));
+}
+.chart-legend__item { display: inline-flex; align-items: center; gap: 6px; }
+.chart-legend__swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  display: inline-block;
+}
+
 /* ------------------------------------------------------------ status strip */
 
 /* Mirrors Finance-planner's sidebar save-state readout: the thing you glance at
@@ -666,6 +682,9 @@ label.field > select { font-weight: 400; color: var(--color-formInputText); }
   font-weight: 600;
 }
 .stop__label:hover, .stop__label:focus { border-color: var(--color-border); }
+
+.stop__overland { margin-top: 10px; }
+.stop__overland input:disabled + span { opacity: 0.5; }
 
 .stop__stay { display: flex; gap: 6px; align-items: center; font-size: 13px; }
 .stop__stay input { width: 62px; }

@@ -2,11 +2,26 @@
  * Dependency-free inline-SVG line chart.
  *
  * Finance-planner uses recharts for this; hand-rolling it keeps a Node
- * toolchain out of a Python repo. Both charts here are single-series
- * change-over-time, so there is no legend: the panel title names the series.
+ * toolchain out of a Python repo.
  *
- * Colours come from the theme tokens (--color-chart1 for the series,
- * --color-chartGrid / --color-chartAxis for the frame), so the chart re-themes
+ * Two exports, because they answer different questions and share almost
+ * nothing but the helpers:
+ *
+ * - `lineChart` is one series against an index of evenly spaced labels. The
+ *   price-by-date and best-over-time charts are both that shape, and it has
+ *   no legend because the panel title names the series.
+ * - `multiLineChart` is several series against *time*. The watched days are
+ *   that shape: each is added at a different moment and has its own number of
+ *   observations, so an index axis would draw two candidates recorded hours
+ *   apart as though they had been measured together.
+ *
+ * They are deliberately not one function with a flag. Every part of the
+ * single-series one - the cheapest-point label, the tooltip, the picking band -
+ * assumes one value per x, and threading a series dimension through all of it
+ * would put the two working charts at risk to save a helper.
+ *
+ * Colours come from the theme tokens (--color-chart1..6 for series,
+ * --color-chartGrid / --color-chartAxis for the frame), so the charts re-theme
  * with the page instead of hard-coding hexes. Those hues were validated for
  * lightness band, chroma floor and 3:1 contrast against the surface in both
  * light and dark.
@@ -234,6 +249,205 @@ export function lineChart(points, opts = {}) {
     crosshair.setAttribute('visibility', 'hidden');
     tooltip.hidden = true;
   });
+
+  return wrap;
+}
+
+
+/* Series colours, in the order they are handed out. Six tokens exist and were
+   validated in both themes; a seventh series would wrap and two lines would
+   share a colour, which is why the API refuses a seventh watched day long
+   before it gets here. */
+const SERIES_COLORS = [
+  'var(--color-chart1)', 'var(--color-chart2)', 'var(--color-chart3)',
+  'var(--color-chart4)', 'var(--color-chart5)', 'var(--color-chart6)',
+];
+
+/**
+ * series: [{ name, points: [{ t: ISO string, value, muted? }] }]
+ * opts:   { height, width, valueSuffix, ariaLabel, emptyText }
+ *
+ * Shared y-axis across every series, because the whole reason these are on one
+ * chart is to be compared: per-series scaling would draw two candidates 200
+ * crowns apart as though they were identical, which is the opposite of what
+ * the panel is for.
+ *
+ * `muted` marks a point from a run the site refused part of. Drawn hollow and
+ * joined by a dashed segment, exactly as in `lineChart` - the gap in the record
+ * is worth seeing, but the number in it is not a measurement.
+ */
+export function multiLineChart(series, opts = {}) {
+  const wrap = document.createElement('div');
+  wrap.className = 'chart-wrap';
+
+  const drawable = (series || []).filter((s) => s.points && s.points.length);
+  if (!drawable.length) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = opts.emptyText || 'No observations yet.';
+    wrap.appendChild(empty);
+    return wrap;
+  }
+
+  const height = opts.height || 260;
+  const width = Math.max(opts.width || 420, 420);
+  const plotW = width - PAD.left - PAD.right;
+  const plotH = height - PAD.top - PAD.bottom;
+
+  const all = drawable.flatMap((s) => s.points);
+  const times = all.map((p) => new Date(p.t).getTime());
+  const tMin = Math.min(...times);
+  const tMax = Math.max(...times);
+  const values = all.map((p) => p.value);
+  const rawMin = Math.min(...values);
+  const rawMax = Math.max(...values);
+
+  // Same reasoning as the single-series chart: starting at zero spends the
+  // height on empty space and flattens the variation being looked for.
+  const span = rawMax - rawMin || Math.max(1, rawMax * 0.1);
+  const yMin = Math.max(0, rawMin - span * 0.15);
+  const yMax = rawMax + span * 0.15;
+
+  // A single observation, or several taken in the same minute, would divide by
+  // zero and put every point at the left edge; centre them instead.
+  const x = (t) => (tMax === tMin
+    ? PAD.left + plotW / 2
+    : PAD.left + ((new Date(t).getTime() - tMin) / (tMax - tMin)) * plotW);
+  const y = (v) => PAD.top + plotH - ((v - yMin) / (yMax - yMin)) * plotH;
+
+  const svg = svgEl('svg', {
+    viewBox: `0 0 ${width} ${height}`,
+    width,
+    height,
+    role: 'img',
+    'aria-label': opts.ariaLabel || 'Watched days over time',
+  });
+
+  for (const tick of niceTicks(yMin, yMax)) {
+    svg.appendChild(svgEl('line', {
+      x1: PAD.left, x2: width - PAD.right, y1: y(tick), y2: y(tick),
+      stroke: 'var(--color-chartGrid)', 'stroke-width': 1,
+    }));
+    const label = svgEl('text', {
+      x: PAD.left - 8, y: y(tick) + 4,
+      'text-anchor': 'end', 'font-size': 11, fill: 'var(--color-chartAxis)',
+    });
+    label.textContent = tick.toLocaleString();
+    svg.appendChild(label);
+  }
+
+  // Time axis: first and last observation only. Anything denser collides, and
+  // the exact moment of a mid-series point is what the tooltip is for.
+  [[tMin, 'start'], [tMax, 'end']].forEach(([stamp, anchor], index) => {
+    if (index === 1 && tMax === tMin) return;
+    const label = svgEl('text', {
+      x: index === 0 ? PAD.left : width - PAD.right,
+      y: height - 12, 'text-anchor': anchor,
+      'font-size': 11, fill: 'var(--color-chartAxis)',
+    });
+    label.textContent = new Date(stamp).toLocaleString(undefined, {
+      month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+    });
+    svg.appendChild(label);
+  });
+
+  drawable.forEach((entry, index) => {
+    const color = entry.color || SERIES_COLORS[index % SERIES_COLORS.length];
+    const points = [...entry.points].sort(
+      (a, b) => new Date(a.t).getTime() - new Date(b.t).getTime(),
+    );
+
+    for (let i = 1; i < points.length; i += 1) {
+      const uncertain = points[i - 1].muted || points[i].muted;
+      svg.appendChild(svgEl('path', {
+        d: `M${x(points[i - 1].t)},${y(points[i - 1].value)} L${x(points[i].t)},${y(points[i].value)}`,
+        fill: 'none', stroke: color,
+        'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round',
+        ...(uncertain ? { 'stroke-dasharray': '4 4', opacity: 0.45 } : {}),
+      }));
+    }
+
+    points.forEach((p) => {
+      svg.appendChild(svgEl('circle', {
+        cx: x(p.t), cy: y(p.value), r: 4,
+        fill: p.muted ? 'var(--color-panelBackground)' : color,
+        stroke: p.muted ? color : 'var(--color-panelBackground)',
+        'stroke-width': 2,
+        ...(p.muted ? { opacity: 0.6 } : {}),
+      }));
+    });
+
+    // The latest trustworthy value, labelled at the end of its own line. With
+    // several series there is no single "cheapest point" worth calling out, and
+    // labelling every point would be unreadable - but a line you cannot put a
+    // number to is a line you have to hover to use.
+    const trusted = points.filter((p) => !p.muted);
+    if (trusted.length) {
+      const last = trusted[trusted.length - 1];
+      const text = svgEl('text', {
+        x: Math.min(x(last.t) + 8, width - PAD.right),
+        y: y(last.value) + 4,
+        'text-anchor': x(last.t) > width - PAD.right - 40 ? 'end' : 'start',
+        'font-size': 11, 'font-weight': 600, fill: color,
+      });
+      text.textContent = `${last.value.toLocaleString()}${opts.valueSuffix || ''}`;
+      svg.appendChild(text);
+    }
+  });
+
+  wrap.appendChild(svg);
+
+  // Legend. `lineChart` needs none because its panel title names its one
+  // series; here the whole point is telling several apart.
+  const legend = document.createElement('div');
+  legend.className = 'chart-legend';
+  drawable.forEach((entry, index) => {
+    const item = document.createElement('span');
+    item.className = 'chart-legend__item';
+    const swatch = document.createElement('span');
+    swatch.className = 'chart-legend__swatch';
+    swatch.style.background = entry.color || SERIES_COLORS[index % SERIES_COLORS.length];
+    const name = document.createElement('span');
+    name.textContent = entry.name;
+    item.append(swatch, name);
+    legend.appendChild(item);
+  });
+  wrap.appendChild(legend);
+
+  const tooltip = document.createElement('div');
+  tooltip.className = 'chart__tooltip';
+  tooltip.hidden = true;
+  wrap.appendChild(tooltip);
+
+  // Nearest point across every series, so hovering between two lines names the
+  // one actually closest rather than whichever was drawn last.
+  svg.addEventListener('mousemove', (event) => {
+    const box = svg.getBoundingClientRect();
+    const scale = width / box.width;
+    const px = (event.clientX - box.left) * scale;
+    const py = (event.clientY - box.top) * scale;
+
+    let best = null;
+    let bestDist = Infinity;
+    drawable.forEach((entry, index) => {
+      entry.points.forEach((p) => {
+        const d = Math.hypot(x(p.t) - px, y(p.value) - py);
+        if (d < bestDist) { bestDist = d; best = { entry, point: p, index }; }
+      });
+    });
+    if (!best) return;
+
+    tooltip.hidden = false;
+    tooltip.innerHTML =
+      `<strong>${best.entry.name}</strong><br>` +
+      `${best.point.value.toLocaleString()}${opts.valueSuffix || ''}<br>` +
+      `<span class="muted">${new Date(best.point.t).toLocaleString()}</span>` +
+      (best.point.muted ? '<br><span class="muted">from a run that was refused part way</span>' : '');
+    tooltip.style.left = `${(x(best.point.t) / scale) + 12}px`;
+    tooltip.style.top = `${(y(best.point.value) / scale) - 8}px`;
+  });
+
+  svg.addEventListener('mouseleave', () => { tooltip.hidden = true; });
 
   return wrap;
 }

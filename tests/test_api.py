@@ -1364,3 +1364,125 @@ def test_saving_one_source_does_not_revert_another_to_its_defaults(client):
     on_disk = json.loads((data / "sources.json").read_text(encoding="utf-8"))
     assert set(on_disk) == {"PELIKAN", "LETUSKA", "SKYSCANNER"}
     assert on_disk["LETUSKA"]["role"] == "check"
+
+
+# ---------------------------------------------------------------- the watch
+#
+# Picking days to watch, seeing how they have moved, and the guard that keeps
+# the plan inside what pelikan.cz will answer.
+
+
+def test_candidates_offer_the_cheapest_trip_per_departure_date(client):
+    """The Watch tab's source list: what the last sweep found, day by day."""
+    api, data = client
+    stamp = seed_sweep(data)
+    body = api.get(f"/api/sweeps/jp-ph/{stamp}/candidates").json()
+
+    assert body["candidates"][0]["depart_date"] == "2027-01-10"
+    # The whole point of the endpoint: the leg dates, so a pick can be pinned.
+    assert body["candidates"][0]["depart_dates"] == ["2027-01-10", "2027-01-20", "2027-01-30"]
+    assert body["candidates"][0]["total"] == 27000
+
+
+def test_a_trip_starts_out_watching_nothing(client):
+    api, _ = client
+    body = api.get("/api/watch/jp-ph").json()
+    assert body["candidates"] == []
+    assert body["searches"] == 0
+
+
+def test_adding_a_day_writes_it_to_the_trip(client):
+    api, _ = client
+    response = api.post(
+        "/api/watch/jp-ph",
+        json={"depart_dates": ["2027-01-10", "2027-01-20", "2027-01-30"], "added_price": 27000},
+    )
+    assert response.status_code == 201
+    trip = api.get("/api/scenarios/jp-ph").json()
+    assert trip["watches"][0]["depart_dates"] == ["2027-01-10", "2027-01-20", "2027-01-30"]
+    assert trip["watches"][0]["added_price"] == 27000
+    assert trip["watches"][0]["added_at"]
+
+
+def test_adding_a_day_reports_what_watching_it_will_cost(client):
+    api, _ = client
+    body = api.post(
+        "/api/watch/jp-ph",
+        json={"depart_dates": ["2027-01-10", "2027-01-20", "2027-01-30"]},
+    ).json()
+    # 2 origins x 1 Japanese airport, 1 x 1, 1 x 2 = 2 + 1 + 2 per candidate.
+    assert body["searches"] == 5
+    assert body["minutes"] > 0
+
+
+def test_a_day_that_could_never_chain_is_refused_with_a_reason(client):
+    api, _ = client
+    response = api.post(
+        "/api/watch/jp-ph",
+        json={"depart_dates": ["2027-01-10", "2027-01-14", "2027-01-24"]},
+    )
+    assert response.status_code == 400
+    assert "Japan" in response.json()["detail"]
+
+
+def test_watching_more_than_the_site_will_answer_is_refused(client, monkeypatch):
+    """The cap is on searches, not on days.
+
+    A trip with twenty routes reaches the cliff in three candidates where a
+    two-route one would not reach it in ten, and running past it is silent:
+    pelikan.cz simply stops answering part way and the run reports a price
+    found by looking at half of what it planned to.
+    """
+    import src.web.app as app_module
+
+    monkeypatch.setattr(app_module, "WATCH_SEARCH_CAP", 6)
+    api, _ = client
+    api.post("/api/watch/jp-ph", json={"depart_dates": ["2027-01-10", "2027-01-20", "2027-01-30"]})
+    response = api.post(
+        "/api/watch/jp-ph", json={"depart_dates": ["2027-01-12", "2027-01-22", "2027-02-01"]}
+    )
+    assert response.status_code == 400
+    assert "10" in response.json()["detail"]  # the count it would have reached
+
+
+def test_a_watched_day_can_be_dropped(client):
+    api, _ = client
+    api.post("/api/watch/jp-ph", json={"depart_dates": ["2027-01-10", "2027-01-20", "2027-01-30"]})
+    assert api.delete("/api/watch/jp-ph/2027-01-10").status_code == 200
+    assert api.get("/api/scenarios/jp-ph").json()["watches"] == []
+
+
+def test_dropping_a_day_that_is_not_watched_is_a_404(client):
+    api, _ = client
+    assert api.delete("/api/watch/jp-ph/2027-01-10").status_code == 404
+
+
+def test_the_watch_reports_the_series_it_has_recorded(client):
+    api, data = client
+    api.post(
+        "/api/watch/jp-ph",
+        json={"depart_dates": ["2027-01-10", "2027-01-20", "2027-01-30"], "added_price": 30000},
+    )
+
+    directory = data / "watch" / "jp-ph"
+    directory.mkdir(parents=True)
+    with (directory / "observations.jsonl").open("w", encoding="utf-8") as handle:
+        for ts, total in (("2026-08-20T02:00:00+00:00", 30000), ("2026-08-20T06:00:00+00:00", 28500)):
+            handle.write(json.dumps({
+                "ts": ts, "scenario_id": "jp-ph", "depart_date": "2027-01-10",
+                "pinned_dates": ["2027-01-10", "2027-01-20", "2027-01-30"],
+                "found_dates": ["2027-01-10", "2027-01-20", "2027-01-30"],
+                "route": "PRG → NRT → MNL → PRG", "total": total, "total_with_bags": total,
+                "currency": "CZK", "has_overland": False, "coverage": 1.0,
+                "legs_per_search": 9.5, "comparable": True,
+            }) + "\n")
+
+    body = api.get("/api/watch/jp-ph").json()
+    candidate = body["candidates"][0]
+    assert candidate["depart_date"] == "2027-01-10"
+    assert candidate["latest"] == 28500
+    assert candidate["net_change"] == -1500
+    assert [point["total"] for point in candidate["series"]] == [30000, 28500]
+    # Carried through from the trip so the tab can say "down 1,500 since you
+    # picked it" rather than only "down since the first observation".
+    assert candidate["added_price"] == 30000

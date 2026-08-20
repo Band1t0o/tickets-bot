@@ -197,3 +197,71 @@ def test_total_with_bags_only_charges_unconfirmed_legs():
     )[0]
     assert it.total_price == 23000
     assert it.total_with_bags(1500) == 24500
+
+
+# ---------------------------------------------------------------- overland
+#
+# Fly into Haneda, cross Japan on the ground, fly out of Kansai. Porto in,
+# Lisbon out. Everywhere else a stop's airports are alternatives *because* of
+# the chain rule - leave from the airport you landed at - and an overland stop
+# suspends exactly that rule, for exactly one stop.
+
+
+def overland_scenario(**overrides) -> Scenario:
+    defaults = dict(
+        stops=[
+            Stop(airports=["NRT", "KIX"], stay_days=(9, 11), label="Japan", overland=True),
+            Stop(airports=["MNL"], stay_days=(9, 11), label="Philippines"),
+        ]
+    )
+    defaults.update(overrides)
+    return scenario(**defaults)
+
+
+def test_overland_stop_may_be_left_from_a_different_airport():
+    from_kix = leg("KIX", "MNL", date(2027, 1, 20), 4000)
+    result = combine([LEG_A, from_kix, LEG_C], overland_scenario())
+    assert len(result) == 1
+    assert result[0].legs[0].destination == "NRT"
+    assert result[0].legs[1].origin == "KIX"
+
+
+def test_overland_stop_still_accepts_leaving_from_the_airport_it_landed_at():
+    # Suspending the chain rule must widen the search, never replace it.
+    result = combine([LEG_A, LEG_B, LEG_C], overland_scenario())
+    assert len(result) == 1
+    assert result[0].legs[1].origin == "NRT"
+
+
+def test_overland_does_not_leak_into_a_stop_that_did_not_ask_for_it():
+    # Japan is overland, the Philippines is not: landing MNL and leaving CEB
+    # is still not a chain.
+    trip = overland_scenario(
+        stops=[
+            Stop(airports=["NRT", "KIX"], stay_days=(9, 11), label="Japan", overland=True),
+            Stop(airports=["MNL", "CEB"], stay_days=(9, 11), label="Philippines"),
+        ]
+    )
+    from_kix = leg("KIX", "MNL", date(2027, 1, 20), 4000)
+    home_from_ceb = leg("CEB", "PRG", date(2027, 1, 30), 14000)
+    assert combine([LEG_A, from_kix, home_from_ceb], trip) == []
+
+
+def test_overland_still_enforces_the_stay_window_across_the_gap():
+    # Days in Japan are counted from landing at NRT to leaving KIX, so an
+    # overland stop is not a way to smuggle a 15-day stay past a [9, 11] rule.
+    too_late = leg("KIX", "MNL", date(2027, 1, 25), 4000)
+    assert combine([LEG_A, too_late, LEG_C], overland_scenario()) == []
+
+
+def test_overland_finds_the_cheapest_when_the_winner_leaves_the_other_airport():
+    # The prune that makes this traversal affordable breaks out of the candidate
+    # loop at the first leg too expensive to help, which is only sound while
+    # candidates arrive cost-sorted. Two airports means two sorted lists, and
+    # concatenating them is not sorted: the cheap KIX departure sits behind an
+    # expensive NRT one and would be pruned away unheard.
+    dear_from_nrt = leg("NRT", "MNL", date(2027, 1, 20), 9000, airline="ZZ")
+    cheap_from_kix = leg("KIX", "MNL", date(2027, 1, 20), 2000, airline="YY")
+    result = combine([LEG_A, dear_from_nrt, cheap_from_kix, LEG_C], overland_scenario())
+    assert result[0].total_price == 28000
+    assert result[0].legs[1].origin == "KIX"

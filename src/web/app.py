@@ -24,7 +24,7 @@ from ..airports import describe, frequent_airports, lookup
 from ..airports import search_with_meta as search_airports
 from ..combine import combine_all, series_from_result
 from ..notify_discord import COLOR_INFO, post
-from ..scenario import Scenario, load_scenario, read_scenarios, save_scenario
+from ..scenario import Scenario, Watch, load_scenario, read_scenarios, save_scenario
 from ..sources import DEFAULTS as DEFAULT_SOURCES
 from ..sources import (
     Source,
@@ -40,6 +40,7 @@ from ..sweep.planner import (
     estimate_minutes,
     plan_exploration,
     plan_searches,
+    plan_watch,
     planned_routes,
 )
 from ..sweep.runner import (
@@ -64,6 +65,20 @@ STATIC_DIR = Path(__file__).parent / "static"
 # a separator or a parent reference.
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 SAFE_STAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z$")
+SAFE_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+# Searches a trip's whole watch plan may reach before another day is refused.
+#
+# The binding limit is the site, not taste: pelikan.cz answers about 120
+# searches from one runner and then stops answering at all, with no slowdown
+# leading up to it. The watch runs on a single runner by design, so a plan over
+# that cliff does not fail - it silently prices half of what it planned and
+# reports the cheapest of the half.
+#
+# Checked here rather than in `Scenario.validate` because the count depends on
+# the planner, and `scenario.py` cannot import it without a cycle. `MAX_WATCHES`
+# is the cheap guard that needs no planner; this is the one that actually binds.
+WATCH_SEARCH_CAP = 110
 
 # Bumped whenever this file and `static/app.js` must be deployed together: a new
 # endpoint the page relies on, or a changed response shape.
@@ -74,7 +89,7 @@ SAFE_STAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z$")
 # and 400s for things it needs, and renders them as emptiness - which is
 # indistinguishable from "you have no saved trips". `static/app.js` carries the
 # same number and refuses to render until they match.
-API_CONTRACT = 5
+API_CONTRACT = 6
 
 app = FastAPI(title="Flight scenario watcher")
 
@@ -290,7 +305,8 @@ def estimate(
         scenario.validate()
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    searches = plan_exploration(scenario) if mode == "explore" else plan_searches(scenario)
+    plans = {"explore": plan_exploration, "watch": plan_watch, "sweep": plan_searches}
+    searches = plans[mode](scenario)
     return {
         "searches": len(searches),
         "minutes": estimate_minutes(searches),
@@ -617,6 +633,202 @@ def history(scenario_id: str) -> list[dict]:
             }
         )
     return series
+
+
+# --------------------------------------------------------------------- watch
+#
+# A sweep prices a window; a watch follows a handful of candidate trips on their
+# exact days, every few hours. These endpoints are how days get picked off the
+# last sweep, and how the series they have traced since is read back.
+
+
+def _watch_dir(scenario_id: str) -> Path:
+    return DATA_DIR / "watch" / _safe_id(scenario_id)
+
+
+def _watch_key(scenario_id: str) -> str:
+    """Namespaced so a local watch and a local sweep of one trip do not share a
+    slot - they are different runs and either may be in flight alone."""
+    return f"watch:{scenario_id}"
+
+
+@app.get("/api/sweeps/{scenario_id}/{stamp}/candidates")
+def sweep_candidates(scenario_id: str, stamp: str, limit: int = 30) -> dict:
+    """The cheapest trip on each departure date this sweep priced, cheapest first.
+
+    The Watch tab's source list. It differs from `by-date`, which draws the
+    chart, in carrying every leg's date: pinning a candidate means pinning the
+    trip that won the day, not merely the day.
+    """
+    scenario, directory = _sweep_dir_or_404(scenario_id, stamp)
+    bag = scenario.bag_estimate
+    result = _combination(scenario, directory)
+
+    candidates = [
+        {
+            "depart_date": key,
+            "depart_dates": [leg.depart_date.isoformat() for leg in itinerary.legs],
+            "total": itinerary.total_price,
+            "total_with_bags": itinerary.total_with_bags(bag),
+            "currency": itinerary.currency,
+            "route": itinerary.route,
+            "has_overland": itinerary.has_overland,
+        }
+        for key, itinerary in result.best_by_date.items()
+    ]
+    candidates.sort(key=lambda row: row["total_with_bags"])
+    return {
+        "scenario_id": scenario_id,
+        "stamp": stamp,
+        # So the tab can say which sweep these came from, and flag a partial
+        # one: a day that looks cheap because its rivals went unpriced is not a
+        # day worth watching.
+        "coverage": _read_status(directory).get("coverage"),
+        "candidates": candidates[: min(max(limit, 1), 200)],
+    }
+
+
+def _watch_payload(scenario: Scenario) -> dict:
+    """Every watched day, the series it has traced, and what a check costs."""
+    from ..watch import watch_report
+
+    report = watch_report(_watch_dir(scenario.id))
+    searches = plan_watch(scenario)
+    candidates = []
+    for watch in scenario.watches:
+        recorded = report["candidates"].get(watch.key, {})
+        candidates.append(
+            {
+                "depart_date": watch.key,
+                "depart_dates": [d.isoformat() for d in watch.depart_dates],
+                "added_at": watch.added_at,
+                # What it cost when it was picked, so the very first observation
+                # can already say which way it has gone.
+                "added_price": watch.added_price,
+                "currency": recorded.get("currency", watch.currency),
+                "route": recorded.get("route"),
+                "has_overland": recorded.get("has_overland", False),
+                "series": recorded.get("series", []),
+                "observations": recorded.get("observations", 0),
+                "first": recorded.get("first"),
+                "latest": recorded.get("latest"),
+                "latest_with_bags": recorded.get("latest_with_bags"),
+                "net_change": recorded.get("net_change", 0),
+                "net_change_pct": recorded.get("net_change_pct", 0.0),
+                "low": recorded.get("low"),
+                "high": recorded.get("high"),
+            }
+        )
+    return {
+        "scenario_id": scenario.id,
+        "candidates": candidates,
+        "searches": len(searches),
+        "minutes": estimate_minutes(searches),
+        "cap": WATCH_SEARCH_CAP,
+        "running": _is_running(_watch_key(scenario.id)),
+        "error": _failures.get(_watch_key(scenario.id)),
+    }
+
+
+@app.get("/api/watch/{scenario_id}")
+def get_watch(scenario_id: str) -> dict:
+    return _watch_payload(_scenario_or_404(scenario_id))
+
+
+@app.post("/api/watch/{scenario_id}", status_code=201)
+def add_watch(scenario_id: str, payload: dict = Body(...)) -> dict:
+    """Start watching one candidate trip.
+
+    Refused on two counts, both in words the page shows verbatim: a candidate
+    the combiner could never chain, and a plan that would run past what the
+    site answers.
+    """
+    scenario = _scenario_or_404(scenario_id)
+    raw = payload.get("depart_dates") or []
+    if not isinstance(raw, list) or not raw:
+        raise HTTPException(400, "depart_dates must list one date per leg of the trip")
+    try:
+        dates = [date.fromisoformat(str(value)) for value in raw]
+    except ValueError as exc:
+        raise HTTPException(400, f"depart_dates must be YYYY-MM-DD: {exc}") from exc
+
+    candidate = Watch(
+        depart_dates=dates,
+        added_at=datetime.now(UTC).isoformat(timespec="seconds"),
+        added_price=payload.get("added_price"),
+        currency=payload.get("currency") or scenario.currency,
+    )
+    proposed = replace(scenario, watches=[*scenario.watches, candidate])
+    try:
+        proposed.validate()
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    planned = len(plan_watch(proposed))
+    if planned > WATCH_SEARCH_CAP:
+        raise HTTPException(
+            400,
+            f"watching that day as well would be {planned} searches every few hours, "
+            f"and pelikan.cz stops answering this client after about "
+            f"{WATCH_SEARCH_CAP}. Stop watching a day first, or narrow the trip.",
+        )
+
+    save_scenario(proposed, SCENARIO_DIR)
+    return _watch_payload(proposed)
+
+
+@app.delete("/api/watch/{scenario_id}/{depart_date}")
+def remove_watch(scenario_id: str, depart_date: str) -> dict:
+    scenario = _scenario_or_404(scenario_id)
+    if not SAFE_DATE.match(depart_date):
+        raise HTTPException(400, f"{depart_date!r} is not a date")
+    kept = [w for w in scenario.watches if w.key != depart_date]
+    if len(kept) == len(scenario.watches):
+        raise HTTPException(404, f"{depart_date} is not being watched")
+    updated = replace(scenario, watches=kept)
+    save_scenario(updated, SCENARIO_DIR)
+    # The observations stay. They were real measurements that cost real
+    # searches, and un-picking a day is not a request to forget what it did -
+    # the same reason deleting a trip leaves its sweeps behind.
+    return _watch_payload(updated)
+
+
+@app.post("/api/watch/{scenario_id}/run")
+def run_watch_now(scenario_id: str) -> dict:
+    """Check the watched days now, on this machine.
+
+    The scheduled workflow is what keeps the series going; this is for when an
+    answer is wanted before the next slot comes round. Threaded exactly like a
+    local sweep, so the status strip reports it the same way.
+    """
+    scenario = _scenario_or_404(scenario_id)
+    if not scenario.watches:
+        raise HTTPException(400, "nothing is being watched yet, so there is nothing to check")
+    key = _watch_key(scenario_id)
+    if _is_running(key):
+        raise HTTPException(409, "a check is already running for this trip")
+
+    _failures.pop(key, None)
+    stop = threading.Event()
+
+    def work():
+        try:
+            from ..sweep.runner import run_sweep
+            from ..watch import drops, record_observations, watch_report
+
+            result = run_sweep(scenario, data_dir=DATA_DIR, mode="watch", stop=stop)
+            status = _read_status(result.directory)
+            directory = _watch_dir(scenario_id)
+            record_observations(result.legs, scenario, status, directory)
+            drops(watch_report(directory), scenario, directory)
+        except Exception as exc:  # noqa: BLE001 - recorded and surfaced, not swallowed
+            _failures[key] = f"{type(exc).__name__}: {exc}"
+
+    thread = threading.Thread(target=work, daemon=True)
+    thread.start()
+    _running[key] = thread
+    _stops[key] = stop
+    return {"started": True, "scenario_id": scenario_id}
 
 
 @app.get("/api/probe")

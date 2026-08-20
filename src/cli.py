@@ -69,14 +69,15 @@ def run_sweep_command(
         scenario = replace(scenario, depth=depth)
     scenario.validate()
 
-    from .sweep.planner import shard_of
+    from .sweep.planner import plan_watch, shard_of
 
-    searches = plan_exploration(scenario) if mode == "explore" else plan_searches(scenario)
+    plans = {"explore": plan_exploration, "watch": plan_watch, "sweep": plan_searches}
+    searches = plans[mode](scenario)
     planned = len(searches)
     if shard is not None:
         searches = shard_of(searches, *shard)
     minutes = estimate_minutes(searches)
-    label = "explore" if mode == "explore" else f"depth={scenario.depth}"
+    label = mode if mode in {"explore", "watch"} else f"depth={scenario.depth}"
     share = f" (shard {shard[0] + 1}/{shard[1]} of {planned})" if shard else ""
     focus = (
         f" focused {scenario.focus_start}..{scenario.focus_end}"
@@ -228,6 +229,101 @@ def merge_shards_command(
         )
         notify_sweep(scenario, result)
     return destination
+
+
+def run_watch_command(
+    scenario_id: str,
+    dry_run: bool = False,
+    max_minutes: float | None = None,
+    *,
+    provider=None,
+    data_dir: Path | str = "data",
+    delay_s: float | None = None,
+    notify: bool = True,
+):
+    """Re-price the watched candidates once, record them, and report any falls.
+
+    Thin on purpose. The searching is `run_sweep_command` in watch mode - the
+    same runner, breaker, browser recycling and incremental writes, because a
+    watch fails in all the same ways a sweep does and nothing is gained by a
+    second implementation of surviving them. What is watch-specific is only
+    what happens either side: refusing to run when nothing is watched, and
+    turning the legs into one row per candidate.
+
+    Reporting is separate from the sweep's. `notify_sweep` answers "this is the
+    cheapest the trip has been"; a watch answers "one of the days you are
+    choosing between moved", and sends nothing at all when none of them did.
+    """
+    from .scenario import load_scenario
+    from .watch import DEFAULT_WATCH_DIR, drops, record_observations, watch_report
+
+    path = Path("scenarios") / f"{scenario_id}.json"
+    if not path.exists():
+        print(f"No scenario named {scenario_id!r} in scenarios/")
+        raise SystemExit(2)
+
+    scenario = load_scenario(path)
+    if not scenario.watches:
+        # Not an error condition so much as nothing to do, but it exits non-zero
+        # so a workflow that dispatched this by mistake says so instead of
+        # committing an empty run that reads as a watch which found nothing.
+        print(f"[{scenario_id}] nothing is being watched; pick days on the Watch tab first")
+        raise SystemExit(2)
+
+    result = run_sweep_command(
+        scenario_id,
+        None,
+        dry_run,
+        mode="watch",
+        max_minutes=max_minutes,
+        provider=provider,
+        data_dir=data_dir,
+        delay_s=delay_s,
+        notify=False,
+    )
+
+    directory = Path(data_dir) / DEFAULT_WATCH_DIR.name / scenario_id
+    status = json.loads((result.directory / "status.json").read_text(encoding="utf-8"))
+    rows = record_observations(result.legs, scenario, status, directory)
+    for row in rows:
+        price = "nothing found" if row["total"] is None else f"{row['total']:,.0f} {row['currency']}"
+        print(f"[{scenario_id}] {row['depart_date']}: {price}")
+
+    fell = drops(watch_report(directory), scenario, directory)
+    if not fell:
+        print(f"[{scenario_id}] nothing fell far enough to be worth a message")
+        return result
+
+    print(f"[{scenario_id}] {len(fell)} watched day(s) got cheaper")
+    if notify:
+        from .notify_discord import notify_watch
+
+        notify_watch(scenario, fell)
+    return result
+
+
+def watch_report_command(scenario_id: str, data_dir: Path | str = "data") -> int:
+    """Print how each watched candidate has moved. Returns the count."""
+    from .watch import DEFAULT_WATCH_DIR, watch_report
+
+    report = watch_report(Path(data_dir) / DEFAULT_WATCH_DIR.name / scenario_id)
+    candidates = report["candidates"]
+    if not candidates:
+        print(f"No observations for {scenario_id!r} yet — run `python -m src.cli watch` first.")
+        return 0
+
+    print(f"{'departs':12} {'obs':>4} {'first':>10} {'latest':>10} {'move':>9} {'low':>10}  route")
+    for key in sorted(candidates):
+        c = candidates[key]
+        if c["latest"] is None:
+            print(f"{key:12} {c['observations']:>4} {'—':>10} {'—':>10} {'—':>9} {'—':>10}  "
+                  "nothing trustworthy yet")
+            continue
+        print(
+            f"{key:12} {c['observations']:>4} {c['first']:>10,.0f} {c['latest']:>10,.0f} "
+            f"{c['net_change_pct']:>8.1f}% {c['low']:>10,.0f}  {c['route']}"
+        )
+    return len(candidates)
 
 
 def health_gate_command(
@@ -387,6 +483,23 @@ def main():
     sub.add_parser("probe", help="Sample the fixed volatility-probe routes once")
     sub.add_parser("probe-report", help="Summarise how much probe prices have moved")
 
+    p_watch = sub.add_parser(
+        "watch", help="Re-price the watched candidate days once, and report any falls"
+    )
+    p_watch.add_argument("--scenario", required=True)
+    p_watch.add_argument("--data-dir", default="data")
+    p_watch.add_argument("--max-minutes", type=float,
+                         help="Stop cleanly after this long, keeping what was found")
+    p_watch.add_argument("--dry-run", action="store_true",
+                         help="Print the planned search count and exit")
+    p_watch.add_argument("--no-notify", action="store_true")
+
+    p_watch_report = sub.add_parser(
+        "watch-report", help="Show how each watched day has moved"
+    )
+    p_watch_report.add_argument("--scenario", required=True)
+    p_watch_report.add_argument("--data-dir", default="data")
+
     p_gate = sub.add_parser(
         "health-gate",
         help="Exit non-zero when the last sweep was too starved to justify another",
@@ -424,6 +537,20 @@ def main():
         from .probe import format_report, probe_report
 
         print(format_report(probe_report()))
+        raise SystemExit(0)
+
+    if args.cmd == "watch":
+        run_watch_command(
+            args.scenario,
+            args.dry_run,
+            args.max_minutes,
+            data_dir=args.data_dir,
+            notify=not args.no_notify,
+        )
+        raise SystemExit(0)
+
+    if args.cmd == "watch-report":
+        watch_report_command(args.scenario, args.data_dir)
         raise SystemExit(0)
 
     if args.cmd == "check-price":

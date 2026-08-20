@@ -87,3 +87,46 @@ def test_the_broad_slot_is_never_gated(tmp_path):
     directory = trips(tmp_path, make_scenario(id="a"))
     data = healthy_sweep(tmp_path, "a", legs_per_search=0.1)
     assert choose(directory, data_dir=data) == ["a"]
+
+
+# --------------------------------------------------------------- the watch
+#
+# The watch slot runs every four hours, so what it skips matters more than what
+# the daily sweep skips: six wasted runs a day against one.
+
+
+def watching(**overrides):
+    from datetime import date
+
+    from src.scenario import Watch
+
+    return make_scenario(
+        watches=[
+            Watch(depart_dates=[date(2027, 1, 10), date(2027, 1, 20), date(2027, 1, 30)])
+        ],
+        **overrides,
+    )
+
+
+def test_the_watch_runs_only_trips_that_are_watching_something(tmp_path):
+    directory = trips(tmp_path, watching(id="watched"), make_scenario(id="plain"))
+    assert choose(directory, watching=True, data_dir=tmp_path / "data") == ["watched"]
+
+
+def test_a_disabled_trip_is_not_watched(tmp_path):
+    directory = trips(tmp_path, watching(id="watched", enabled=False))
+    assert choose(directory, watching=True, data_dir=tmp_path / "data") == []
+
+
+def test_the_daily_sweep_does_not_care_whether_a_trip_is_watched(tmp_path):
+    directory = trips(tmp_path, watching(id="watched"), make_scenario(id="plain"))
+    assert choose(directory, data_dir=tmp_path / "data") == ["plain", "watched"]
+
+
+def test_a_watch_is_not_gated_on_the_morning_sweep(tmp_path):
+    """A starved sweep is a reason not to sweep again, not a reason to stop
+    watching: the watch is 63 searches against 483, and the days it follows are
+    the ones a decision is actually waiting on."""
+    directory = trips(tmp_path, watching(id="watched"))
+    healthy_sweep(tmp_path, "watched", legs_per_search=2.1)
+    assert choose(directory, watching=True, data_dir=tmp_path / "data") == ["watched"]

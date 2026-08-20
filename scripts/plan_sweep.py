@@ -30,8 +30,14 @@ def choose(
     wanted: str = "",
     focused: bool = False,
     data_dir: Path | str = "data",
+    watching: bool = False,
 ) -> list[str]:
     """The trip ids this run should sweep.
+
+    `watching` is the four-hourly watch slot, which re-prices the pinned
+    candidate trips. A trip watching nothing is skipped outright: there is
+    nothing to price, and a run of no searches would still write a directory
+    and report coverage 0.0.
 
     `focused` is the 13:00 slot, which watches the dates picked off the price
     chart. Two things can take a trip out of it, and both are decisions rather
@@ -46,6 +52,13 @@ def choose(
     trips = [s for s in load_scenarios(directory) if s.enabled]
     if wanted:
         trips = [s for s in trips if s.id == wanted]
+    if watching:
+        # Deliberately no health gate. A starved morning is a reason not to
+        # sweep the window again - 483 searches against a site that is refusing
+        # - but the watch is 63, and the days it follows are the ones a booking
+        # decision is actually waiting on. If the site is refusing, the watch
+        # records that honestly through coverage and says nothing.
+        return [s.id for s in trips if s.watches]
     if focused:
         trips = [s for s in trips if s.focus_start and s.focus_end]
         trips = [
@@ -61,11 +74,12 @@ def main() -> None:
     parser.add_argument("--scenarios", default="scenarios")
     parser.add_argument("--only", default="", help="A single trip id, from workflow_dispatch")
     parser.add_argument("--focused", action="store_true", help="The focused afternoon slot")
+    parser.add_argument("--watching", action="store_true", help="The four-hourly watch slot")
     parser.add_argument("--shards", type=int, default=3)
     parser.add_argument("--data-dir", default="data")
     args = parser.parse_args()
 
-    chosen = choose(Path(args.scenarios), args.only, args.focused, args.data_dir)
+    chosen = choose(Path(args.scenarios), args.only, args.focused, args.data_dir, args.watching)
     count = max(1, args.shards)
     print("scenarios=" + json.dumps(chosen))
     print("shards=" + json.dumps(list(range(count))))

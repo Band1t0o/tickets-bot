@@ -1,0 +1,137 @@
+name: watch
+
+# Re-prices the handful of candidate days picked on the Watch tab, every four
+# hours, and says something on Discord only when one of them really falls.
+#
+# Why this is a separate workflow rather than a third slot in scrape.yml: it is
+# a different size of job. A deep sweep is ~483 searches across 5 runners and
+# takes the best part of an hour; a watch of three candidates is 63 searches on
+# one runner and takes ~16 minutes, because it prices the pinned leg dates of
+# each candidate rather than deriving later legs through the stay ranges. That
+# is the whole reason it can run six times a day against a site that answers
+# about 120 searches per runner before it stops answering at all.
+#
+# No shards for the same reason. If a trip is ever watched hard enough that the
+# plan approaches 120, the API refuses to add the candidate (WATCH_SEARCH_CAP)
+# rather than letting this quietly run into the cliff.
+#
+# 20 past, not on the hour: probe.yml runs at '0 */2' and pushes to this same
+# branch. Both rebase and retry, but not colliding in the first place is
+# cheaper than both of them discovering they have to.
+on:
+  schedule:
+    - cron: '20 */4 * * *'
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: 'Scenario id (default: every trip that is watching something)'
+        required: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: watch
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      scenarios: ${{ steps.pick.outputs.scenarios }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - id: pick
+        env:
+          INPUT_SCENARIO: ${{ inputs.scenario }}
+        run: |
+          set -euo pipefail
+          python scripts/plan_sweep.py --watching --only "${INPUT_SCENARIO:-}" >> "$GITHUB_OUTPUT"
+          cat "$GITHUB_OUTPUT"
+
+  watch:
+    needs: plan
+    # Nothing watched is the normal state of a trip, not a failure. Skipping
+    # here keeps the run history readable: a green tick means it watched
+    # something.
+    if: needs.plan.outputs.scenarios != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      # Serial, because every trip commits to the same branch.
+      max-parallel: 1
+      fail-fast: false
+      matrix:
+        scenario: ${{ fromJson(needs.plan.outputs.scenarios) }}
+    # A ceiling, never the budget. The budget is --max-minutes below, which the
+    # run enforces on itself so it always reaches the commit step. Thirteen
+    # nightly sweeps were killed by a job timeout mid-run and committed nothing.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-pw-${{ hashFiles('requirements.txt') }}
+
+      - run: python -m playwright install --with-deps chromium
+
+      - name: Report the planned cost before spending it
+        run: python -m src.cli watch --scenario "${{ matrix.scenario }}" --dry-run || true
+
+      - name: Re-price the watched days
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          # Generous against a ~16 minute expectation, low enough that a stuck
+          # run gives up well inside timeout-minutes.
+          WATCH_BUDGET_MIN: 30
+        run: |
+          set -euo pipefail
+          python -m src.cli watch --scenario "${{ matrix.scenario }}" --max-minutes "$WATCH_BUDGET_MIN"
+
+      - name: Commit observations
+        # Always: observations are appended as they are found, and an hour-old
+        # price cannot be re-observed. Whatever killed the run, what it saw is
+        # worth keeping.
+        if: always()
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          # No `|| true` on git add: a persistence failure must be loud. A
+          # blanket data/ ignore rule silently discarded every result for
+          # months precisely because that error was being swallowed.
+          #
+          # The observations, not the runs. Each run's legs.jsonl is working
+          # data behind one observation - six a day, ~600 legs each - and the
+          # timestamped directories holding them are gitignored.
+          git add data/watch/
+          if git diff --staged --quiet; then
+            echo "No new observations"
+            exit 0
+          fi
+          git commit -m "chore(watch): ${{ matrix.scenario }} $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+
+          # probe.yml and scrape.yml push to this branch too, on their own
+          # concurrency groups, so nothing serialises the three. A rejected
+          # push would throw away prices that cannot be re-observed.
+          for attempt in 1 2 3; do
+            if git push; then
+              exit 0
+            fi
+            echo "push rejected (attempt $attempt), rebasing onto origin"
+            git pull --rebase --autostash
+          done
+          echo "::error::could not push watch observations after 3 attempts"
+          exit 1

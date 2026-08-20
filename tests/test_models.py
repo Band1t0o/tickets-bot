@@ -155,3 +155,43 @@ def test_itinerary_to_dict_carries_the_observation_window(make_leg):
     payload = it.to_dict()
     assert payload["observed_at"] == "2026-08-10T11:15:00+00:00"
     assert payload["observed_span_minutes"] == 90
+
+
+# ------------------------------------------------------- overland in a route
+
+
+def test_route_marks_where_you_travel_overland(make_leg):
+    # Fly into Haneda, cross Japan on the ground, fly out of Kansai. Joining the
+    # leg endpoints blindly renders "VIE → HND → MNL" and hides the fact that
+    # you are getting yourself 500 km down the country - the same class of lie
+    # as a sweep reporting error_count: 0.
+    it = Itinerary(
+        legs=[
+            make_leg(origin="VIE", destination="HND"),
+            make_leg(origin="KIX", destination="MNL", depart_date=date(2027, 1, 21)),
+            make_leg(origin="MNL", destination="VIE", depart_date=date(2027, 1, 31)),
+        ]
+    )
+    assert it.route == "VIE → HND ⇢ KIX → MNL → VIE"
+    assert it.has_overland is True
+
+
+def test_a_route_with_no_ground_hop_reads_exactly_as_before(make_leg):
+    it = Itinerary(
+        legs=[
+            make_leg(origin="VIE", destination="HND"),
+            make_leg(origin="HND", destination="MNL", depart_date=date(2027, 1, 21)),
+        ]
+    )
+    assert it.route == "VIE → HND → MNL"
+    assert it.has_overland is False
+
+
+def test_to_dict_reports_the_ground_hop(make_leg):
+    it = Itinerary(
+        legs=[
+            make_leg(origin="VIE", destination="HND"),
+            make_leg(origin="KIX", destination="MNL", depart_date=date(2027, 1, 21)),
+        ]
+    )
+    assert it.to_dict()["has_overland"] is True

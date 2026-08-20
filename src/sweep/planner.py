@@ -193,6 +193,32 @@ def plan_exploration(
     )
 
 
+def plan_watch(scenario: Scenario) -> list[LegSearch]:
+    """Every airport pair of every leg, on the dates the watches pinned.
+
+    The cheap counterpart to `plan_searches`. A watch already knows which trip
+    it is following, so it prices that trip's exact days rather than deriving
+    later legs from the stay ranges: on the Japan/Philippines trip that is 21
+    searches a candidate against 75, which is the whole difference between a
+    watch that can run every four hours and one that cannot run at all.
+    pelikan.cz answers about 120 searches per runner before it stops answering.
+
+    Airports are *not* pinned, only dates. The candidate says which days to
+    look at; which airports win on those days is exactly what is being watched,
+    so a watch can still find that Frankfurt undercut Vienna overnight, or that
+    arriving Haneda and leaving Kansai beat both.
+
+    Dates are pooled across candidates before the pairs are built, so two
+    candidates ten days apart share the search where one's second leg lands on
+    the other's first. `_searches_for` deduplicates the rest.
+    """
+    dates_by_leg: dict[int, list[date]] = {}
+    for watch in scenario.watches:
+        for leg_index, depart in enumerate(watch.depart_dates):
+            dates_by_leg.setdefault(leg_index, []).append(depart)
+    return _searches_for(scenario, dates_by_leg)
+
+
 def planned_routes(scenario: Scenario) -> set[tuple[str, str]]:
     """The distinct origin-destination pairs this trip requires, ignoring dates.
 

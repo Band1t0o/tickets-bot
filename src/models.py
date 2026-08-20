@@ -165,10 +165,35 @@ class Itinerary:
         return self.legs[-1].depart_date if self.legs else None
 
     @property
+    def has_overland(self) -> bool:
+        """True when a leg departs somewhere the previous one did not land.
+
+        Only possible across a stop marked `overland`: you cross the country on
+        the ground in between. Reported so a reader is never told the price of
+        a trip without being told it includes a journey nobody booked.
+        """
+        return any(
+            first.destination != second.origin
+            for first, second in zip(self.legs, self.legs[1:], strict=False)
+        )
+
+    @property
     def route(self) -> str:
+        """"VIE → HND ⇢ KIX → MNL → VIE", the ⇢ being a hop you make yourself.
+
+        Built from consecutive pairs rather than by joining every leg's
+        destination onto the first origin. That shorter version drops the
+        origin of every leg but the first, so an HND-in/KIX-out trip rendered
+        as "VIE → HND → MNL → VIE" - a route no ticket in it would fly, silently.
+        """
         if not self.legs:
             return ""
-        return " → ".join([self.legs[0].origin] + [leg.destination for leg in self.legs])
+        parts = [self.legs[0].origin, "→", self.legs[0].destination]
+        for previous, leg in zip(self.legs, self.legs[1:], strict=False):
+            if previous.destination != leg.origin:
+                parts += ["⇢", leg.origin]
+            parts += ["→", leg.destination]
+        return " ".join(parts)
 
     @property
     def _observations(self) -> list[str]:
@@ -208,6 +233,7 @@ class Itinerary:
             "bag_estimate": bag_estimate,
             "currency": self.currency,
             "same_airport": self.same_airport,
+            "has_overland": self.has_overland,
             "route": self.route,
             "observed_at": self.observed_at,
             "observed_span_minutes": self.observed_span_minutes,

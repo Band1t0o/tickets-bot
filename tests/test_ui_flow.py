@@ -1307,3 +1307,245 @@ def test_a_sweep_from_before_coverage_existed_does_not_claim_completeness(ui):
     page.wait_for_timeout(900)
     assert page.locator("#completeness").is_hidden()
     assert not errors
+
+
+# --------------------------------------------------------------- overland
+#
+# Arrive at one airport of a stop and leave from another, crossing the country
+# on the ground: Haneda in, Kansai out. The setting has to survive the round
+# trip to disk - the shape it is stored in lists a stop's fields by hand, so a
+# new one is dropped silently - and it must be unavailable where it would mean
+# nothing.
+
+
+def test_ticking_overland_writes_it_to_the_trip_on_disk(ui):
+    page, scenarios, errors = ui
+
+    # A second Japanese airport, so there is somewhere else to leave from.
+    page.locator("#stops .typeahead input").first.click()
+    page.keyboard.type("Kansai", delay=45)
+    page.keyboard.press("Enter")
+    page.wait_for_timeout(700)
+    assert chips(page, "#stops") == ["NRT", "KIX", "MNL"]
+
+    page.locator('#stops .stop__overland input').first.check()
+    page.locator("#save-btn").click()
+    page.wait_for_timeout(900)
+
+    saved = json.loads((scenarios / "jp-ph.json").read_text(encoding="utf-8"))
+    assert saved["stops"][0]["overland"] is True
+    assert saved["stops"][1]["overland"] is False
+    assert not errors
+
+
+def test_overland_cannot_be_ticked_on_a_stop_with_one_airport(ui):
+    """Nowhere else to leave from, so the box would do nothing at all."""
+    page, _, errors = ui
+    box = page.locator('#stops .stop__overland input').first
+    assert box.is_disabled()
+    assert not errors
+
+
+def test_a_saved_overland_stop_comes_back_ticked(ui):
+    """The reason to test the round trip and not just the write: the trip is
+    re-read from disk into the form, and a field the form drops on the way out
+    is invisible until a sweep quietly chains the wrong airports."""
+    page, scenarios, errors = ui
+    page.locator("#stops .typeahead input").first.click()
+    page.keyboard.type("Kansai", delay=45)
+    page.keyboard.press("Enter")
+    page.wait_for_timeout(700)
+    page.locator('#stops .stop__overland input').first.check()
+    page.locator("#save-btn").click()
+    page.wait_for_timeout(900)
+
+    page.reload(wait_until="networkidle")
+    page.wait_for_selector("#origins .chip__code")
+    assert page.locator('#stops .stop__overland input').first.is_checked()
+    assert not errors
+
+
+OVERLAND_LEGS = [
+    ("PRG", "NRT", "2027-01-10", 12000.0),   # fly into Tokyo
+    ("KIX", "MNL", "2027-01-20", 4000.0),    # ...and out of Osaka
+    ("MNL", "PRG", "2027-01-30", 14000.0),
+]
+
+
+def seed_overland_trip(scenarios):
+    """The saved trip crosses Japan on the ground, so the legs above chain."""
+    save_scenario(
+        Scenario(
+            id="jp-ph",
+            name="Japan then Philippines",
+            origins=["PRG", "VIE"],
+            stops=[
+                Stop(airports=["NRT", "KIX"], stay_days=(9, 11), label="Japan", overland=True),
+                Stop(airports=["MNL"], stay_days=(9, 11), label="Philippines"),
+            ],
+            window_start=date(2027, 1, 5),
+            window_end=date(2027, 2, 8),
+            depth="quick",
+        ),
+        scenarios,
+    )
+
+
+def test_results_say_out_loud_that_you_cross_japan_yourself(ui):
+    """A total that includes a journey nobody booked has to admit it.
+
+    The route string is built from the leg endpoints, so before this it read
+    "PRG → NRT → MNL → PRG" - a route no ticket in the itinerary flies, and no
+    hint that the trip needs you to get from Tokyo to Osaka on your own.
+    """
+    page, scenarios, errors = ui
+    seed_overland_trip(scenarios)
+    seed_sweep(
+        scenarios.parent / "data", "2026-08-11T09-00-00Z",
+        status={"state": "done", "total": 3, "legs_found": 3, "depth": "quick"},
+        legs=OVERLAND_LEGS,
+    )
+    page.reload(wait_until="networkidle")
+    open_results(page)
+
+    headline = page.locator("#headline").inner_text()
+    assert "NRT ⇢ KIX" in headline
+    assert "you get from NRT to KIX yourself" in headline
+    assert "overland" in page.locator("#results-table tbody").inner_text()
+    assert not errors
+
+
+
+# ------------------------------------------------------------- the watch tab
+#
+# Picking a few cheap days off the last sweep and following just those, every
+# few hours. The tab is the whole feature's surface: the days being watched,
+# how each has moved since, and what checking them costs.
+
+
+def open_watch(page):
+    page.locator('#tabs button[data-tab="watch"]').click()
+    page.wait_for_timeout(900)
+
+
+def seed_watch_observations(data_dir, key="2027-01-10", totals=(30000, 28500)):
+    directory = data_dir / "watch" / "jp-ph"
+    directory.mkdir(parents=True, exist_ok=True)
+    with (directory / "observations.jsonl").open("a", encoding="utf-8") as handle:
+        for index, total in enumerate(totals):
+            handle.write(json.dumps({
+                "ts": f"2026-08-20T0{index}:00:00+00:00",
+                "scenario_id": "jp-ph",
+                "depart_date": key,
+                "pinned_dates": [key, "2027-01-20", "2027-01-30"],
+                "found_dates": [key, "2027-01-20", "2027-01-30"],
+                "route": "PRG \u2192 NRT \u2192 MNL \u2192 PRG",
+                "total": total, "total_with_bags": total, "currency": "CZK",
+                "has_overland": False, "coverage": 1.0, "legs_per_search": 9.5,
+                "comparable": True,
+            }) + "\n")
+
+
+def test_the_watch_tab_says_when_nothing_is_being_watched(ui):
+    page, _, errors = ui
+    open_watch(page)
+    assert "nothing" in page.locator("#watch-empty").inner_text().lower()
+    assert not errors
+
+
+def test_a_day_can_be_picked_off_the_last_sweep(ui):
+    """The source list is what the sweep already found, cheapest day first."""
+    page, scenarios, errors = ui
+    seed_a_week_of_dates(scenarios.parent / "data")
+    page.reload(wait_until="networkidle")
+    open_watch(page)
+
+    page.locator("#watch-candidates .watch-add").first.click()
+    page.wait_for_timeout(900)
+
+    saved = json.loads((scenarios / "jp-ph.json").read_text(encoding="utf-8"))
+    assert saved["watches"][0]["depart_dates"] == ["2027-01-10", "2027-01-20", "2027-01-30"]
+    # Picked at a price, so the first observation can already say which way it
+    # went rather than only establishing a baseline.
+    assert saved["watches"][0]["added_price"] == 30000
+    assert "2027-01-10" in page.locator("#watch-table").inner_text()
+    assert not errors
+
+
+def test_the_tab_says_what_checking_the_watched_days_will_cost(ui):
+    """Six runs a day against a site that answers ~120 searches a runner: the
+    cost of a pick is not an implementation detail, it is the constraint."""
+    page, scenarios, errors = ui
+    seed_a_week_of_dates(scenarios.parent / "data")
+    page.reload(wait_until="networkidle")
+    open_watch(page)
+    page.locator("#watch-candidates .watch-add").first.click()
+    page.wait_for_timeout(900)
+
+    cost = page.locator("#watch-cost").inner_text()
+    assert "5 searches" in cost
+    assert "min" in cost
+    assert not errors
+
+
+def test_a_watched_day_can_be_dropped_again(ui):
+    page, scenarios, errors = ui
+    seed_a_week_of_dates(scenarios.parent / "data")
+    page.reload(wait_until="networkidle")
+    open_watch(page)
+    page.locator("#watch-candidates .watch-add").first.click()
+    page.wait_for_timeout(900)
+
+    page.locator("#watch-table .watch-drop").first.click()
+    page.wait_for_timeout(900)
+    assert json.loads((scenarios / "jp-ph.json").read_text(encoding="utf-8"))["watches"] == []
+    assert not errors
+
+
+def test_the_chart_draws_one_line_per_watched_day(ui):
+    """Shared axes, because the question is which of them to book.
+
+    A chart each would make two candidates 200 crowns apart look identical.
+    """
+    page, scenarios, errors = ui
+    seed_a_week_of_dates(scenarios.parent / "data")
+    page.reload(wait_until="networkidle")
+    open_watch(page)
+    # The second click is on the *next* row: a day already being watched has its
+    # button disabled, which is the behaviour that stops a day being watched
+    # twice and paying for it twice.
+    page.locator("#watch-candidates .watch-add").nth(0).click()
+    page.wait_for_timeout(700)
+    assert page.locator("#watch-candidates .watch-add").nth(0).is_disabled()
+    page.locator("#watch-candidates .watch-add").nth(1).click()
+    page.wait_for_timeout(700)
+
+    seed_watch_observations(scenarios.parent / "data", "2027-01-10", (30000, 28500))
+    seed_watch_observations(scenarios.parent / "data", "2027-01-11", (30100, 30050))
+    page.reload(wait_until="networkidle")
+    open_watch(page)
+
+    legend = page.locator("#watch-chart .chart-legend__item").all_inner_texts()
+    assert len(legend) == 2
+    assert any("2027-01-10" in entry for entry in legend)
+    assert not errors
+
+
+def test_the_tab_reports_how_far_a_watched_day_has_moved(ui):
+    page, scenarios, errors = ui
+    seed_a_week_of_dates(scenarios.parent / "data")
+    page.reload(wait_until="networkidle")
+    open_watch(page)
+    page.locator("#watch-candidates .watch-add").first.click()
+    page.wait_for_timeout(900)
+
+    seed_watch_observations(scenarios.parent / "data", "2027-01-10", (30000, 28500))
+    page.reload(wait_until="networkidle")
+    open_watch(page)
+
+    # Normalised: the locale groups thousands with a non-breaking space.
+    row = page.locator("#watch-table tbody tr").first.inner_text().replace(" ", " ")
+    assert "28 500" in row  # what it costs now
+    assert "30 000" in row  # what it cost when picked
+    assert "-1 500" in row  # and the move between them
+    assert not errors

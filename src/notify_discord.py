@@ -181,6 +181,56 @@ def build_price_embed(
     }
 
 
+def build_watch_embed(scenario_name: str, drops: list[dict]) -> dict | None:
+    """One embed for the watched days that actually fell, or None.
+
+    A different message from `build_price_embed` on purpose. That one answers
+    "what is the cheapest this trip has been"; this one answers "one of the
+    days you are choosing between just moved", which is only useful if it says
+    *which* day and *by how much against what it was*. A shared embed would
+    have had to drop one of those to fit the other's shape.
+
+    Nothing is filtered here. `watch.drops` has already decided what counts as
+    a fall worth sending - anything reaching this has cleared it.
+    """
+    if not drops:
+        return None
+
+    fields = []
+    for drop in drops:
+        lines = [f"**{drop['route']}**"]
+        lines.append(
+            f"down **{drop['drop']:,.0f} {drop['currency']}** ({drop['drop_pct']:.1f}%) "
+            f"from {drop['previous_best']:,.0f}"
+        )
+        if drop.get("total_with_bags") and drop["total_with_bags"] != drop["total"]:
+            lines.append(f"_{drop['total_with_bags']:,.0f} once bags are estimated in_")
+        # A total that includes a journey nobody booked has to say so here too:
+        # this message is the one read away from the app, where the ⇢ in the
+        # route has nothing beside it to explain what it means.
+        if drop.get("has_overland"):
+            lines.append("_⇢ is a hop you make overland yourself, not a flight_")
+        fields.append(
+            {
+                "name": f"Leaving {drop['depart_date']} — {drop['total']:,.0f} {drop['currency']}",
+                "value": "\n".join(lines),
+                "inline": False,
+            }
+        )
+
+    return {
+        "title": f"📉 {scenario_name} — a watched day got cheaper",
+        "description": (
+            f"{len(drops)} of the days you are watching fell since the last time "
+            f"this said anything."
+        ),
+        "color": COLOR_GOOD,
+        "fields": fields,
+        "timestamp": datetime.now(UTC).isoformat(),
+        "footer": {"text": "Flight scenario watcher — watch"},
+    }
+
+
 def build_health_alert(
     scenario_name: str,
     legs_found: int,
@@ -242,6 +292,33 @@ def post(webhook_url: str, embeds: list[dict]) -> bool:
     except requests.exceptions.RequestException as exc:
         print(f"[Discord] failed to send: {exc}")
         return False
+
+
+def notify_watch(scenario, drops: list[dict], webhook_url: str | None = None) -> bool:
+    """Post the watched days that fell, if any. True when something was sent.
+
+    Separate from `notify_sweep` because a watch has nothing to say most of the
+    time, and that is the desired behaviour rather than a failure: at six runs
+    a day, a message per run would be forty a week, most of them "still 23,485".
+    """
+    if not drops:
+        return False
+    # The same lookup as `notify_sweep`, so a webhook pasted into the Sources
+    # tab reaches a local `python -m src.cli watch` as well. In Actions nothing
+    # changes: the environment variable still wins.
+    if not webhook_url:
+        webhook_url, origin = load_webhook(SECRETS_DIR)
+        if webhook_url:
+            print(f"[Discord] using the webhook from the {origin}")
+    if not webhook_url:
+        print(
+            "[Discord] no webhook configured — set DISCORD_WEBHOOK_URL, or paste "
+            "one into the Sources tab, and nothing else has to change"
+        )
+        return False
+
+    embed = build_watch_embed(scenario.name, drops)
+    return post(webhook_url, [embed]) if embed else False
 
 
 def notify_sweep(scenario, result, webhook_url: str | None = None) -> bool:

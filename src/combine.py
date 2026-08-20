@@ -89,6 +89,31 @@ def _leg_cost(leg: Leg, bag_estimate: float) -> float:
     return leg.price_amount + (bag_estimate if leg.checked_bag is not True else 0.0)
 
 
+def _departures(by_origin, arrived_at: str, stop, bag: float):
+    """Legs the trip may leave `stop` on, cheapest first.
+
+    Normally that is one airport's worth - you leave from the airport you
+    landed at, which is what makes a stop's airports alternatives rather than a
+    sequence. An overland stop lets any airport in the pool depart instead: fly
+    into Haneda, cross Japan on the ground, fly out of Kansai.
+
+    Merged by cost rather than concatenated, and that is not a detail.
+    `descend` breaks out of this loop at the first candidate too expensive to
+    help, which is only sound while candidates arrive cost-sorted. Chaining two
+    sorted lists end to end is not sorted, so a cheap Kansai departure sitting
+    behind an expensive Haneda one would be pruned away unheard - the traversal
+    would still return an answer, just not the cheapest one, and nothing
+    downstream could tell. `heapq.merge` is lazy, so a branch that breaks early
+    still pays for nothing it never read.
+    """
+    if not stop.overland:
+        return by_origin.get(arrived_at, ())
+    return heapq.merge(
+        *(by_origin[code] for code in stop.airports if code in by_origin),
+        key=lambda leg: _leg_cost(leg, bag),
+    )
+
+
 def combine_all(
     legs: list[Leg], scenario: Scenario, limit: int | None = MAX_RESULTS
 ) -> CombineResult:
@@ -100,7 +125,7 @@ def combine_all(
         return result
 
     allowed = [set(pool) for pool in pools]
-    stays = [stop.stay_days for stop in scenario.stops]
+    stops = scenario.stops
     bag = float(scenario.bag_estimate)
 
     # Sorted by the ranking cost - not the headline price - so a branch can stop
@@ -176,8 +201,10 @@ def combine_all(
             return
 
         previous = chain[-1]
-        span = stays[level - 1]
-        for leg in by_origin.get(previous.destination, ()):
+        # The stop this chain has just arrived at, and is now leaving.
+        stop = stops[level - 1]
+        span = stop.stay_days
+        for leg in _departures(by_origin, previous.destination, stop, bag):
             nodes += 1
             if nodes > MAX_NODES:
                 result.truncated = True

@@ -285,3 +285,84 @@ def test_a_sweep_that_never_recorded_coverage_does_not_caveat_either():
     """Every sweep committed before the field existed."""
     embed = build_price_embed("Trip", [pick("cheapest", 27000)], bag_estimate=1500, coverage=None)
     assert "answered" not in embed["description"]
+
+
+# ------------------------------------------------------------- watch drops
+
+
+def _drop(**overrides):
+    defaults = dict(
+        depart_date="2027-01-12",
+        route="VIE → HND → MNL → VIE",
+        total=26000.0,
+        total_with_bags=27500.0,
+        currency="CZK",
+        previous_best=30000.0,
+        drop=4000.0,
+        drop_pct=13.3,
+        has_overland=False,
+    )
+    defaults.update(overrides)
+    return defaults
+
+
+def test_a_watch_embed_names_the_day_that_fell():
+    from src.notify_discord import build_watch_embed
+
+    embed = build_watch_embed("Japan then Philippines", [_drop()])
+    assert "Japan then Philippines" in embed["title"]
+    field = embed["fields"][0]
+    assert "2027-01-12" in field["name"]
+    assert "26,000" in field["name"]
+    assert "30,000" in field["value"]
+    assert "13.3%" in field["value"]
+
+
+def test_a_watch_embed_says_when_a_price_includes_a_journey_you_make_yourself():
+    from src.notify_discord import build_watch_embed
+
+    embed = build_watch_embed("Trip", [_drop(has_overland=True, route="VIE → HND ⇢ KIX → MNL")])
+    assert "⇢" in embed["fields"][0]["value"]
+    assert "overland" in embed["fields"][0]["value"].lower()
+
+
+def test_nothing_fell_means_no_message_at_all():
+    from src.notify_discord import build_watch_embed
+
+    assert build_watch_embed("Trip", []) is None
+
+
+def test_every_day_that_fell_gets_its_own_field():
+    from src.notify_discord import build_watch_embed
+
+    embed = build_watch_embed("Trip", [_drop(), _drop(depart_date="2027-01-19")])
+    assert len(embed["fields"]) == 2
+
+
+def test_notify_watch_posts_through_the_same_webhook_lookup(tmp_path, monkeypatch):
+    """A webhook saved in the Sources tab has to reach a local watch too.
+
+    `notify_sweep` read the environment directly once, so the setting existed
+    and did nothing for anyone running the CLI by hand.
+    """
+    from src import notify_discord
+    from src.webhook_store import save_webhook
+
+    monkeypatch.delenv("DISCORD_WEBHOOK_URL", raising=False)
+    save_webhook("https://discord.com/api/webhooks/1/local-token", tmp_path / ".secrets")
+    monkeypatch.setattr(notify_discord, "SECRETS_DIR", tmp_path / ".secrets")
+
+    posted: list[str] = []
+    monkeypatch.setattr(notify_discord, "post", lambda url, embeds: posted.append(url) or True)
+
+    assert notify_discord.notify_watch(make_scenario(), [_drop()]) is True
+    assert posted == ["https://discord.com/api/webhooks/1/local-token"]
+
+
+def test_notify_watch_says_nothing_when_nothing_fell(tmp_path, monkeypatch):
+    from src import notify_discord
+
+    posted: list[str] = []
+    monkeypatch.setattr(notify_discord, "post", lambda url, embeds: posted.append(url) or True)
+    assert notify_discord.notify_watch(make_scenario(), []) is False
+    assert posted == []

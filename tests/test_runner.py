@@ -940,3 +940,71 @@ def test_without_recycling_a_session_limit_stops_the_sweep_dead(tmp_path):
     assert result.throttled
     assert result.coverage < 1.0
     assert not result.errors
+
+
+# ------------------------------------------------------------- watch mode
+#
+# A watch is the same runner on a much smaller plan, writing somewhere else.
+# Somewhere else matters: a watch run landing in data/sweeps/ would put six tiny
+# runs a day into the Results picker, each of them a perfectly healthy-looking
+# sweep that priced three days out of seventy.
+
+
+def watched_scenario(**overrides) -> Scenario:
+    from src.scenario import Watch
+
+    defaults = dict(
+        watches=[
+            Watch(depart_dates=[date(2027, 1, 10), date(2027, 1, 20), date(2027, 1, 30)]),
+        ]
+    )
+    defaults.update(overrides)
+    return scenario(**defaults)
+
+
+def test_a_watch_run_searches_only_the_pinned_dates(tmp_path):
+    provider = FakeProvider()
+    run_sweep(watched_scenario(), provider=provider, data_dir=tmp_path, delay_s=0, mode="watch")
+    assert {call[2] for call in provider.calls} == {
+        date(2027, 1, 10), date(2027, 1, 20), date(2027, 1, 30)
+    }
+
+
+def test_a_watch_run_stays_out_of_the_sweep_history(tmp_path):
+    result = run_sweep(
+        watched_scenario(), provider=FakeProvider(), data_dir=tmp_path, delay_s=0, mode="watch"
+    )
+    assert (tmp_path / "watch" / "test-scenario").exists()
+    assert not (tmp_path / "sweeps").exists()
+    assert result.directory.parent.parent.name == "watch"
+
+
+def test_a_watch_run_records_what_it_was_watching(tmp_path):
+    result = run_sweep(
+        watched_scenario(), provider=FakeProvider(), data_dir=tmp_path, delay_s=0, mode="watch"
+    )
+    status = json.loads((result.directory / "status.json").read_text(encoding="utf-8"))
+    assert status["mode"] == "watch"
+    assert status["watches"] == [["2027-01-10", "2027-01-20", "2027-01-30"]]
+
+
+def test_a_sweep_records_that_it_was_watching_nothing(tmp_path):
+    result = run_sweep(scenario(), provider=FakeProvider(), data_dir=tmp_path, delay_s=0)
+    status = json.loads((result.directory / "status.json").read_text(encoding="utf-8"))
+    assert status["watches"] == []
+
+
+def test_a_watch_is_never_plotted_beside_a_sweep():
+    """It prices three days out of seventy, so its cheapest is not the trip's.
+
+    The same trap an exploration pass sets, and caught the same way: a watch can
+    post a perfectly healthy legs-per-search while having looked at almost
+    nothing, and charting it draws a step no fare ever made.
+    """
+    status = {"state": "done", "mode": "watch", "legs_per_search": 9.5}
+    assert is_comparable(status, 4, 4) is False
+
+
+def test_an_unknown_mode_is_refused(tmp_path):
+    with pytest.raises(ValueError, match="mode"):
+        run_sweep(scenario(), provider=FakeProvider(), data_dir=tmp_path, mode="wathc")

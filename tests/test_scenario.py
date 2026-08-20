@@ -372,3 +372,163 @@ def test_a_trip_saved_before_focus_existed_still_loads():
     payload = make_scenario().to_dict()
     del payload["focus_start"], payload["focus_end"]
     assert Scenario.from_dict(payload).focus_start is None
+
+
+# ------------------------------------------------------------- overland stops
+
+
+def _overland_trip(**overrides):
+    return make_scenario(
+        stops=[
+            Stop(airports=["NRT", "KIX"], stay_days=(9, 11), label="Japan", overland=True),
+            Stop(airports=["MNL", "CEB"], stay_days=(9, 11), label="Philippines"),
+        ],
+        **overrides,
+    )
+
+
+def test_a_stop_is_not_overland_unless_it_says_so():
+    assert make_scenario().stops[0].overland is False
+
+
+def test_overland_survives_a_save_and_load(tmp_path):
+    original = _overland_trip()
+    save_scenario(original, tmp_path)
+    loaded = load_scenario(tmp_path / "japan-philippines.json")
+    # `to_dict` lists a stop's fields by hand, so a new one is dropped silently
+    # unless it is named there: the trip would come back off disk chaining
+    # Haneda to Haneda and nothing would say why.
+    assert loaded.stops[0].overland is True
+    assert loaded.stops[1].overland is False
+    assert loaded == original
+
+
+def test_a_stop_with_one_airport_may_not_be_overland():
+    trip = make_scenario(
+        stops=[
+            Stop(airports=["NRT"], stay_days=(9, 11), label="Japan", overland=True),
+            Stop(airports=["MNL"], stay_days=(9, 11), label="Philippines"),
+        ]
+    )
+    with pytest.raises(ValueError, match="Japan"):
+        trip.validate()
+
+
+def test_an_overland_trip_is_valid():
+    _overland_trip().validate()
+
+
+def test_a_file_without_overland_still_loads(tmp_path):
+    path = tmp_path / "old.json"
+    payload = make_scenario().to_dict()
+    for stop in payload["stops"]:
+        stop.pop("overland", None)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    assert load_scenario(path).stops[0].overland is False
+
+
+# ------------------------------------------------------------------- watches
+#
+# A watch is one candidate trip being tracked on its exact dates: the departure
+# date, plus the leg dates of the trip that won it. Pinning the later legs is
+# what makes a watch affordable enough to run every few hours - deriving them
+# through the stay ranges instead costs 75 searches a candidate against 21.
+
+
+def _watch(dates=("2027-01-10", "2027-01-20", "2027-01-30"), **overrides):
+    from src.scenario import Watch
+
+    return Watch(depart_dates=[date.fromisoformat(d) for d in dates], **overrides)
+
+
+def test_a_trip_watches_nothing_by_default():
+    assert make_scenario().watches == []
+
+
+def test_a_watch_is_keyed_by_the_day_you_leave():
+    assert _watch().key == "2027-01-10"
+
+
+def test_watches_survive_a_save_and_load(tmp_path):
+    original = make_scenario(watches=[_watch(added_price=21000.0)])
+    save_scenario(original, tmp_path)
+    loaded = load_scenario(tmp_path / "japan-philippines.json")
+    assert loaded.watches[0].depart_dates[0] == date(2027, 1, 10)
+    assert loaded.watches[0].added_price == 21000.0
+    assert loaded == original
+
+
+def test_a_file_without_watches_still_loads(tmp_path):
+    payload = make_scenario().to_dict()
+    payload.pop("watches", None)
+    path = tmp_path / "old.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    assert load_scenario(path).watches == []
+
+
+def test_a_watch_needs_one_date_per_leg():
+    trip = make_scenario(watches=[_watch(dates=("2027-01-10", "2027-01-20"))])
+    with pytest.raises(ValueError, match="one date per leg"):
+        trip.validate()
+
+
+def test_a_watch_may_not_run_backwards():
+    trip = make_scenario(watches=[_watch(dates=("2027-01-10", "2027-01-09", "2027-01-30"))])
+    with pytest.raises(ValueError, match="order"):
+        trip.validate()
+
+
+def test_a_watch_must_respect_the_stay_windows():
+    # 4 days in Japan, against a [9, 11] stay: this trip was never possible, so
+    # watching it would price a chain the combiner can never close.
+    trip = make_scenario(watches=[_watch(dates=("2027-01-10", "2027-01-14", "2027-01-24"))])
+    with pytest.raises(ValueError, match="Japan"):
+        trip.validate()
+
+
+def test_a_watch_must_start_inside_the_window():
+    trip = make_scenario(watches=[_watch(dates=("2026-12-10", "2026-12-20", "2026-12-30"))])
+    with pytest.raises(ValueError, match="window"):
+        trip.validate()
+
+
+def test_the_same_day_may_not_be_watched_twice():
+    trip = make_scenario(watches=[_watch(), _watch()])
+    with pytest.raises(ValueError, match="twice|already"):
+        trip.validate()
+
+
+def test_there_is_a_ceiling_on_how_many_days_may_be_watched():
+    from src.scenario import MAX_WATCHES
+
+    starts = [date(2027, 1, 6) + timedelta(days=i) for i in range(MAX_WATCHES + 1)]
+    trip = make_scenario(
+        watches=[
+            _watch(dates=(s.isoformat(), (s + timedelta(days=10)).isoformat(),
+                          (s + timedelta(days=20)).isoformat()))
+            for s in starts
+        ]
+    )
+    with pytest.raises(ValueError, match="at once|too many"):
+        trip.validate()
+
+
+def test_a_valid_set_of_watches_passes():
+    make_scenario(
+        watches=[
+            _watch(),
+            _watch(dates=("2027-01-12", "2027-01-22", "2027-02-01")),
+        ]
+    ).validate()
+
+
+def test_a_watch_on_a_one_way_trip_has_no_stay_after_the_last_leg():
+    """The final stop is where the trip ends, so nothing follows it.
+
+    Walking every stop looking for the leg that leaves it runs off the end of
+    the dates on a one-way chain - and it does so inside validation, so the
+    trip cannot be saved at all and the error names an index rather than
+    anything a person could act on.
+    """
+    trip = make_scenario(one_way=True, watches=[_watch(dates=("2027-01-10", "2027-01-20"))])
+    trip.validate()

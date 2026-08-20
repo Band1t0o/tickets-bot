@@ -1,4 +1,4 @@
-import { lineChart } from '/chart.js';
+import { lineChart, multiLineChart } from '/chart.js';
 
 const $ = (id) => document.getElementById(id);
 const state = {
@@ -27,7 +27,7 @@ const state = {
    was lost: the page rendered an empty trip picker and empty charts, which is
    exactly what a deleted database looks like, when in fact nothing on disk had
    changed and the answer was `make ui` again. */
-const EXPECTED_CONTRACT = 5;
+const EXPECTED_CONTRACT = 6;
 
 const api = async (path, options) => {
   const response = await fetch(path, options);
@@ -134,6 +134,7 @@ function showTab(name) {
   if (name === 'explore') renderExplore();
   if (name === 'results') renderResults();
   if (name === 'prices') { renderPrices(); renderFocusControls(); }
+  if (name === 'watch') renderWatch();
   if (name === 'sources') { renderSources(); renderNotifyTarget(); }
 }
 
@@ -486,9 +487,58 @@ function renderStops() {
       scheduleEstimate();
     }, { key: `stop-${index}`, suggest: state.frequent.destinations });
 
-    card.append(head, chips);
+    card.append(head, chips, overlandControl(stop));
     host.appendChild(card);
   });
+}
+
+/* Arrive at one of a stop's airports and leave from another, crossing the
+   country on the ground in between: Haneda in, Kansai out; Porto in, Lisbon
+   out. Everywhere else the airports of a stop are alternatives *because* a trip
+   has to leave from the airport it landed at, and this is the one place that
+   rule is suspended. It costs no extra searching - every airport pair between
+   two stops is already priced - so the only thing standing between you and the
+   cheaper trip was that nothing could express it.
+
+   With one airport there is nowhere else to leave from, so the box is disabled
+   and says why rather than sitting there doing nothing. */
+
+function overlandControl(stop) {
+  const row = document.createElement('label');
+  row.className = 'check small stop__overland';
+
+  const box = document.createElement('input');
+  box.type = 'checkbox';
+  box.checked = Boolean(stop.overland);
+  box.disabled = stop.airports.length < 2;
+  box.onchange = () => {
+    stop.overland = box.checked;
+    renderStops();
+    scheduleEstimate();
+  };
+
+  const text = document.createElement('span');
+  text.textContent = 'Arrive and leave from different airports (you travel overland in between)';
+
+  row.append(box, text);
+  row.title = box.disabled
+    ? 'Add a second airport to this stop first — there is nowhere else to leave from.'
+    : 'Costs no extra searching: every airport pair here is already priced.';
+  return row;
+}
+
+/* "you get from HND to KIX yourself" - the airports named, because "includes an
+   overland leg" does not say whether that is a taxi or half a day on a train. */
+
+function overlandNote(itinerary) {
+  const legs = itinerary.legs ?? [];
+  const hops = [];
+  for (let i = 0; i < legs.length - 1; i += 1) {
+    if (legs[i].destination !== legs[i + 1].origin) {
+      hops.push(`${legs[i].destination} to ${legs[i + 1].origin}`);
+    }
+  }
+  return hops.length ? `you get from ${hops.join(', and from ')} yourself` : '';
 }
 
 function moveStop(index, delta) {
@@ -501,7 +551,9 @@ function moveStop(index, delta) {
 
 $('add-stop-btn').onclick = () => {
   const previous = route.stops[route.stops.length - 1];
-  route.stops.push({ label: '', airports: [], stay_days: [...(previous?.stay_days ?? [7, 10])] });
+  route.stops.push({
+    label: '', airports: [], stay_days: [...(previous?.stay_days ?? [7, 10])], overland: false,
+  });
   renderStops();
   scheduleEstimate();
 };
@@ -617,6 +669,7 @@ function fillForm(scenario) {
     label: stop.label,
     airports: [...stop.airports],
     stay_days: [...stop.stay_days],
+    overland: Boolean(stop.overland),
   }));
   // `return_to: null` on a return trip means "back where you started", which is
   // shown as the row mirroring the origins rather than as an empty row.
@@ -649,6 +702,10 @@ function formToScenario() {
       label: stop.label,
       airports: stop.airports,
       stay_days: stop.stay_days,
+      // The stored shape lists a stop's fields by hand, so anything missing
+      // here is dropped in silence: the trip comes back off disk chaining
+      // Haneda to Haneda, with nothing on screen to say the tick was lost.
+      overland: Boolean(stop.overland),
     })),
     return_to: oneWay || sameSet(route.returnTo, route.origins) ? null : route.returnTo,
     one_way: oneWay,
@@ -878,7 +935,7 @@ function blankScenario() {
     id: '',
     name: '',
     origins,
-    stops: [{ label: '', airports: [], stay_days: [7, 10] }],
+    stops: [{ label: '', airports: [], stay_days: [7, 10], overland: false }],
     window_start: day(90),
     window_end: day(120),
     return_to: null,
@@ -1489,11 +1546,16 @@ async function renderResults() {
       ? `<div class="stat__sub muted">${escapeHtml(observedAt(itinerary.observed_at))}` +
         `${escapeHtml(spanNote(itinerary.observed_span_minutes ?? 0))}</div>`
       : '';
+    // A total that includes a journey nobody booked has to say so beside the
+    // number. The ⇢ in the route carries the same fact and is easy to skim past.
+    const ground = itinerary && itinerary.has_overland
+      ? `<div class="stat__sub trend trend--up">${escapeHtml(overlandNote(itinerary))}</div>`
+      : '';
     card.innerHTML =
       `<div class="stat__label">${label}</div>` +
       (itinerary
         ? `<div class="stat__value">${money(withBags(itinerary), itinerary.currency)}</div>
-           <div class="stat__sub">${itinerary.route}</div>${bagNote}${measured}${saving}`
+           <div class="stat__sub">${itinerary.route}</div>${bagNote}${ground}${measured}${saving}`
         : '<div class="stat__value muted">—</div><div class="stat__sub">none found</div>');
     $('headline').appendChild(card);
   }
@@ -1511,7 +1573,11 @@ async function renderResults() {
       `<td>${escapeHtml(itinerary.legs[0].depart_date)}</td>` +
       `<td>${escapeHtml(itinerary.legs[itinerary.legs.length - 1].depart_date)}</td>` +
       `<td>${escapeHtml(airlines)}</td>` +
-      `<td>${itinerary.same_airport ? '<span class="badge badge--good">same airport</span>' : '<span class="badge badge--muted">open jaw</span>'}</td>` +
+      // "open jaw" is about where the whole trip starts and ends; "overland"
+      // is a gap in the middle that you close yourself. A trip can be either,
+      // both or neither, so they are two badges rather than three states.
+      `<td>${itinerary.same_airport ? '<span class="badge badge--good">same airport</span>' : '<span class="badge badge--muted">open jaw</span>'}` +
+        `${itinerary.has_overland ? ' <span class="badge badge--warning">overland</span>' : ''}</td>` +
       `<td>${itinerary.bags_needed
         ? `<span class="badge badge--warning">${Number(itinerary.bags_needed)} bag(s) extra</span>`
         : '<span class="badge badge--good">bags included</span>'}</td>` +
@@ -1735,6 +1801,226 @@ async function renderPrices() {
       `<p class="panel__hint" style="margin-top:12px">${escapeHtml(probe.recommendation)}</p>`
     : 'No observations yet.';
 }
+
+
+/* ------------------------------------------------------------------ watch
+
+   A sweep prices a window once a day; a watch follows a few candidate trips on
+   their exact days, every four hours. Pinning the leg dates is what makes that
+   affordable - 21 searches a candidate rather than 75 - and pelikan.cz answers
+   about 120 from one runner before it stops answering at all, which is why the
+   cost of a pick is shown next to the pick rather than buried.
+
+   The tab reads what Prices produced, so it sits after it. */
+
+async function renderWatch() {
+  const [watchResult, candidatesResult] = await Promise.allSettled([
+    api(`/api/watch/${state.scenario.id}`),
+    state.stamp
+      ? api(`/api/sweeps/${state.scenario.id}/${state.stamp}/candidates`)
+      : Promise.resolve({ candidates: [], coverage: null }),
+  ]);
+
+  if (watchResult.status !== 'fulfilled') {
+    showWatchError(`Could not read what is being watched — ${watchResult.reason.message}`);
+    return;
+  }
+  renderWatched(watchResult.value);
+  renderWatchCandidates(
+    candidatesResult.status === 'fulfilled' ? candidatesResult.value : { candidates: [] },
+    watchResult.value,
+  );
+}
+
+function showWatchError(message) {
+  const host = $('watch-error');
+  host.hidden = !message;
+  host.textContent = message || '';
+}
+
+function renderWatched(body) {
+  const suffix = ` ${state.scenario.currency ?? 'CZK'}`;
+  const candidates = body.candidates ?? [];
+
+  $('watch-empty').hidden = candidates.length > 0;
+  $('watch-run-btn').disabled = candidates.length === 0 || body.running;
+
+  const cost = $('watch-cost');
+  cost.className = `badge badge--${candidates.length ? 'good' : 'muted'}`;
+  cost.textContent = candidates.length
+    ? `${body.searches} searches (~${body.minutes} min) a check`
+    : 'nothing watched';
+
+  $('watch-run-note').textContent = body.running
+    ? 'Checking now…'
+    : candidates.length
+      ? 'Otherwise checked automatically every four hours in the cloud.'
+      : '';
+  showWatchError(body.error ? `The last check failed — ${body.error}` : '');
+
+  // The chart. Series are in the same order as the table, so a colour in one
+  // is the colour in the other.
+  const host = $('watch-chart');
+  host.innerHTML = '';
+  host.appendChild(multiLineChart(
+    candidates
+      .filter((c) => (c.series ?? []).length)
+      .map((c) => ({
+        name: c.depart_date,
+        points: c.series.map((point) => ({
+          t: point.ts, value: point.total, muted: !point.comparable,
+        })),
+      })),
+    {
+      width: Math.max(420, host.clientWidth - 4),
+      valueSuffix: suffix,
+      ariaLabel: 'Watched days over time',
+      emptyText: candidates.length
+        ? 'No checks yet — the first one runs within four hours, or press Check now.'
+        : 'Nothing is being watched yet.',
+    },
+  ));
+
+  const body_ = $('watch-table').querySelector('tbody');
+  body_.innerHTML = '';
+  for (const candidate of candidates) {
+    // Two baselines, and they answer different questions: "when picked" is what
+    // you decided on, "change" is against the first *measurement*. Showing only
+    // the latter makes a day you picked at 30,000 and which has sat at 28,500
+    // ever since look perfectly flat.
+    const picked = candidate.added_price;
+    const now = candidate.latest;
+    const move = picked != null && now != null ? now - picked : candidate.net_change;
+    const trend = move > 0 ? 'trend--up' : move < 0 ? 'trend--down' : '';
+    const row = document.createElement('tr');
+    row.innerHTML =
+      `<td>${escapeHtml(candidate.depart_date)}</td>` +
+      `<td>${escapeHtml(candidate.route ?? candidate.depart_dates.join(' · '))}` +
+      `${candidate.has_overland ? ' <span class="badge badge--warning">overland</span>' : ''}</td>` +
+      `<td class="num">${picked == null ? '—' : money(picked, candidate.currency)}</td>` +
+      `<td class="num">${now == null
+        ? '<span class="muted">not checked yet</span>'
+        : money(now, candidate.currency)}</td>` +
+      `<td class="num ${trend}">${now == null || picked == null
+        ? '—'
+        : `${move > 0 ? '+' : ''}${money(move, '')}`}</td>`;
+
+    const cell = document.createElement('td');
+    const drop = document.createElement('button');
+    drop.className = 'small watch-drop';
+    drop.textContent = 'Stop watching';
+    drop.onclick = () => stopWatching(candidate.depart_date);
+    cell.appendChild(drop);
+    row.appendChild(cell);
+    body_.appendChild(row);
+  }
+}
+
+function renderWatchCandidates(body, watched) {
+  const host = $('watch-candidates');
+  host.innerHTML = '';
+
+  const already = new Set((watched.candidates ?? []).map((c) => c.depart_date));
+  const candidates = body.candidates ?? [];
+
+  // A day that looks cheap because the days around it went unpriced is not a
+  // day worth watching, so a partial sweep says so before anything is picked.
+  const warning = $('watch-coverage');
+  const coverage = body.coverage;
+  warning.hidden = !(coverage != null && coverage < 1);
+  if (!warning.hidden) {
+    warning.innerHTML =
+      `<strong>This sweep answered ${Math.round(coverage * 100)}% of its searches.</strong> ` +
+      'The days it never priced could have been the cheap ones, so pick from this list ' +
+      'knowing it is the best of what was looked at rather than the best there is.';
+  }
+
+  if (!candidates.length) {
+    host.innerHTML =
+      '<div class="empty">No sweep to pick from yet. Run one, and its cheapest days ' +
+      'appear here.</div>';
+    return;
+  }
+
+  const table = document.createElement('table');
+  table.className = 'data';
+  table.innerHTML =
+    '<thead><tr><th>Departs</th><th>Trip</th><th class="num">Total incl. bags</th><th></th>' +
+    '</tr></thead><tbody></tbody>';
+  const rows = table.querySelector('tbody');
+
+  for (const candidate of candidates) {
+    const row = document.createElement('tr');
+    row.innerHTML =
+      `<td>${escapeHtml(candidate.depart_date)}</td>` +
+      `<td>${escapeHtml(candidate.route)}` +
+      `${candidate.has_overland ? ' <span class="badge badge--warning">overland</span>' : ''}</td>` +
+      `<td class="num">${money(candidate.total_with_bags, candidate.currency)}</td>`;
+
+    const cell = document.createElement('td');
+    const add = document.createElement('button');
+    add.className = 'small watch-add';
+    const watching = already.has(candidate.depart_date);
+    add.textContent = watching ? 'Watching' : 'Watch this day';
+    add.disabled = watching;
+    add.onclick = () => startWatching(candidate);
+    cell.appendChild(add);
+    row.appendChild(cell);
+    rows.appendChild(row);
+  }
+  host.appendChild(table);
+}
+
+async function startWatching(candidate) {
+  try {
+    // The price it was picked at travels with the pick, so the very first check
+    // can say which way it has gone instead of only setting a baseline.
+    await api(`/api/watch/${state.scenario.id}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        depart_dates: candidate.depart_dates,
+        added_price: candidate.total_with_bags,
+        currency: candidate.currency,
+      }),
+    });
+    showWatchError('');
+    state.scenario = await api(`/api/scenarios/${state.scenario.id}`);
+    await renderWatch();
+  } catch (error) {
+    // The refusals here are the interesting ones - a candidate that cannot
+    // chain, or a plan past what the site answers - and both arrive written to
+    // be read, so they are shown as they are rather than summarised.
+    showWatchError(error.message);
+  }
+}
+
+async function stopWatching(departDate) {
+  try {
+    await api(`/api/watch/${state.scenario.id}/${departDate}`, { method: 'DELETE' });
+    showWatchError('');
+    state.scenario = await api(`/api/scenarios/${state.scenario.id}`);
+    await renderWatch();
+  } catch (error) {
+    showWatchError(error.message);
+  }
+}
+
+$('watch-run-btn').onclick = async () => {
+  try {
+    await api(`/api/watch/${state.scenario.id}/run`, { method: 'POST' });
+    showWatchError('');
+    $('watch-run-note').textContent = 'Checking now…';
+    await renderWatch();
+  } catch (error) {
+    showWatchError(error.message);
+  }
+};
+
+$('watch-sweep-select').onchange = (event) => {
+  state.stamp = event.target.value;
+  renderWatch();
+};
 
 /* ------------------------------------------------------------------ focus
 

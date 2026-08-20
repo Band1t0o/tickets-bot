@@ -39,6 +39,15 @@ DEPTH_STEP_DAYS = {"quick": 7, "standard": 3, "deep": 1}
 # would otherwise become a search that quietly finds nothing.
 IATA_RE = re.compile(r"^[A-Z]{3}$")
 
+# Days that may be watched at once. Not a taste limit - a budget one. A watch
+# prices every airport pair of every leg on its pinned dates, which is 21
+# searches a candidate on the Japan/Philippines trip, and pelikan.cz answers
+# about 120 per runner before it stops answering at all. Six is the point where
+# a fourth-hourly watch of a trip that size still fits in one runner with room
+# to spare. `web.app` refuses on the real planned count as well, which is the
+# figure that actually binds; this is the cheap guard that needs no planner.
+MAX_WATCHES = 6
+
 
 @dataclass(frozen=True)
 class Stop:
@@ -47,15 +56,61 @@ class Stop:
     `airports` are alternatives, not a sequence: any of them satisfies this
     stop, and the combiner may arrive at one only if it also departs from that
     same one - landing in Tokyo cannot be followed by departing Osaka.
+
+    Unless the stop is `overland`, which is the one case where landing in Tokyo
+    *is* followed by departing Osaka: you cross the country on the ground in
+    between. Fly into Haneda and out of Kansai; into Porto and out of Lisbon.
+    The airports stay alternatives - arriving and leaving at the same one is
+    still allowed - but the chain rule is suspended for this stop alone, and
+    nothing about the stay window changes: days are still counted from the leg
+    that lands to the leg that leaves.
     """
 
     airports: list[str]
     stay_days: tuple[int, int]
     label: str = ""
+    # Named for what happens rather than "open jaw", which already means the
+    # trip-level "starts and ends at different airports" here (see
+    # `Itinerary.same_airport` and `combine.best_open_jaw`). One word, two
+    # meanings, in files that read each other is how the round-trip and
+    # multi-city branches drifted until neither could build a trip.
+    overland: bool = False
 
     def describe(self, index: int) -> str:
         """Human name for error messages; falls back to a position."""
         return self.label or f"stop {index + 1}"
+
+
+@dataclass(frozen=True)
+class Watch:
+    """One candidate trip, tracked on the exact dates it was found on.
+
+    `depart_dates` holds one date per leg, in travel order: the day you leave
+    home, the day you fly on, the day you fly back. Pinning all of them - rather
+    than pinning the departure and deriving the rest through the stay ranges -
+    is what makes a watch cheap enough to run every few hours. On the
+    Japan/Philippines trip that is 21 searches against 75, and the site answers
+    about 120 before it stops answering.
+
+    What it gives up is stay length: a candidate pinned to nine days in Japan
+    will not notice that ten days got cheaper. The daily sweep still prices the
+    whole window, which is what it is for.
+
+    The first date is the key. It is the one a person means by "the 12th", it is
+    stable while the trip is edited around it, and it is what the price series
+    on the Watch tab is drawn against.
+    """
+
+    depart_dates: list[date]
+    added_at: str = ""
+    # What it cost when it was picked, so the tab can say "up 900 since you
+    # started watching" on the very first observation rather than after two.
+    added_price: float | None = None
+    currency: str = "CZK"
+
+    @property
+    def key(self) -> str:
+        return self.depart_dates[0].isoformat() if self.depart_dates else ""
 
 
 @dataclass
@@ -99,6 +154,10 @@ class Scenario:
     preferred_origins: list[list[str]] = field(default_factory=list)
     # Which picks to report. See `src/alerts.py` for what each one means.
     notify: list[str] = field(default_factory=lambda: ["cheapest", "preferred"])
+    # Candidate trips tracked on their exact dates by the four-hourly watch,
+    # rather than by the daily sweep of the whole window. Empty means the trip
+    # is not watched at all, and the watch workflow skips it entirely.
+    watches: list[Watch] = field(default_factory=list)
     # Stay silent unless a pick actually improved on the best recorded for it.
     # Default True: at two sweeps a day, unconditional reporting is ~60 messages
     # a month, most of them "still 21,324". Set false for a digest every run.
@@ -217,6 +276,17 @@ class Scenario:
                 raise ValueError(f"{name}: minimum stay ({low}) exceeds maximum ({high})")
             if low < 1:
                 raise ValueError(f"{name}: minimum stay must be at least 1 day")
+            # Overland means arriving at one of these airports and leaving from
+            # another. With one airport there is no other, so the flag can only
+            # be a misunderstanding of what it does - and silently ignoring it
+            # would leave someone waiting for Kansai departures that were never
+            # going to be chained.
+            if stop.overland and len(stop.airports) < 2:
+                raise ValueError(
+                    f"{name}: an overland stop needs at least two airports - one to "
+                    f"arrive at and another to leave from. Add the second airport, "
+                    f"or untick travelling overland."
+                )
 
         if self.window_end < self.window_start:
             raise ValueError(
@@ -263,6 +333,8 @@ class Scenario:
                     f"window {self.window_start}..{self.window_end}; widen the window first"
                 )
 
+        self._validate_watches()
+
         unknown = [name for name in self.notify if name not in NOTIFY_SELECTIONS]
         if unknown:
             raise ValueError(
@@ -282,6 +354,60 @@ class Scenario:
                 f"{self.min_trip_days} ({breakdown}); widen the window or shorten the stays"
             )
 
+    def _validate_watches(self) -> None:
+        """Every watched candidate must be a trip this scenario could produce.
+
+        Checked against the shape rather than merely parsed, because a watch
+        that cannot chain is worse than a rejected one: the run spends its
+        searches, finds legs, and reports no price at all for that day - which
+        looks exactly like the site having nothing.
+        """
+        if len(self.watches) > MAX_WATCHES:
+            raise ValueError(
+                f"{len(self.watches)} days watched, but only {MAX_WATCHES} may be watched "
+                f"at once - each one is a full set of searches every few hours. "
+                f"Stop watching a day before adding another."
+            )
+
+        seen: set[str] = set()
+        for watch in self.watches:
+            dates = watch.depart_dates
+            if len(dates) != self.leg_count:
+                raise ValueError(
+                    f"the watch on {watch.key or '(no date)'} has {len(dates)} date(s) but "
+                    f"this trip has {self.leg_count} legs; a watch needs one date per leg"
+                )
+            if watch.key in seen:
+                raise ValueError(f"{watch.key} is already being watched; it cannot be watched twice")
+            seen.add(watch.key)
+
+            for earlier, later in zip(dates, dates[1:], strict=False):
+                if later <= earlier:
+                    raise ValueError(
+                        f"the watch on {watch.key} has its legs out of order: "
+                        f"{later} does not come after {earlier}"
+                    )
+
+            # Sliced one short for the same reason `remaining_min_stay` slices:
+            # the last leg arrives where the trip ends and nothing has to happen
+            # after it, so the final stop of a one-way chain has no departing
+            # leg to measure a stay against.
+            for index, stop in enumerate(self.stops[: self.leg_count - 1]):
+                days = (dates[index + 1] - dates[index]).days
+                low, high = stop.stay_days
+                if not low <= days <= high:
+                    raise ValueError(
+                        f"the watch on {watch.key} spends {days} days at "
+                        f"{stop.describe(index)}, outside its {low}-{high} day stay"
+                    )
+
+            if not self.window_start <= dates[0] <= self.window_end:
+                raise ValueError(
+                    f"the watch on {watch.key} leaves outside the window "
+                    f"{self.window_start}..{self.window_end}; widen the window or stop "
+                    f"watching that day"
+                )
+
     # ---------------------------------------------------------- serialisation
 
     def to_dict(self) -> dict:
@@ -290,8 +416,22 @@ class Scenario:
         data["window_end"] = self.window_end.isoformat()
         data["focus_start"] = self.focus_start.isoformat() if self.focus_start else None
         data["focus_end"] = self.focus_end.isoformat() if self.focus_end else None
+        data["watches"] = [
+            {
+                "depart_dates": [d.isoformat() for d in w.depart_dates],
+                "added_at": w.added_at,
+                "added_price": w.added_price,
+                "currency": w.currency,
+            }
+            for w in self.watches
+        ]
         data["stops"] = [
-            {"label": s.label, "airports": list(s.airports), "stay_days": list(s.stay_days)}
+            {
+                "label": s.label,
+                "airports": list(s.airports),
+                "stay_days": list(s.stay_days),
+                "overland": s.overland,
+            }
             for s in self.stops
         ]
         return data
@@ -304,11 +444,24 @@ class Scenario:
         for key in ("focus_start", "focus_end"):
             value = payload.get(key)
             payload[key] = date.fromisoformat(value) if value else None
+        payload["watches"] = [
+            Watch(
+                depart_dates=[date.fromisoformat(d) for d in w["depart_dates"]],
+                added_at=w.get("added_at", ""),
+                added_price=w.get("added_price"),
+                currency=w.get("currency", "CZK"),
+            )
+            # Absent from every file written before the Watch tab existed.
+            for w in payload.get("watches") or []
+        ]
         payload["stops"] = [
             Stop(
                 airports=list(s["airports"]),
                 stay_days=tuple(s["stay_days"]),
                 label=s.get("label", ""),
+                # Absent from every file written before overland stops existed,
+                # and those are committed trips that must keep loading.
+                overland=bool(s.get("overland", False)),
             )
             for s in payload["stops"]
         ]

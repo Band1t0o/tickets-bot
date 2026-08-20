@@ -52,3 +52,9 @@ data/20*-*-*/
 # was last asked for a price from *this* machine; committing it would put a
 # laptop's Tuesday afternoon into a cloud sweep's history and tell you nothing.
 data/source_checks.json
+
+# A watch run's working directory - legs, searches, status - at six runs a day.
+# The distilled `observations.jsonl` beside it is the finding and IS committed;
+# the legs behind one observation are worth having until it is computed and not
+# after, and committing them would add ~3,600 leg rows a day to the history.
+data/watch/*/20*-*-*T*Z/

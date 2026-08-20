@@ -408,3 +408,101 @@ def test_a_focused_sweep_can_still_complete_a_trip():
     last_out = max(s.depart_date for s in searches if s.leg_index == 0)
     last_home = max(s.depart_date for s in searches if s.leg_index == scenario.leg_count - 1)
     assert last_out + timedelta(days=scenario.min_trip_days) <= last_home
+
+
+# ---------------------------------------------------------------- watch plan
+#
+# A watch prices a handful of pinned candidate trips, not a window. Its whole
+# reason to exist is that it fits inside what the site will answer, so the
+# search count is the thing under test.
+
+
+def watched(*starts, **overrides):
+    """A trip watching one candidate per start date, ten days a stop."""
+    from datetime import date
+
+    from src.scenario import Watch
+
+    def candidate(start):
+        first = date.fromisoformat(start)
+        return Watch(depart_dates=[first, first + timedelta(days=10), first + timedelta(days=20)])
+
+    return two_stop(watches=[candidate(s) for s in starts], **overrides)
+
+
+def test_a_watch_prices_every_airport_pair_on_the_pinned_dates():
+    from datetime import date
+
+    from src.sweep.planner import plan_watch
+
+    searches = plan_watch(watched("2027-01-10"))
+    # 2 origins x 2 Japanese airports, then 2 x 1, then 1 x 2 = 4 + 2 + 2.
+    assert len(searches) == 8
+    assert {s.depart_date for s in searches} == {
+        date(2027, 1, 10), date(2027, 1, 20), date(2027, 1, 30)
+    }
+    assert ("PRG", "NRT", date(2027, 1, 10)) in {
+        (s.origin, s.destination, s.depart_date) for s in searches
+    }
+
+
+def test_a_watch_never_searches_a_date_the_candidate_did_not_pin():
+    """The saving over a focused sweep is exactly this: no derived dates."""
+    from datetime import date
+
+    from src.sweep.planner import plan_watch
+
+    dates = {s.depart_date for s in plan_watch(watched("2027-01-10"))}
+    assert date(2027, 1, 11) not in dates
+    assert date(2027, 1, 21) not in dates
+
+
+def test_two_candidates_whose_legs_land_on_one_day_share_its_searches():
+    """Sharing is per leg, not per date.
+
+    Two candidates a day apart with stays that differ by a day fly their second
+    and third legs on the very same days, and those searches are run once. A
+    date shared across *different* legs is not a saving at all - leg 0 on 20
+    January is PRG->NRT and leg 1 on 20 January is NRT->MNL, which have no
+    search in common.
+    """
+    from datetime import date
+
+    from src.scenario import Watch
+    from src.sweep.planner import plan_watch
+
+    def candidate(*days):
+        return Watch(depart_dates=[date(2027, 1, d) for d in days])
+
+    alone = len(plan_watch(two_stop(watches=[candidate(10, 20, 30)])))
+    # 11 Jan + 9 days in Japan lands on the same 20th, and home the same 30th.
+    together = len(plan_watch(two_stop(watches=[candidate(10, 20, 30), candidate(11, 20, 30)])))
+    assert together < alone * 2
+
+
+def test_watching_nothing_plans_nothing():
+    from src.sweep.planner import plan_watch
+
+    assert plan_watch(two_stop()) == []
+
+
+def test_a_watch_of_the_real_trip_fits_inside_what_the_site_answers():
+    """Three candidates on the full trip: the number the cadence rests on.
+
+    21 routes at one date each per leg is 21 searches a candidate. If this ever
+    exceeds ~120 the four-hourly watch stops being possible from one runner,
+    and it will do so silently - the sweep just stops being answered part way.
+    """
+    from datetime import date
+    from datetime import timedelta as td
+
+    from src.scenario import Watch
+
+    def candidate(day):
+        first = date(2027, 1, day)
+        return Watch(depart_dates=[first, first + td(days=10), first + td(days=20)])
+
+    from src.sweep.planner import plan_watch
+
+    trip = make_scenario(watches=[candidate(6), candidate(13), candidate(20)])
+    assert len(plan_watch(trip)) <= 110

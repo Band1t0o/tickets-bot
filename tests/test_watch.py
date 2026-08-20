@@ -1,0 +1,333 @@
+"""Tests for tracking a handful of pinned candidate trips over time.
+
+A watch answers a narrower question than a sweep: not "what is this window
+worth" but "is *this* trip, on *these* days, moving". So the things under test
+are the ones that make a series honest - that a run which found nothing records
+a gap rather than a zero, that a starved run is marked rather than plotted, and
+that a ping means a real fall and not the site rounding by six crowns.
+"""
+from __future__ import annotations
+
+import json
+from datetime import date
+
+from src.models import Leg
+from src.scenario import Scenario, Stop, Watch
+from tests.conftest import make_scenario
+
+CANDIDATE = [date(2027, 1, 10), date(2027, 1, 20), date(2027, 1, 30)]
+OTHER = [date(2027, 1, 12), date(2027, 1, 22), date(2027, 2, 1)]
+
+
+def trip(*candidates, **overrides) -> Scenario:
+    defaults = dict(
+        id="jp-ph",
+        origins=["PRG"],
+        stops=[
+            Stop(airports=["NRT"], stay_days=(9, 11), label="Japan"),
+            Stop(airports=["MNL"], stay_days=(9, 11), label="Philippines"),
+        ],
+        watches=[Watch(depart_dates=list(c)) for c in (candidates or [CANDIDATE])],
+        bag_estimate=0,
+    )
+    defaults.update(overrides)
+    return make_scenario(**defaults)
+
+
+def leg(origin, destination, depart, price) -> Leg:
+    return Leg(
+        provider="TEST", origin=origin, destination=destination, depart_date=depart,
+        airline="QR", flight_number=None, stops=1, price_currency="CZK",
+        price_amount=price, url="", checked_bag=True,
+    )
+
+
+def legs_for(dates, prices=(12000.0, 4000.0, 14000.0)):
+    return [
+        leg("PRG", "NRT", dates[0], prices[0]),
+        leg("NRT", "MNL", dates[1], prices[1]),
+        leg("MNL", "PRG", dates[2], prices[2]),
+    ]
+
+
+def status(coverage=1.0, legs_per_search=9.5):
+    return {"coverage": coverage, "legs_per_search": legs_per_search, "state": "done"}
+
+
+# ------------------------------------------------------------- observations
+
+
+def test_an_observation_records_what_the_candidate_costs_now(tmp_path):
+    from src.watch import record_observations
+
+    rows = record_observations(legs_for(CANDIDATE), trip(), status(), tmp_path)
+    assert len(rows) == 1
+    assert rows[0]["depart_date"] == "2027-01-10"
+    assert rows[0]["total"] == 30000
+    assert rows[0]["route"] == "PRG → NRT → MNL → PRG"
+    assert rows[0]["pinned_dates"] == ["2027-01-10", "2027-01-20", "2027-01-30"]
+
+
+def test_a_candidate_that_found_nothing_records_no_price_rather_than_zero(tmp_path):
+    """A run that came back empty is breakage, not a free flight.
+
+    Averaging a 0 into the series would be nonsense, and drawing it would put
+    the cheapest trip you ever saw at the bottom of the chart.
+    """
+    from src.watch import record_observations
+
+    rows = record_observations([], trip(), status(), tmp_path)
+    assert rows[0]["total"] is None
+
+
+def test_observations_append_rather_than_replace(tmp_path):
+    from src.watch import record_observations
+
+    record_observations(legs_for(CANDIDATE), trip(), status(), tmp_path)
+    record_observations(
+        legs_for(CANDIDATE, (11000.0, 4000.0, 14000.0)), trip(), status(), tmp_path
+    )
+    lines = (tmp_path / "observations.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    assert [json.loads(line)["total"] for line in lines] == [30000, 29000]
+
+
+def test_each_candidate_gets_its_own_row(tmp_path):
+    from src.watch import record_observations
+
+    rows = record_observations(
+        legs_for(CANDIDATE) + legs_for(OTHER, (9000.0, 4000.0, 14000.0)),
+        trip(CANDIDATE, OTHER),
+        status(),
+        tmp_path,
+    )
+    assert {r["depart_date"]: r["total"] for r in rows} == {
+        "2027-01-10": 30000,
+        "2027-01-12": 27000,
+    }
+
+
+def test_an_observation_carries_the_health_of_the_run_that_made_it(tmp_path):
+    from src.watch import record_observations
+
+    rows = record_observations(legs_for(CANDIDATE), trip(), status(0.5, 2.9), tmp_path)
+    assert rows[0]["coverage"] == 0.5
+    assert rows[0]["comparable"] is False
+
+
+# ------------------------------------------------------------------ report
+
+
+def test_the_report_gives_each_candidate_its_own_series(tmp_path):
+    from src.watch import record_observations, watch_report
+
+    record_observations(legs_for(CANDIDATE), trip(), status(), tmp_path)
+    record_observations(
+        legs_for(CANDIDATE, (11000.0, 4000.0, 14000.0)), trip(), status(), tmp_path
+    )
+
+    report = watch_report(tmp_path)
+    candidate = report["candidates"]["2027-01-10"]
+    assert [point["total"] for point in candidate["series"]] == [30000, 29000]
+    assert candidate["latest"] == 29000
+    assert candidate["net_change"] == -1000
+
+
+def test_the_report_states_the_move_as_a_percentage(tmp_path):
+    from src.watch import record_observations, watch_report
+
+    record_observations(legs_for(CANDIDATE), trip(), status(), tmp_path)
+    record_observations(
+        legs_for(CANDIDATE, (15000.0, 4000.0, 14000.0)), trip(), status(), tmp_path
+    )
+    candidate = watch_report(tmp_path)["candidates"]["2027-01-10"]
+    assert candidate["net_change_pct"] == 10.0
+
+
+def test_a_starved_run_is_kept_but_not_counted(tmp_path):
+    """The gap in the record is worth seeing; the price in it is not a price.
+
+    A run the site refused half of reports a cheapest total that says more
+    about the scraper than the market, and averaging it into the move would
+    chart scraper health - the mistake the history chart made for four sweeps.
+    """
+    from src.watch import record_observations, watch_report
+
+    record_observations(legs_for(CANDIDATE), trip(), status(), tmp_path)
+    record_observations(
+        legs_for(CANDIDATE, (99000.0, 4000.0, 14000.0)), trip(), status(0.3, 2.1), tmp_path
+    )
+
+    candidate = watch_report(tmp_path)["candidates"]["2027-01-10"]
+    assert len(candidate["series"]) == 2
+    assert candidate["series"][1]["comparable"] is False
+    assert candidate["latest"] == 30000  # the last trustworthy one
+
+
+def test_an_empty_directory_reports_nothing_rather_than_failing(tmp_path):
+    from src.watch import watch_report
+
+    assert watch_report(tmp_path)["candidates"] == {}
+
+
+# ------------------------------------------------------------------- drops
+
+
+def test_a_real_fall_is_reported(tmp_path):
+    from src.watch import drops, record_observations, watch_report
+
+    record_observations(legs_for(CANDIDATE), trip(), status(), tmp_path)
+    assert drops(watch_report(tmp_path), trip(), tmp_path) == []
+
+    record_observations(
+        legs_for(CANDIDATE, (8000.0, 4000.0, 14000.0)), trip(), status(), tmp_path
+    )
+    found = drops(watch_report(tmp_path), trip(), tmp_path)
+    assert len(found) == 1
+    assert found[0]["depart_date"] == "2027-01-10"
+    assert found[0]["total"] == 26000
+    assert found[0]["previous_best"] == 30000
+
+
+def test_the_site_rounding_by_a_few_crowns_is_not_news(tmp_path):
+    """Sub-1% moves are the site rounding, not the market.
+
+    Counting every non-zero change once made the steadiest probe route report
+    the highest volatility of the three, on six-crown twitches.
+    """
+    from src.watch import drops, record_observations, watch_report
+
+    record_observations(legs_for(CANDIDATE), trip(), status(), tmp_path)
+    drops(watch_report(tmp_path), trip(), tmp_path)
+    record_observations(
+        legs_for(CANDIDATE, (11950.0, 4000.0, 14000.0)), trip(), status(), tmp_path
+    )
+    assert drops(watch_report(tmp_path), trip(), tmp_path) == []
+
+
+def test_a_drip_of_small_falls_eventually_adds_up_to_news(tmp_path):
+    """Each step is below the floor; together they are a real fall.
+
+    The level a drop is measured against only moves when something is actually
+    reported, so a slow slide cannot stay silent forever by never taking a big
+    enough step.
+    """
+    from src.watch import drops, record_observations, watch_report
+
+    found = []
+    for fare in (12000.0, 11950.0, 11900.0, 11850.0, 11500.0):
+        record_observations(
+            legs_for(CANDIDATE, (fare, 4000.0, 14000.0)), trip(), status(), tmp_path
+        )
+        found = drops(watch_report(tmp_path), trip(), tmp_path)
+    assert len(found) == 1
+    assert found[0]["total"] == 29500
+
+
+def test_the_same_fall_is_not_reported_twice(tmp_path):
+    from src.watch import drops, record_observations, watch_report
+
+    record_observations(legs_for(CANDIDATE), trip(), status(), tmp_path)
+    drops(watch_report(tmp_path), trip(), tmp_path)
+    record_observations(
+        legs_for(CANDIDATE, (8000.0, 4000.0, 14000.0)), trip(), status(), tmp_path
+    )
+    assert len(drops(watch_report(tmp_path), trip(), tmp_path)) == 1
+    assert drops(watch_report(tmp_path), trip(), tmp_path) == []
+
+
+def test_a_starved_run_never_raises_an_alert(tmp_path):
+    from src.watch import drops, record_observations, watch_report
+
+    record_observations(legs_for(CANDIDATE), trip(), status(), tmp_path)
+    drops(watch_report(tmp_path), trip(), tmp_path)
+    record_observations(
+        legs_for(CANDIDATE, (1000.0, 1000.0, 1000.0)), trip(), status(0.2, 1.5), tmp_path
+    )
+    assert drops(watch_report(tmp_path), trip(), tmp_path) == []
+
+
+def test_the_price_you_picked_it_at_is_what_the_first_run_is_judged_against(tmp_path):
+    """Otherwise the first observation can never be news, however far it fell.
+
+    You add a candidate having just seen it at 30,000; the watch runs an hour
+    later and it is 26,000. That is exactly the message worth having.
+    """
+    from src.watch import drops, record_observations, watch_report
+
+    watched = trip()
+    watched.watches[0] = Watch(depart_dates=list(CANDIDATE), added_price=30000.0)
+    record_observations(
+        legs_for(CANDIDATE, (8000.0, 4000.0, 14000.0)), watched, status(), tmp_path
+    )
+    found = drops(watch_report(tmp_path), watched, tmp_path)
+    assert len(found) == 1
+    assert found[0]["previous_best"] == 30000.0
+
+
+# ------------------------------------------------------------- the command
+
+
+def _watched_repo(tmp_path, monkeypatch, **overrides):
+    """A scratch repo with one watched trip, since the CLI reads scenarios/."""
+    from src.scenario import save_scenario
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "scenarios").mkdir()
+    save_scenario(trip(**overrides), tmp_path / "scenarios")
+    return tmp_path
+
+
+class OneLegProvider:
+    """Prices whatever it is asked for, so a watch run finds a whole trip."""
+
+    NAME = "FAKE"
+
+    def __init__(self, price=4000.0):
+        self.price = price
+        self.calls = []
+
+    def search_leg(self, page, origin, destination, depart, ret=None, adults=1):
+        self.calls.append((origin, destination, depart))
+        return [leg(origin, destination, depart, self.price)]
+
+
+def test_the_command_writes_an_observation_per_candidate(tmp_path, monkeypatch):
+    from src.cli import run_watch_command
+
+    _watched_repo(tmp_path, monkeypatch)
+    run_watch_command(
+        "jp-ph", provider=OneLegProvider(), data_dir=tmp_path / "data",
+        delay_s=0, notify=False,
+    )
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "data" / "watch" / "jp-ph" / "observations.jsonl")
+        .read_text(encoding="utf-8").strip().splitlines()
+    ]
+    assert [row["depart_date"] for row in rows] == ["2027-01-10"]
+    assert rows[0]["total"] == 12000
+
+
+def test_the_command_searches_only_the_pinned_dates(tmp_path, monkeypatch):
+    from src.cli import run_watch_command
+
+    _watched_repo(tmp_path, monkeypatch)
+    provider = OneLegProvider()
+    run_watch_command(
+        "jp-ph", provider=provider, data_dir=tmp_path / "data", delay_s=0, notify=False
+    )
+    assert {call[2] for call in provider.calls} == set(CANDIDATE)
+
+
+def test_watching_nothing_is_refused_rather_than_run_empty(tmp_path, monkeypatch):
+    """A run of no searches would write a directory, report coverage 0.0 and
+    look like a watch that failed, rather than a trip nobody asked to watch."""
+    import pytest
+
+    from src.cli import run_watch_command
+
+    _watched_repo(tmp_path, monkeypatch, watches=[])
+    with pytest.raises(SystemExit):
+        run_watch_command(
+            "jp-ph", provider=OneLegProvider(), data_dir=tmp_path / "data", notify=False
+        )

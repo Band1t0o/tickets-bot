@@ -59,6 +59,7 @@
       <button data-tab="explore">Explore</button>
       <button data-tab="results">Results</button>
       <button data-tab="prices">Prices</button>
+      <button data-tab="watch">Watch</button>
       <button data-tab="sources">Sources</button>
     </div>
 
@@ -296,6 +297,70 @@
           steadiest route here used to report the highest volatility.
         </p>
         <div id="probe-body" class="empty">No observations yet.</div>
+      </div>
+    </section>
+
+    <!-- ------------------------------------------------------------- Watch -->
+    <!--
+      After Prices, because it reads what Prices produced. A sweep answers what
+      a whole window is worth, once a day, at hundreds of searches. Once it has
+      said which days are cheap the question becomes whether *those* are moving,
+      and re-sweeping the window to answer it is the load this client has been
+      throttled for. So a handful of candidates are pinned to their exact leg
+      dates and re-priced every four hours instead - 21 searches each rather
+      than 75, which is the whole difference between a check that can run six
+      times a day and one that cannot run at all.
+    -->
+    <section data-panel="watch" hidden>
+      <div class="panel">
+        <div class="panel__header">
+          <h2>Days you are watching</h2>
+          <span class="badge badge--muted" id="watch-cost">—</span>
+        </div>
+        <p class="panel__hint">
+          Each of these is a whole trip pinned to its exact dates, re-priced every four
+          hours by its own cloud run. Lines share one set of axes on purpose: the question
+          is which of these days to book, and that is a comparison. A point drawn hollow
+          came from a run the site refused part of — the gap is worth seeing, the price in
+          it is not a price. Discord hears about a day only when it falls by more than 1%,
+          because this site moves fares by a few crowns at a time and those are not news.
+        </p>
+        <div class="chart" id="watch-chart"></div>
+        <div class="table-scroll">
+          <table class="data" id="watch-table">
+            <thead>
+              <tr>
+                <th>Departs</th><th>Trip</th><th class="num">When picked</th>
+                <th class="num">Now</th><th class="num">Change</th><th></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="empty" id="watch-empty">
+          Nothing is being watched yet. Pick a day below and it will be re-priced every
+          few hours from then on.
+        </div>
+        <div class="row" style="margin-top:16px">
+          <button id="watch-run-btn">Check now</button>
+          <span class="muted small" id="watch-run-note"></span>
+        </div>
+        <div id="watch-error" class="panel-error badge badge--error" hidden></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel__header">
+          <h2>Pick a day from the last sweep</h2>
+          <select id="watch-sweep-select"></select>
+        </div>
+        <p class="panel__hint">
+          The cheapest trip found on each departure date, cheapest first. Picking one pins
+          that trip's leg dates — so a nine-day stay in Japan stays nine days — while still
+          pricing every airport on them, which is what lets the watch notice that Frankfurt
+          undercut Vienna overnight.
+        </p>
+        <div class="notice notice--warning" id="watch-coverage" hidden></div>
+        <div id="watch-candidates"></div>
       </div>
     </section>
 

@@ -1,4 +1,4 @@
-.PHONY: install run watch fmt lint pw-install test test-ui ui sweep dry-run probe probe-report
+.PHONY: install run watch watch-report fmt lint pw-install test test-ui ui sweep dry-run probe probe-report
 
 # 3.10+ is the real floor: models use `str | None`, which pydantic evaluates at
 # runtime and 3.9 cannot parse. CI pins 3.12; the suite passes on 3.11.
@@ -44,3 +44,10 @@ probe:
 
 probe-report:
 	$(PYTHON) -m src.cli probe-report
+
+# `watch` was declared .PHONY and never existed, like sweep and probe before it.
+watch:
+	$(PYTHON) -m src.cli watch --scenario $(SCENARIO)
+
+watch-report:
+	$(PYTHON) -m src.cli watch-report --scenario $(SCENARIO)

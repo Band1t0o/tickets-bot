@@ -23,7 +23,7 @@ from typing import Protocol
 
 from ..models import Leg
 from ..scenario import Scenario
-from .planner import LegSearch, plan_exploration, plan_searches, shard_of
+from .planner import LegSearch, plan_exploration, plan_searches, plan_watch, shard_of
 
 # Politeness delay between searches on the same worker.
 #
@@ -41,8 +41,15 @@ from .planner import LegSearch, plan_exploration, plan_searches, shard_of
 SEARCH_DELAY_S = 4.0
 DEFAULT_WORKERS = 2
 
-# "sweep" prices a trip; "explore" scouts which airports are worth pricing.
-MODES = ("sweep", "explore")
+# "sweep" prices a trip; "explore" scouts which airports are worth pricing;
+# "watch" re-prices a handful of pinned candidate trips on their exact dates.
+MODES = ("sweep", "explore", "watch")
+
+# Where each mode's runs are kept. A watch is not a sweep and must not be filed
+# as one: six tiny runs a day in `data/sweeps/` would fill the Results picker
+# with healthy-looking sweeps that priced three days out of seventy, and the
+# richest-looking run offered would be the one that looked at least.
+MODE_ROOTS = {"sweep": "sweeps", "explore": "sweeps", "watch": "watch"}
 
 # Times a worker will come back to a search that has not been answered.
 #
@@ -149,7 +156,8 @@ def is_comparable(
       post a perfectly healthy legs-per-search while pricing three dates out of
       seventy. Its cheapest total is a reconnaissance figure, and plotting it as
       a price would put a spike in the chart that no fare ever made. Stopped
-      sweeps fall out through `state` for the same reason.
+      sweeps fall out through `state` for the same reason, and a watch - which
+      prices even fewer days, and on purpose - falls out with them.
     - **Focused differently.** A focused sweep prices a handful of departure
       dates out of the window, so its cheapest is the cheapest *of those dates*
       rather than of the trip. Plotting it beside a broad sweep draws a step no
@@ -159,7 +167,7 @@ def is_comparable(
     """
     if status.get("state") != "done":
         return False
-    if status.get("mode") == "explore":
+    if status.get("mode") in {"explore", "watch"}:
         return False
     if focus_of(status) != (list(focus) if focus else None):
         return False
@@ -427,6 +435,8 @@ def run_sweep(
 
     `mode="explore"` runs the reconnaissance plan instead: every route on a
     handful of dates, to find out which airports are worth pricing at all.
+    `mode="watch"` runs the pinned candidates of `scenario.watches` and writes
+    to `data/watch/` rather than `data/sweeps/`.
     Deliberately a separate argument from `depth` rather than a fourth depth -
     depth is saved on the scenario and read by the nightly cloud workflow, so an
     "explore" depth could be persisted and quietly turn the daily sweep into a
@@ -461,11 +471,12 @@ def run_sweep(
 
         provider = PelikanProvider()
 
-    searches = plan_exploration(scenario) if mode == "explore" else plan_searches(scenario)
+    plans = {"explore": plan_exploration, "watch": plan_watch, "sweep": plan_searches}
+    searches = plans[mode](scenario)
     planned = len(searches)
     if shard is not None:
         searches = shard_of(searches, *shard)
-    directory = _new_sweep_directory(Path(data_dir) / "sweeps" / scenario.id)
+    directory = _new_sweep_directory(Path(data_dir) / MODE_ROOTS[mode] / scenario.id)
     _write_scenario(directory, scenario)
 
     result = SweepResult(
@@ -526,6 +537,12 @@ def run_sweep(
                 if scenario.focus_start and scenario.focus_end
                 else None
             ),
+            # The candidates this run was following, so a watch directory says
+            # what it is a watch *of* without needing the trip beside it - the
+            # trip is edited, and the run is not.
+            "watches": [
+                [d.isoformat() for d in watch.depart_dates] for watch in scenario.watches
+            ],
             "started_at": result.started_at,
             "finished_at": result.finished_at,
             "depth": scenario.depth,
