@@ -1248,3 +1248,62 @@ def test_a_form_driven_source_offers_no_selectors_to_repair(ui):
     assert card.locator('[data-role="repair"]').count() == 0
     assert card.locator('[data-role="check"]').count() == 1
     assert not errors
+
+
+# ------------------------------------------------- reading a partial sweep
+#
+# The failure this exists for is silence: the sharded run of 20 Aug posted
+# `error_count: 0` beside 48 searches it never made, because the circuit breaker
+# abandoned them rather than attempting and failing them. Coverage is the figure
+# that caught it, and the Results tab is where it has to be said - these are the
+# numbers you would book on.
+
+
+def test_a_sweep_with_holes_says_so_above_the_prices(ui):
+    page, scenarios, errors = ui
+    seed_sweep(
+        scenarios.parent / "data", "2026-08-20T02-00-00Z",
+        status={"state": "done", "total": 168, "legs_found": 5, "depth": "deep",
+                "legs_per_search": 9.0, "answered": 120, "planned": 168,
+                "coverage": 0.714, "unanswered": 48},
+    )
+    page.reload(wait_until="networkidle")
+    page.locator('#tabs button[data-tab="results"]').click()
+    page.wait_for_timeout(900)
+
+    notice = page.locator("#completeness")
+    assert notice.is_visible()
+    text = notice.inner_text()
+    assert "71%" in text, text
+    assert "could have been the cheap ones" in text, text
+    assert not errors
+
+
+def test_a_complete_sweep_says_nothing_at_all(ui):
+    """A banner that is always there is a banner nobody reads."""
+    page, scenarios, errors = ui
+    seed_sweep(
+        scenarios.parent / "data", "2026-08-20T02-00-00Z",
+        status={"state": "done", "total": 168, "legs_found": 5, "depth": "deep",
+                "answered": 168, "planned": 168, "coverage": 1.0, "unanswered": 0},
+    )
+    page.reload(wait_until="networkidle")
+    page.locator('#tabs button[data-tab="results"]').click()
+    page.wait_for_timeout(900)
+    assert page.locator("#completeness").is_hidden()
+    assert not errors
+
+
+def test_a_sweep_from_before_coverage_existed_does_not_claim_completeness(ui):
+    """Every sweep committed before 20 Aug. Absent must not read as 100%, and
+    must not read as a warning either - it is simply not known."""
+    page, scenarios, errors = ui
+    seed_sweep(
+        scenarios.parent / "data", "2026-08-10T11-57-06Z",
+        status={"state": "done", "total": 93, "legs_found": 5, "depth": "quick"},
+    )
+    page.reload(wait_until="networkidle")
+    page.locator('#tabs button[data-tab="results"]').click()
+    page.wait_for_timeout(900)
+    assert page.locator("#completeness").is_hidden()
+    assert not errors
