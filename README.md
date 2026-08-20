@@ -416,19 +416,24 @@ The repo is **public**, so Actions minutes are free and depth is no longer ratio
 | Volatility probe ([probe.yml](.github/workflows/probe.yml)) | every 2 h | ~2 min |
 | Tests ([test.yml](.github/workflows/test.yml)) | every push | ~1 min |
 
-**The limit is on this client as a whole, not per address.** Sharding (`--shard i/n`, stitched back
-by `merge-shards`) was built believing otherwise -- three runners, three addresses, three times the
-speed. The first sharded run disproved it in one reading: three shards on three separate runner
-addresses were each cut off at **search 120, within 90 seconds of one another**, with zero timeouts
-up to that point. 360 searches in 21 minutes is 17/min; the clean single-runner sweep of 11 August
-held 4.1/min for 86 minutes without a single timeout.
+**What stops a sweep is a browser session.** Not an address, and not a rate -- both of which the
+first two readings were taken for. Three cloud runs settle it:
 
-So the sweep runs on **one runner** (`DEFAULT_SHARDS: 1`), and `SAFE_SEARCHES_PER_MINUTE = 4.1` in
-the planner records why. The machinery stays, because it is the right tool if the site changes and
-because shards are dealt per route -- `searches[i::n]` would hand each runner the same few routes,
-so a throttled shard would delete routes from the merged sweep and read downstream as dead routes
-rather than as a lost shard. Raising the count is a `workflow_dispatch` input, so an experiment
-does not need a commit; it also does not make the sweep faster.
+| Run | Shape | Answered |
+|---|---|---:|
+| 11 Aug | 1 runner, 2 workers | 350, zero timeouts |
+| 20 Aug | 3 runners, 2 workers | 360 -- **120 per runner** |
+| 20 Aug | 1 runner, 2 workers | **120** |
+
+One runner and three runners both answered 120 *per runner*, at a steady ten seconds a search with
+no slowdown at all before a hard cliff. Each worker holds its own browser, so that is **60 searches
+per session**, every time -- and three runners only looked faster because six sessions beat two.
+
+`PAGE_RECYCLE_EVERY = 40` in [runner.py](src/sweep/runner.py) replaces the browser before a session
+is spent. A context restart costs ~1-2 s against ~10 s per search, so recycling a whole deep sweep
+costs under a minute. Sharding (`--shard i/n`, stitched by `merge-shards`) stays, dealt per route so
+a lost shard thins the date grid rather than deleting routes -- but it is now a wall-clock choice
+rather than a way to buy searches, and `DEFAULT_SHARDS` is 1.
 
 **`timeout-minutes` is a ceiling above the budget, never the budget.** It used to be the budget, set
 from an estimate that was wrong by half, and thirteen consecutive nightly runs -- 8 to 20 August --
