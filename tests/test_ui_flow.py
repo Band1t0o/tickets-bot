@@ -16,7 +16,7 @@ import socket
 import threading
 import time
 from contextlib import closing
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
@@ -838,63 +838,124 @@ def test_an_empty_tier_row_is_dropped_rather_than_failing_the_save(ui):
 
 def open_sources(page):
     page.locator('#tabs button[data-tab="sources"]').click()
-    page.wait_for_selector("#sources-body [data-source]")
+    page.wait_for_selector(".source-card")
+
+
+def open_repair(page, name="PELIKAN"):
+    """Reveal the selector form the way a person reaches it: by pressing Repair."""
+    card = page.locator(f'.source-card[data-source="{name}"]')
+    card.locator('[data-role="repair"]').click()
+    page.wait_for_timeout(300)
+    return card
+
+
+def stub_check(page, ok=True, message="stubbed"):
+    """Answer the check without touching pelikan.cz.
+
+    Saving a repair now runs a real search, because "saved" and "working" are
+    different claims and the gap between them is why this panel exists. A test
+    must not be the thing that closes it.
+    """
+    page.route("**/api/sources/*/test", lambda route: route.fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps({
+            "ok": ok, "message": message, "cards_found": 3 if ok else 0,
+            "legs_parsed": 3 if ok else 0, "route": "PRG→NRT 2027-01-10",
+            "sample": None, "url": "https://www.pelikan.cz/cs/letenky/x/",
+            "checked_at": "2026-08-20T09:00:00+00:00",
+        }),
+    ))
 
 
 def test_the_sources_tab_shows_the_live_selectors(ui):
+    """Behind Repair now. They are the answer to a question you only have once
+    "is it working" has answered no."""
     page, _, errors = ui
     open_sources(page)
-    card = page.locator('[data-source="PELIKAN"] [data-selector="card"]')
-    assert card.input_value() == "div[id^='flight-']"
-    assert page.locator('[data-source="PELIKAN"] [data-field="base_url"]').input_value() \
-        .startswith("https://www.pelikan.cz")
+    card = open_repair(page)
+    assert card.locator('[data-selector="card"]').input_value() == "div[id^='flight-']"
+    assert card.locator('[data-field="base_url"]').input_value()         .startswith("https://www.pelikan.cz")
     assert not errors
 
 
 def test_a_selector_edited_by_hand_reaches_disk(ui):
     """The whole point of the tab: no code change, no redeploy, no me."""
     page, scenario_dir, errors = ui
+    stub_check(page)
     open_sources(page)
+    card = open_repair(page)
 
-    field = page.locator('[data-source="PELIKAN"] [data-selector="card"]')
+    field = card.locator('[data-selector="card"]')
     field.fill("")
     field.click()
     page.keyboard.type("div.new-offer-class", delay=25)
-    page.locator('[data-source="PELIKAN"] button:has-text("Save sources")').click()
+    card.locator('button:has-text("Save and check again")').click()
     page.wait_for_timeout(900)
 
     saved = json.loads((scenario_dir.parent / "data" / "sources.json").read_text(encoding="utf-8"))
     assert saved["PELIKAN"]["selectors"]["card"] == "div.new-offer-class"
-    assert "Saved" in page.locator("#source-result-PELIKAN").inner_text()
+    assert not errors
+
+
+def test_saving_a_repair_proves_it_rather_than_claiming_success(ui):
+    """"Saved" and "working" are different claims, and the gap between them is
+    the whole reason this panel exists - so the save checks itself."""
+    page, _, errors = ui
+    stub_check(page, ok=True, message="3 card(s) matched and 3 parsed cleanly.")
+    open_sources(page)
+    card = open_repair(page)
+    card.locator('button:has-text("Save and check again")').click()
+    page.wait_for_timeout(900)
+
+    assert "3 parsed cleanly" in card.locator('[data-role="outcome"]').inner_text()
+    assert "working" in card.locator('[data-role="state"]').inner_text()
     assert not errors
 
 
 def test_an_empty_selector_is_refused_with_a_reason(ui):
     page, _, errors = ui
     open_sources(page)
+    card = open_repair(page)
 
-    page.locator('[data-source="PELIKAN"] [data-selector="price"]').fill("")
-    page.locator('[data-source="PELIKAN"] button:has-text("Save sources")').click()
+    card.locator('[data-selector="price"]').fill("")
+    card.locator('button:has-text("Save and check again")').click()
     page.wait_for_timeout(900)
 
-    outcome = page.locator("#source-result-PELIKAN").inner_text()
+    outcome = card.locator('[data-role="outcome"]').inner_text()
     assert "price" in outcome, outcome
     assert not errors
 
 
 def test_an_edit_survives_leaving_the_tab_and_coming_back(ui):
     page, _, errors = ui
+    stub_check(page)
     open_sources(page)
-    field = page.locator('[data-source="PELIKAN"] [data-field="no_results_marker"]')
-    field.fill("Nothing found")
-    page.locator('[data-source="PELIKAN"] button:has-text("Save sources")').click()
+    card = open_repair(page)
+    card.locator('[data-field="no_results_marker"]').fill("Nothing found")
+    card.locator('button:has-text("Save and check again")').click()
     page.wait_for_timeout(900)
 
     page.locator('#tabs button[data-tab="search"]').click()
     page.wait_for_timeout(300)
     open_sources(page)
-    assert page.locator('[data-source="PELIKAN"] [data-field="no_results_marker"]') \
-        .input_value() == "Nothing found"
+    assert open_repair(page).locator('[data-field="no_results_marker"]')         .input_value() == "Nothing found"
+    assert not errors
+
+
+def test_a_failed_check_opens_the_repair_box_for_you(ui):
+    """The one moment those fields are worth looking at, so you should not have
+    to go looking for them."""
+    page, _, errors = ui
+    stub_check(page, ok=False, message="the card selector matched nothing")
+    open_sources(page)
+    card = page.locator('.source-card[data-source="PELIKAN"]')
+    assert card.locator(".source-card__repair").is_hidden()
+
+    card.locator('[data-role="check"]').click()
+    page.wait_for_timeout(900)
+    assert card.locator(".source-card__repair").is_visible()
+    assert "not working" in card.locator('[data-role="state"]').inner_text()
     assert not errors
 
 
@@ -997,3 +1058,193 @@ def test_a_saved_webhook_is_never_shown_back(ui):
     assert token not in placeholder
     assert "1409876543210987654" in placeholder
     assert token not in page.content()
+
+
+# ------------------------------------------------------- picking a focus
+#
+# Once a broad sweep shows which departure dates are cheap, the next one should
+# price only those. The dates are picked off the chart rather than typed into
+# two date boxes, because the decision is made by looking at the chart and a
+# date box beside it is a second place to get the same answer wrong.
+#
+# Driven by clicking the chart, not by calling the handler: the whole point is
+# that a click near a point picks that point.
+
+
+def seed_a_week_of_dates(data_dir):
+    """Five departure dates, so there is a range to pick out of."""
+    legs = []
+    for offset in range(5):
+        # Real date arithmetic, not string formatting: "2027-01-34" parses
+        # nowhere and blanks the chart this is meant to be drawing.
+        out = date(2027, 1, 10) + timedelta(days=offset)
+        legs += [
+            ("PRG", "NRT", out.isoformat(), 12000.0 + offset * 100),
+            ("NRT", "MNL", (out + timedelta(days=10)).isoformat(), 4000.0),
+            ("MNL", "PRG", (out + timedelta(days=20)).isoformat(), 14000.0),
+        ]
+    seed_sweep(
+        data_dir, "2026-08-19T02-00-00Z",
+        status={"state": "done", "total": 60, "legs_found": len(legs),
+                "legs_per_search": 9.0, "depth": "deep", "coverage": 1.0},
+        legs=legs,
+    )
+
+
+def chart_point(page, index, total):
+    """Click where the nth of `total` points sits, the way a person would.
+
+    The chart pads 44px left and 16px right inside its own viewBox, and scales
+    to the container, so the position is computed from the rendered box rather
+    than from a marker's coordinates - a click has to land near a point, not on
+    a 4px circle.
+    """
+    box = page.locator("#chart-by-date svg").bounding_box()
+    scale = box["width"] / float(page.locator("#chart-by-date svg").get_attribute("width"))
+    left = 44 * scale
+    plot = box["width"] - (44 + 16) * scale
+    x = box["x"] + left + (plot * index / max(1, total - 1))
+    page.mouse.click(x, box["y"] + box["height"] / 2)
+    page.wait_for_timeout(500)
+
+
+def test_clicking_two_points_picks_a_range_and_prices_it(ui):
+    page, scenarios, errors = ui
+    seed_a_week_of_dates(scenarios.parent / "data")
+    page.reload(wait_until="networkidle")
+    open_prices(page)
+
+    assert "whole window" in page.locator("#focus-state").inner_text()
+
+    chart_point(page, 1, 5)
+    first = page.locator("#focus-pick").inner_text()
+    assert "2027-01-11" in first, first
+    # A half-open range must still say something, or the first click looks like
+    # it did nothing at all.
+    assert "second day" in first, first
+
+    chart_point(page, 3, 5)
+    both = page.locator("#focus-pick").inner_text()
+    assert "2027-01-11" in both and "2027-01-13" in both, both
+    # Priced against the trip on screen, not guessed.
+    assert "searches" in both and "whole window" in both, both
+    assert not errors
+
+
+def test_saving_a_focus_writes_it_to_the_trip_on_disk(ui):
+    page, scenarios, errors = ui
+    seed_a_week_of_dates(scenarios.parent / "data")
+    page.reload(wait_until="networkidle")
+    open_prices(page)
+
+    chart_point(page, 1, 5)
+    chart_point(page, 3, 5)
+    page.locator("#focus-save").click()
+    page.wait_for_timeout(700)
+
+    saved = json.loads((scenarios / "jp-ph.json").read_text(encoding="utf-8"))
+    assert saved["focus_start"] == "2027-01-11"
+    assert saved["focus_end"] == "2027-01-13"
+    assert "2027-01-11" in page.locator("#focus-state").inner_text()
+    assert not errors
+
+
+def test_clearing_a_focus_goes_back_to_the_whole_window(ui):
+    """Otherwise a date opening up outside the pick would never be found again."""
+    page, scenarios, errors = ui
+    seed_a_week_of_dates(scenarios.parent / "data")
+    page.reload(wait_until="networkidle")
+    open_prices(page)
+
+    chart_point(page, 1, 5)
+    chart_point(page, 3, 5)
+    page.locator("#focus-save").click()
+    page.wait_for_timeout(700)
+
+    page.locator("#focus-clear").click()
+    page.wait_for_timeout(700)
+
+    saved = json.loads((scenarios / "jp-ph.json").read_text(encoding="utf-8"))
+    assert saved["focus_start"] is None and saved["focus_end"] is None
+    assert "whole window" in page.locator("#focus-state").inner_text()
+    assert not errors
+
+
+def test_a_third_click_starts_the_range_over(ui):
+    """A picker that could only ever extend would need a Clear button to undo a
+    misclick, which is a button for a mistake the picker caused."""
+    page, scenarios, errors = ui
+    seed_a_week_of_dates(scenarios.parent / "data")
+    page.reload(wait_until="networkidle")
+    open_prices(page)
+
+    chart_point(page, 0, 5)
+    chart_point(page, 4, 5)
+    chart_point(page, 2, 5)
+    note = page.locator("#focus-pick").inner_text()
+    assert "2027-01-12" in note, note
+    assert "2027-01-10" not in note, note
+    assert not errors
+
+
+# --------------------------------------------------------------- sources
+#
+# The tab answers one question - is this still working - and keeps the CSS
+# selectors behind Repair, where they belong until the answer is no.
+
+
+def test_the_sources_tab_leads_with_the_discord_webhook(ui):
+    """It is what people come here for, and it used to be below a selector form."""
+    page, _, errors = ui
+    open_sources(page)
+    panels = page.locator('section[data-panel="sources"] .panel h2').all_inner_texts()
+    assert "Where results get sent" in panels[0], panels
+    assert not errors
+
+
+def test_every_source_shows_what_it_is_and_whether_it_works(ui):
+    page, _, errors = ui
+    open_sources(page)
+    cards = page.locator(".source-card")
+    assert cards.count() == 3
+    text = page.locator("#sources-body").inner_text()
+    assert "pelikan.cz" in text and "letuska.cz" in text and "Skyscanner" in text
+    # Never checked is a state, and it is not the same as broken.
+    assert "never checked" in text, text
+    assert not errors
+
+
+def test_a_source_that_is_not_connected_offers_no_check_button(ui):
+    """Drawing a Check button for a source nothing reads would invite you to
+    test something that does not exist."""
+    page, _, errors = ui
+    open_sources(page)
+    card = page.locator('.source-card[data-source="SKYSCANNER"]')
+    assert "not connected" in card.inner_text()
+    assert card.locator('[data-role="check"]').count() == 0
+    assert not errors
+
+
+def test_the_selectors_stay_out_of_the_way_until_something_is_wrong(ui):
+    page, _, errors = ui
+    open_sources(page)
+    card = page.locator('.source-card[data-source="PELIKAN"]')
+    repair = card.locator(".source-card__repair")
+    assert repair.is_hidden()
+
+    card.locator('[data-role="repair"]').click()
+    page.wait_for_timeout(300)
+    assert repair.is_visible()
+    assert card.locator('[data-selector="card"]').input_value() == "div[id^='flight-']"
+    assert not errors
+
+
+def test_a_form_driven_source_offers_no_selectors_to_repair(ui):
+    """There is no selector map to be right or wrong about - the steps are in
+    code - so a box promising a repair it cannot make is worse than none."""
+    page, _, errors = ui
+    open_sources(page)
+    card = page.locator('.source-card[data-source="LETUSKA"]')
+    assert card.locator('[data-role="repair"]').count() == 0
+    assert card.locator('[data-role="check"]').count() == 1
+    assert not errors

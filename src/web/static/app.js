@@ -133,7 +133,7 @@ function showTab(name) {
   }
   if (name === 'explore') renderExplore();
   if (name === 'results') renderResults();
-  if (name === 'prices') renderPrices();
+  if (name === 'prices') { renderPrices(); renderFocusControls(); }
   if (name === 'sources') { renderSources(); renderNotifyTarget(); }
 }
 
@@ -1638,6 +1638,12 @@ async function renderPrices() {
   byDateHost.appendChild(lineChart(
     byDate.map((row) => ({ label: row.depart_date, value: row.cheapest_total, note: row.route })),
     { width, valueSuffix: suffix, ariaLabel: 'Cheapest total by departure date',
+      // A range being picked wins over the one already saved, so a click shows
+      // its effect immediately rather than after a save.
+      band: focusRange() ?? (state.scenario.focus_start
+        ? [state.scenario.focus_start, state.scenario.focus_end]
+        : null),
+      onPick: pickFocusDate,
       emptyText: byDateResult.status === 'rejected'
         ? `Could not load — ${byDateResult.reason.message}`
         : 'No itineraries in this sweep yet.' },
@@ -1694,12 +1700,133 @@ async function renderPrices() {
     : 'No observations yet.';
 }
 
+/* ------------------------------------------------------------------ focus
+
+   Once a broad sweep has shown which departure dates are cheap, a focus
+   narrows the next one onto them. It bounds the *first* leg only; the later
+   legs are derived from it through the stay ranges, so the three can never
+   contradict each other and a focused sweep can still complete a trip.
+
+   Picked here rather than typed into two date boxes because the decision is
+   made by looking at the chart, and a date box beside a chart is a second
+   place to get the same answer wrong. */
+
+// Which two days are picked, before anything is saved. Kept out of
+// `state.scenario` so an abandoned pick never reaches disk.
+const focusPick = { start: null, end: null };
+
+function focusRange() {
+  const { start, end } = focusPick;
+  if (!start) return null;
+  if (!end) return [start, start];
+  return start <= end ? [start, end] : [end, start];
+}
+
+function pickFocusDate(label) {
+  // First click starts a range, second closes it, third starts over. A picker
+  // that could only ever extend would need a Clear button to correct a misclick.
+  if (!focusPick.start || (focusPick.start && focusPick.end)) {
+    focusPick.start = label;
+    focusPick.end = null;
+  } else {
+    focusPick.end = label;
+  }
+  renderFocusControls();
+  renderPrices();
+}
+
+async function renderFocusControls() {
+  const saved = state.scenario.focus_start && state.scenario.focus_end
+    ? [state.scenario.focus_start, state.scenario.focus_end]
+    : null;
+  const badge = $('focus-state');
+  badge.className = `badge badge--${saved ? 'good' : 'muted'}`;
+  badge.textContent = saved
+    ? `watching ${saved[0]} to ${saved[1]}`
+    : 'watching the whole window';
+
+  const range = focusRange();
+  const save = $('focus-save');
+  const note = $('focus-pick');
+  $('focus-clear').disabled = !saved && !range;
+
+  if (!range) {
+    save.disabled = true;
+    note.textContent = saved
+      ? 'Click two points to move the window you are watching.'
+      : 'Click two points to pick the days worth watching closely.';
+    return;
+  }
+
+  const [from, to] = range;
+  save.disabled = false;
+  note.textContent = focusPick.end
+    ? `Picked ${from} to ${to}. `
+    : `Picked ${from}. Click a second day to close the range. `;
+
+  // What it would actually cost, priced against the trip on screen rather than
+  // guessed. The estimate endpoint takes an unsaved trip for exactly this.
+  try {
+    const trip = { ...state.scenario, focus_start: from, focus_end: to };
+    const [narrow, broad] = await Promise.all([
+      api(`/api/scenarios/${state.scenario.id}/estimate?depth=deep`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(trip),
+      }),
+      api(`/api/scenarios/${state.scenario.id}/estimate?depth=deep`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...state.scenario, focus_start: null, focus_end: null }),
+      }),
+    ]);
+    note.textContent +=
+      `${narrow.searches} searches (~${narrow.minutes} min) against ` +
+      `${broad.searches} for the whole window.`;
+  } catch (error) {
+    note.textContent += `Could not price that range — ${error.message}`;
+  }
+}
+
+$('focus-save').onclick = async () => {
+  const range = focusRange();
+  if (!range) return;
+  await saveFocus(range[0], range[1]);
+};
+
+$('focus-clear').onclick = async () => {
+  focusPick.start = focusPick.end = null;
+  await saveFocus(null, null);
+};
+
+async function saveFocus(from, to) {
+  const note = $('focus-pick');
+  try {
+    const saved = await api(`/api/scenarios/${state.scenario.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...state.scenario, focus_start: from, focus_end: to }),
+    });
+    state.scenario = saved;
+    focusPick.start = focusPick.end = null;
+    await renderFocusControls();
+    note.textContent = from
+      ? `Saved. The afternoon sweep will price ${from} to ${to}; the morning one still ` +
+        'covers the whole window.'
+      : 'Cleared. Both sweeps cover the whole window again.';
+  } catch (error) {
+    note.className = 'small badge badge--error';
+    note.textContent = error.message;
+  }
+}
+
 /* ---------------------------------------------------------------- sources */
 
-/* The scraper's moving parts, editable without a programmer. A site renaming a
-   CSS class takes the sweep silently to zero, and the fix is a new string — so
-   the strings live in a form, and a button proves them against a real page
-   before 02:00 rather than after. */
+/* One card per source, and the card answers the only question people arrive
+   here with: is this still working. The panel used to open on four text fields
+   and six CSS selectors for one site, which is the answer to a question you
+   only have once the answer to this one is "no" — so the selectors moved behind
+   Repair, and Repair opens itself when a check has failed. */
 
 const SELECTOR_HELP = {
   card: 'One offer. Everything else is read inside it.',
@@ -1717,6 +1844,33 @@ const FIELD_HELP = {
   result_timeout_s: 'How long to wait for results before calling the search failed.',
 };
 
+/* What a broken one actually costs you. Stated on the card, because "source"
+   flattens three very different stakes into one word. */
+const ROLE_NOTE = {
+  sweep: 'Every price in this app. If this breaks, the nightly sweep goes quiet.',
+  check: 'A second opinion, run by hand. If this breaks you lose the cross-check, not the prices.',
+  none: 'Not connected. Nothing in this app reads it.',
+};
+
+/* A check with no date on it is a claim about now that may be a fortnight old,
+   so `checked_at` is always shown alongside the verdict. Reuses the same
+   relative wording as the results headline - two phrasings for "how long ago"
+   in one app is one too many. */
+function checkedAgo(iso) {
+  const then = new Date(iso);
+  return Number.isNaN(then.getTime()) ? iso : relativeTime(then);
+}
+
+function checkBadge(source) {
+  const check = source.last_check;
+  if (source.role === 'none') return { kind: 'muted', text: 'not connected' };
+  if (!check) return { kind: 'muted', text: 'never checked' };
+  const when = check.checked_at ? ` · ${checkedAgo(check.checked_at)}` : '';
+  return check.ok
+    ? { kind: 'good', text: `working${when}` }
+    : { kind: 'error', text: `not working${when}` };
+}
+
 async function renderSources() {
   const host = $('sources-body');
   let sources;
@@ -1727,63 +1881,163 @@ async function renderSources() {
     host.textContent = `Could not load sources — ${error.message}`;
     return;
   }
-  host.className = '';
+  host.className = 'source-list';
   host.innerHTML = '';
-
   for (const [name, source] of Object.entries(sources)) {
-    const block = document.createElement('div');
-    block.dataset.source = name;
-    block.innerHTML = `<h3>${escapeHtml(name)}</h3>`;
-
-    const grid = document.createElement('div');
-    grid.className = 'form-grid';
-    for (const key of ['base_url', 'url_template', 'no_results_marker', 'result_timeout_s']) {
-      const label = document.createElement('label');
-      label.className = key === 'result_timeout_s' ? 'field' : 'field field--wide';
-      label.innerHTML =
-        `${escapeHtml(key)}<input type="${key === 'result_timeout_s' ? 'number' : 'text'}" ` +
-        `data-field="${key}" value="${escapeHtml(source[key])}">` +
-        `<span class="muted small">${escapeHtml(FIELD_HELP[key] ?? '')}</span>`;
-      grid.appendChild(label);
-    }
-    block.appendChild(grid);
-
-    block.insertAdjacentHTML('beforeend', '<h3 class="muted small" style="margin-top:20px">Selectors</h3>');
-    const selectors = document.createElement('div');
-    selectors.className = 'form-grid';
-    for (const [key, value] of Object.entries(source.selectors)) {
-      const label = document.createElement('label');
-      label.className = 'field field--wide';
-      label.innerHTML =
-        `${escapeHtml(key)}<input type="text" data-selector="${escapeHtml(key)}" ` +
-        `value="${escapeHtml(value)}">` +
-        `<span class="muted small">${escapeHtml(SELECTOR_HELP[key] ?? '')}</span>`;
-      selectors.appendChild(label);
-    }
-    block.appendChild(selectors);
-
-    const row = document.createElement('div');
-    row.className = 'row';
-    row.style.marginTop = '16px';
-    const save = document.createElement('button');
-    save.textContent = 'Save sources';
-    save.onclick = () => saveSources(sources, name, block);
-    const probe = document.createElement('button');
-    probe.className = 'primary';
-    probe.textContent = 'Test this source';
-    probe.onclick = () => testSource(name, probe);
-    row.append(save, probe);
-    block.appendChild(row);
-
-    const outcome = document.createElement('div');
-    outcome.className = 'small';
-    outcome.style.marginTop = '12px';
-    outcome.id = `source-result-${name}`;
-    block.appendChild(outcome);
-
-    host.appendChild(block);
+    host.appendChild(sourceCard(name, source));
   }
 }
+
+function sourceCard(name, source) {
+  const card = document.createElement('div');
+  card.className = 'source-card';
+  card.dataset.source = name;
+
+  const badge = checkBadge(source);
+  const header = document.createElement('div');
+  header.className = 'source-card__header';
+  header.innerHTML =
+    `<h3>${escapeHtml(source.label || name)}</h3>` +
+    `<span class="badge badge--${badge.kind}" data-role="state">${escapeHtml(badge.text)}</span>`;
+  card.appendChild(header);
+
+  if (source.note) {
+    const note = document.createElement('p');
+    note.className = 'panel__hint small';
+    note.style.margin = '0 0 8px';
+    note.textContent = source.note;
+    card.appendChild(note);
+  }
+
+  const stake = document.createElement('p');
+  stake.className = 'muted small';
+  stake.style.margin = '0 0 12px';
+  stake.textContent = ROLE_NOTE[source.role] ?? '';
+  card.appendChild(stake);
+
+  const details = repairForm(name, source);
+
+  const row = document.createElement('div');
+  row.className = 'row';
+  if (source.role !== 'none') {
+    const check = document.createElement('button');
+    check.className = 'primary small';
+    check.dataset.role = 'check';
+    check.textContent = 'Check now';
+    check.onclick = () => testSource(name, check, card);
+    row.appendChild(check);
+  }
+  if (source.repairable) {
+    const repair = document.createElement('button');
+    repair.className = 'small';
+    repair.dataset.role = 'repair';
+    repair.textContent = 'Repair';
+    repair.onclick = () => toggleRepair(card);
+    row.appendChild(repair);
+  }
+  card.appendChild(row);
+
+  const outcome = document.createElement('div');
+  outcome.className = 'small';
+  outcome.style.marginTop = '10px';
+  outcome.dataset.role = 'outcome';
+  card.appendChild(outcome);
+  if (source.last_check) renderCheck(outcome, source.last_check);
+
+  // Opened for you when the last check failed, because that is the one moment
+  // these fields are worth looking at — and closed otherwise, because the rest
+  // of the time they are six CSS selectors in the way of a yes/no answer.
+  card.appendChild(details);
+  setRepairOpen(card, Boolean(source.last_check && source.last_check.ok === false));
+  return card;
+}
+
+function setRepairOpen(card, open) {
+  const details = card.querySelector('.source-card__repair');
+  const button = card.querySelector('[data-role="repair"]');
+  if (!details) return;
+  details.toggleAttribute('hidden', !open);
+  if (button) button.textContent = open ? 'Hide repair' : 'Repair';
+}
+
+function toggleRepair(card) {
+  const details = card.querySelector('.source-card__repair');
+  setRepairOpen(card, details.hasAttribute('hidden'));
+}
+
+function repairForm(name, source) {
+  const details = document.createElement('div');
+  details.className = 'source-card__repair';
+  details.hidden = true;
+  if (!source.repairable) return details;
+
+  details.insertAdjacentHTML(
+    'beforeend',
+    '<p class="panel__hint small">Edit the string that broke, then save — it re-checks itself. ' +
+      'Zero cards matched means the markup changed; a page that will not load at all means the ' +
+      'URL did.</p>'
+  );
+
+  const grid = document.createElement('div');
+  grid.className = 'form-grid';
+  for (const key of ['base_url', 'url_template', 'no_results_marker', 'result_timeout_s']) {
+    const label = document.createElement('label');
+    label.className = key === 'result_timeout_s' ? 'field' : 'field field--wide';
+    label.innerHTML =
+      `${escapeHtml(key)}<input type="${key === 'result_timeout_s' ? 'number' : 'text'}" ` +
+      `data-field="${key}" value="${escapeHtml(source[key])}">` +
+      `<span class="muted small">${escapeHtml(FIELD_HELP[key] ?? '')}</span>`;
+    grid.appendChild(label);
+  }
+  details.appendChild(grid);
+
+  details.insertAdjacentHTML(
+    'beforeend',
+    '<h3 class="muted small" style="margin-top:16px">Selectors</h3>'
+  );
+  const selectors = document.createElement('div');
+  selectors.className = 'form-grid';
+  for (const [key, value] of Object.entries(source.selectors)) {
+    const label = document.createElement('label');
+    label.className = 'field field--wide';
+    label.innerHTML =
+      `${escapeHtml(key)}<input type="text" data-selector="${escapeHtml(key)}" ` +
+      `value="${escapeHtml(value)}">` +
+      `<span class="muted small">${escapeHtml(SELECTOR_HELP[key] ?? '')}</span>`;
+    selectors.appendChild(label);
+  }
+  details.appendChild(selectors);
+
+  const row = document.createElement('div');
+  row.className = 'row';
+  row.style.marginTop = '14px';
+  const save = document.createElement('button');
+  save.className = 'small';
+  save.textContent = 'Save and check again';
+  save.onclick = () => saveSources(name, details.closest('.source-card'), source);
+  row.appendChild(save);
+  details.appendChild(row);
+  return details;
+}
+
+$('sources-check-all').onclick = async () => {
+  const button = $('sources-check-all');
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = 'Checking…';
+  try {
+    // One at a time, not in parallel: these are real searches against real
+    // sites, and the whole project exists because this client has been
+    // throttled for asking too fast.
+    for (const card of document.querySelectorAll('.source-card')) {
+      const check = card.querySelector('[data-role="check"]');
+      if (check) await testSource(card.dataset.source, check, card);
+    }
+  } finally {
+    button.disabled = false;
+    button.textContent = label;
+  }
+};
 
 /* ------------------------------------------------------- the notify target
 
@@ -1871,65 +2125,86 @@ $('webhook-test').onclick = async () => {
   }
 };
 
-function readSourceForm(block, source) {
+function readSourceForm(card, source) {
   const next = { ...source, selectors: { ...source.selectors } };
-  for (const input of block.querySelectorAll('[data-field]')) {
+  delete next.last_check;
+  for (const input of card.querySelectorAll('[data-field]')) {
     next[input.dataset.field] =
       input.dataset.field === 'result_timeout_s' ? Number(input.value) : input.value;
   }
-  for (const input of block.querySelectorAll('[data-selector]')) {
+  for (const input of card.querySelectorAll('[data-selector]')) {
     next.selectors[input.dataset.selector] = input.value;
   }
   return next;
 }
 
-async function saveSources(sources, name, block) {
-  const outcome = $(`source-result-${name}`);
+async function saveSources(name, card, source) {
+  const outcome = card.querySelector('[data-role="outcome"]');
   try {
-    // Sent whole, so a rejected edit leaves the file exactly as it was rather
-    // than half-applied.
+    // Only the source being edited is sent. The others are left as they stand
+    // on disk, so repairing one can never revert another to its defaults — and
+    // two of the three have no selectors to send in the first place.
     await api('/api/sources', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...sources, [name]: readSourceForm(block, sources[name]) }),
+      body: JSON.stringify({ [name]: readSourceForm(card, source) }),
     });
-    outcome.className = 'small badge badge--good';
-    outcome.textContent = 'Saved. Test it before trusting the next sweep to it.';
   } catch (error) {
     outcome.className = 'small badge badge--error';
     outcome.textContent = error.message;
+    return;
   }
+  // Saved is not working, and the gap between the two is the whole reason this
+  // panel exists — so the save proves itself instead of claiming success.
+  await testSource(name, card.querySelector('[data-role="check"]'), card);
 }
 
-async function testSource(name, button) {
-  const outcome = $(`source-result-${name}`);
-  const label = button.textContent;
-  button.disabled = true;
-  button.textContent = 'Searching…';
+function renderCheck(host, body) {
+  host.className = 'small';
+  const link = body.url && /^https?:\/\//i.test(body.url)
+    ? `<a href="${escapeHtml(body.url)}" target="_blank" rel="noopener">open the exact URL it used</a>`
+    : '';
+  host.innerHTML =
+    `<span class="badge badge--${body.ok ? 'good' : 'error'}">` +
+    `${body.cards_found ?? 0} found, ${body.legs_parsed ?? 0} priced</span> ` +
+    `${escapeHtml(body.message ?? '')}<br>` +
+    `<span class="muted">${escapeHtml(body.route ?? '')}</span> ${link}` +
+    (body.sample
+      ? `<br><span class="muted">First offer: ${escapeHtml(body.sample.airline ?? '')} · ` +
+        `${escapeHtml(body.sample.depart_date ?? '')} · ` +
+        `${money(body.sample.price_amount, body.sample.price_currency)}</span>`
+      : '');
+}
+
+async function testSource(name, button, card) {
+  const outcome = card.querySelector('[data-role="outcome"]');
+  const state = card.querySelector('[data-role="state"]');
+  const label = button ? button.textContent : '';
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Checking…';
+  }
   outcome.className = 'small muted';
-  outcome.textContent = 'Running one real search — this takes 15–30 seconds.';
+  outcome.textContent = 'Asking the site for one real price — this takes 15–30 seconds.';
+  state.className = 'badge badge--muted';
+  state.textContent = 'checking…';
   try {
     const body = await api(`/api/sources/${name}/test`, { method: 'POST' });
-    outcome.className = 'small';
-    const link = body.url && /^https?:\/\//i.test(body.url)
-      ? `<a href="${escapeHtml(body.url)}" target="_blank" rel="noopener">open the exact URL it used</a>`
-      : '';
-    outcome.innerHTML =
-      `<span class="badge badge--${body.ok ? 'good' : 'error'}">` +
-      `${body.cards_found} card(s), ${body.legs_parsed ?? 0} parsed</span> ` +
-      `${escapeHtml(body.message)}<br>` +
-      `<span class="muted">${escapeHtml(body.route ?? '')}</span> ${link}` +
-      (body.sample
-        ? `<br><span class="muted">First offer: ${escapeHtml(body.sample.airline)} · ` +
-          `${escapeHtml(body.sample.depart_date)} · ` +
-          `${money(body.sample.price_amount, body.sample.price_currency)}</span>`
-        : '');
+    renderCheck(outcome, body);
+    state.className = `badge badge--${body.ok ? 'good' : 'error'}`;
+    state.textContent = body.ok ? 'working · just now' : 'not working · just now';
+    // A failed check is the one moment the repair fields are worth looking at.
+    if (!body.ok) setRepairOpen(card, true);
   } catch (error) {
     outcome.className = 'small badge badge--error';
     outcome.textContent = error.message;
+    state.className = 'badge badge--error';
+    state.textContent = 'check failed';
   } finally {
-    button.disabled = false;
-    button.textContent = label;
+    if (button) {
+      button.disabled = false;
+      button.textContent = label;
+    }
   }
 }
 

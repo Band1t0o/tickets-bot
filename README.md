@@ -128,11 +128,17 @@ whose real price is a bag fee higher.
 
 Counts are for the `japan-philippines` scenario; they scale with airports × dates.
 
-| Depth | Date step | Searches | Time |
-|---|---|---:|---:|
-| `quick` | every 7 days | 93 | ~15 min |
-| `standard` | every 3 days | 210 | ~33 min |
-| `deep` | every day | 615 | ~97 min |
+| Depth | Date step | Searches | One runner | Three shards |
+|---|---|---:|---:|---:|
+| `quick` | every 7 days | 84 | ~21 min | ~7 min |
+| `standard` | every 3 days | 168 | ~41 min | ~14 min |
+| `deep` | every day | 483 | ~119 min | ~40 min |
+
+Deep was 615 until every leg started reserving the minimum stays that still have to happen after
+it. The first leg was being searched twelve days past the last departure that can reach a searched
+final leg, so 132 of those searches could not produce an itinerary however good the fares were --
+proven on the committed data, where the quick sweep of 10 August searched 2 February and yielded
+nothing from it.
 
 ### Explore first
 
@@ -142,7 +148,7 @@ and two Philippine ones is 21 routes, and a deep sweep prices every one of them 
 whether or not it could ever win.
 
 **Explore first** (`--mode explore`) searches every route on three spread-out dates: **63 searches,
-~10 min**, against 615 and ~97. It will not find you a trip. It tells you, per airport, what the
+~16 min**, against 483 and ~119. It will not find you a trip. It tells you, per airport, what the
 cheapest flight in and out of it costs against the alternatives standing in the same place — so the
 real sweep can leave the hopeless ones out. On the trip above it says Frankfurt is the benchmark and
 Prague is 57% dearer to leave from, and that Cebu costs 67% more than Manila once you count getting
@@ -159,6 +165,38 @@ Verdicts distinguish **measured** from **unmeasured**, which is the only part th
 The probe never edits a trip. Removing an airport is a button in **Explore** that drops the chip in
 the route editor and gathers it in a pending bar for you to confirm. Three sampled dates is enough
 to show you an airport is hopeless and nowhere near enough for a tool to narrow your trip on its own.
+
+### Then focus on the dates that won
+
+Explore narrows a trip by airport. A **focus** narrows it by date, and it is the other half of the
+same idea: once a broad sweep has drawn the price-by-date curve, most of the window is not worth
+pricing again tonight.
+
+Click two points on the **Prices** chart and press **Watch these dates**. That writes `focus_start`
+and `focus_end` onto the trip, and the planner bounds the *first* leg to them -- the later legs
+follow through the stay ranges, so the three can never contradict each other and a focused sweep can
+still complete a whole trip. Five departure days on the trip above is **195 searches, ~16 min on
+three shards**, against 483.
+
+The picking is done on the chart rather than in two date boxes because that is where the decision is
+made, and a date box beside a chart is a second place to get the same answer wrong.
+
+**The broad sweep does not stop.** 02:00 keeps covering the whole window, so a better date opening
+up outside the focus is still found; 13:00 runs the focus. A focused sweep is also never charted
+beside a broad one -- its cheapest is the cheapest *of those days*, and joining the two would draw a
+step no fare ever made, which is the same mistake `is_comparable` already refuses for an exploration
+pass.
+
+### How complete was it?
+
+`legs_found` and `error_count` cannot answer that. A route that answered on nine dates and never on
+the tenth reports perfect health on every per-route figure, and the hole is invisible.
+
+So every search writes a line to `searches.jsonl` whatever the outcome, and `status.json` carries
+`answered`, `planned` and `coverage`. A search that fails is retried across three fill passes, each
+smaller than the last, rather than dropped on the second try. Coverage below 1.0 is stated in the
+Discord message beside the price, because a price you might book on has to come with how much of the
+trip was priced to find it.
 
 ### A run searches the trip on screen
 
@@ -373,9 +411,23 @@ The repo is **public**, so Actions minutes are free and depth is no longer ratio
 
 | Job | Schedule | Runtime |
 |---|---|---:|
-| Sweep ([scrape.yml](.github/workflows/scrape.yml)) | daily 02:00 UTC, `deep` | ~97 min |
+| Sweep ([scrape.yml](.github/workflows/scrape.yml)) | daily 02:00 UTC, `deep`, 3 shards | ~40 min |
+| Focused watch (same workflow) | daily 13:00 UTC, only with a focus set | ~15 min |
 | Volatility probe ([probe.yml](.github/workflows/probe.yml)) | every 2 h | ~2 min |
 | Tests ([test.yml](.github/workflows/test.yml)) | every push | ~1 min |
+
+**Sharding is how depth and politeness stopped competing.** A deep sweep is split across three
+runners with `--shard i/3` and stitched back together by `merge-shards`. Each runner is a separate
+VM with its own address, so three of them at the unchanged two workers and four-second delay put
+exactly the per-address load that measured zero timeouts over 350 searches -- while finishing in a
+third of the wall clock. Shards are dealt per route rather than strided off the top of the plan:
+`searches[i::3]` would have handed each runner the same three routes, so a throttled shard would
+delete routes from the merged sweep and read downstream as dead routes rather than as a lost shard.
+
+**`timeout-minutes` is a ceiling above the budget, never the budget.** It used to be the budget, set
+from an estimate that was wrong by half, and thirteen consecutive nightly runs -- 8 to 20 August --
+swept cleanly for 90 minutes, were cancelled, and committed nothing at all. Neither the runs nor the
+data ever said so; `gh run list` did.
 
 **What still constrains the sweep is pelikan.cz, not minutes.** This client has already been
 throttled into 58 of 93 timeouts in one sweep, and a starved sweep is worse than no sweep: it spends

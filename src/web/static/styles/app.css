@@ -671,3 +671,43 @@ label.field > select { font-weight: 400; color: var(--color-formInputText); }
 .stop__stay input { width: 62px; }
 
 .check { display: inline-flex; gap: 6px; align-items: center; }
+
+/* ------------------------------------------------------------ source cards
+   One card per source, each carrying its own state badge and its own repair
+   box. Bordered rather than plain blocks because three sources stacked in one
+   panel need a visible edge to read as three answers rather than one form. */
+
+.source-list {
+  display: grid;
+  gap: 14px;
+}
+
+.source-card {
+  border: 1px solid var(--color-tableBorder);
+  border-radius: 10px;
+  padding: 14px 16px;
+}
+
+.source-card__header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.source-card__header h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+/* Set off from the card so an open repair box reads as a drawer rather than as
+   more of the card - it is only ever open when something is wrong. */
+.source-card__repair {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--color-tableBorder);
+}
+
+.source-card__repair[hidden] {
+  display: none;
+}

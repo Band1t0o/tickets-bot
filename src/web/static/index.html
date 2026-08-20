@@ -251,9 +251,24 @@
     <!-- ------------------------------------------------------------ Prices -->
     <section data-panel="prices" hidden>
       <div class="panel">
-        <div class="panel__header"><h2>Cheapest total by departure date</h2></div>
-        <p class="panel__hint">Which day to leave on. Lowest point is labelled.</p>
+        <div class="panel__header">
+          <h2>Cheapest total by departure date</h2>
+          <span class="badge badge--muted" id="focus-state">watching the whole window</span>
+        </div>
+        <p class="panel__hint">
+          Which day to leave on. Lowest point is labelled. <strong>Click two points</strong> to
+          mark the days worth watching closely — the afternoon sweep then prices only those,
+          which is a fraction of the searches and finishes in minutes rather than an hour.
+          The morning sweep keeps covering the whole window, so a better date opening up
+          outside your pick is still found.
+        </p>
         <div class="chart" id="chart-by-date"></div>
+        <div class="row" id="focus-controls" style="margin-top:12px">
+          <span class="small" id="focus-pick">No days picked yet.</span>
+          <span class="spacer"></span>
+          <button class="small primary" id="focus-save" disabled>Watch these dates</button>
+          <button class="small" id="focus-clear">Watch the whole window</button>
+        </div>
         <p class="panel__hint small" id="by-date-note"></p>
       </div>
 
@@ -284,26 +299,19 @@
 
     <!-- ----------------------------------------------------------- Sources -->
     <section data-panel="sources" hidden>
-      <div class="panel">
-        <div class="panel__header"><h2>Where the prices come from</h2></div>
-        <p class="panel__hint">
-          Sites move their URLs and rename their CSS classes, and either one stops the sweep
-          without stopping the code. Both are strings, and both are here — edit the one that
-          broke, press <strong>Test this source</strong> to run a single real search, and read
-          what it parsed. Zero cards matched means the markup changed; a page that will not load
-          at all means the URL did. Leave a field alone and it keeps the built-in value, so
-          deleting <code>data/sources.json</code> always restores working defaults.
-        </p>
-        <div id="sources-body" class="empty">Loading…</div>
-      </div>
-
+      <!--
+        Webhook first, health second, repairs last - which is the order these
+        are actually wanted in. The tab used to open on a form of four fields
+        and six CSS selectors for one site, which answers a question nobody
+        arrives here asking.
+      -->
       <div class="panel">
         <div class="panel__header">
           <h2>Where results get sent</h2>
           <span class="badge badge--muted" id="notify-origin">—</span>
         </div>
         <p class="panel__hint">
-          The Discord webhook the picks above are posted to. In Discord:
+          The Discord channel each sweep posts its picks to. In Discord:
           <strong>Edit Channel → Integrations → Webhooks → Copy Webhook URL</strong>.
         </p>
         <div class="row">
@@ -327,6 +335,22 @@
           <code>gh secret set DISCORD_WEBHOOK_URL</code>. When that variable is present it
           wins, so a cloud run always posts where the secret says.
         </p>
+      </div>
+
+      <div class="panel">
+        <div class="panel__header">
+          <h2>Where the prices come from</h2>
+          <button class="small" id="sources-check-all">Check them all</button>
+        </div>
+        <p class="panel__hint">
+          Press <strong>Check now</strong> and each site is asked for one real price. That is
+          the whole question: is it still working. A site that has moved its URL or renamed a
+          CSS class stops the sweep without stopping the code, and when that happens the card
+          opens a <strong>Repair</strong> box with the strings to change — you never need it
+          until then. Deleting <code>data/sources.json</code> always restores the built-in
+          defaults.
+        </p>
+        <div id="sources-body" class="empty">Loading…</div>
       </div>
     </section>
   </main>

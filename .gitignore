@@ -47,3 +47,8 @@ Thumbs.db
 data/**/*.png
 data/latest_offer_count.txt
 data/20*-*-*/
+
+# Local observations, not findings. `source_checks.json` records when each site
+# was last asked for a price from *this* machine; committing it would put a
+# laptop's Tuesday afternoon into a cloud sweep's history and tell you nothing.
+data/source_checks.json

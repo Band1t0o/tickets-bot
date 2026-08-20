@@ -939,7 +939,9 @@ def test_an_edited_source_is_saved_and_read_back(client):
     api, data = client
     current = api.get("/api/sources").json()
     current["PELIKAN"]["selectors"]["card"] = "div.offer"
-    assert api.put("/api/sources", json=current).status_code == 200
+    # Only the source being edited is sent. The others are left exactly as they
+    # are on disk - and two of them have no selectors to send in the first place.
+    assert api.put("/api/sources", json={"PELIKAN": current["PELIKAN"]}).status_code == 200
 
     assert api.get("/api/sources").json()["PELIKAN"]["selectors"]["card"] == "div.offer"
     # Written where the sweep will read it, not held in memory.
@@ -963,7 +965,7 @@ def test_a_source_missing_a_required_selector_is_rejected(client):
     api, _ = client
     current = api.get("/api/sources").json()
     del current["PELIKAN"]["selectors"]["price"]
-    response = api.put("/api/sources", json=current)
+    response = api.put("/api/sources", json={"PELIKAN": current["PELIKAN"]})
     assert response.status_code == 400
     assert "price" in response.json()["detail"]
 
@@ -1010,7 +1012,7 @@ def test_testing_a_source_with_a_broken_selector_says_so(client, monkeypatch):
     api, _ = client
     current = api.get("/api/sources").json()
     current["PELIKAN"]["selectors"]["card"] = "div.nothing-here"
-    api.put("/api/sources", json=current)
+    assert api.put("/api/sources", json={"PELIKAN": current["PELIKAN"]}).status_code == 200
 
     body = api_test_source(client)
     assert body["ok"] is False
@@ -1279,3 +1281,86 @@ def test_a_focus_saves_and_comes_back(client):
     saved["focus_start"] = saved["focus_end"] = None
     assert client.put("/api/scenarios/jp-ph", json=saved).status_code == 200
     assert client.get("/api/scenarios/jp-ph").json()["focus_start"] is None
+
+
+# ------------------------------------------------------------ source roles
+#
+# Three kinds of source, and the difference matters because a broken one costs
+# you different things. The sweep source going quiet means no data at all; the
+# check source going quiet means no second opinion; a source that was never
+# connected costs nothing and must not be drawn as though it might be on.
+
+
+def test_every_source_says_what_it_is_for(client):
+    api, _ = client
+    sources = api.get("/api/sources").json()
+    assert sources["PELIKAN"]["role"] == "sweep"
+    assert sources["LETUSKA"]["role"] == "check"
+    assert sources["SKYSCANNER"]["role"] == "none"
+
+
+def test_a_source_that_is_not_connected_cannot_be_checked(client):
+    """Pretending to test a source nothing reads would be the same lie as a
+    sweep reporting error_count: 0 while most of it failed."""
+    api, _ = client
+    response = api.post("/api/sources/SKYSCANNER/test")
+    assert response.status_code == 400
+    assert "not connected" in response.json()["detail"]
+
+
+def test_a_form_driven_source_refuses_selector_edits_with_the_reason(client):
+    """Accepting them would save a repair that cannot take effect, then report
+    success - the worst of both."""
+    api, _ = client
+    letuska = api.get("/api/sources").json()["LETUSKA"]
+    response = api.put("/api/sources", json={"LETUSKA": letuska})
+    assert response.status_code == 400
+    assert "no selectors to edit" in response.json()["detail"]
+
+
+def test_a_source_is_unchecked_until_it_has_been_checked(client):
+    api, _ = client
+    assert api.get("/api/sources").json()["PELIKAN"]["last_check"] is None
+
+
+def test_a_check_is_remembered_so_the_card_shows_a_state_on_load(client, monkeypatch):
+    """A card that says "unknown until you press the button" is a card you have
+    to press a button on to learn anything."""
+    from pathlib import Path
+
+    import src.web.app as app_module
+
+    fixture = (
+        Path(__file__).parent / "fixtures" / "pelikan_results.html"
+    ).read_text(encoding="utf-8")
+    monkeypatch.setattr(app_module, "_fetch_for_test", lambda source, url: (200, url, fixture))
+
+    api, _ = client
+    fresh = api.post("/api/sources/PELIKAN/test").json()
+    assert fresh["checked_at"]
+
+    remembered = api.get("/api/sources").json()["PELIKAN"]["last_check"]
+    assert remembered["ok"] == fresh["ok"]
+    assert remembered["checked_at"] == fresh["checked_at"]
+
+
+def test_checking_one_source_does_not_erase_another_check(client, monkeypatch):
+    from src.sources import load_checks, save_check
+
+    _, data = client
+    save_check("LETUSKA", {"ok": True, "message": "fine"}, data)
+    save_check("PELIKAN", {"ok": False, "message": "broken"}, data)
+    assert set(load_checks(data)) == {"LETUSKA", "PELIKAN"}
+
+
+def test_saving_one_source_does_not_revert_another_to_its_defaults(client):
+    """Sources are sent one at a time now, so a whole-file overwrite would blank
+    every source the page was not editing."""
+    api, data = client
+    pelikan = api.get("/api/sources").json()["PELIKAN"]
+    pelikan["selectors"]["card"] = "div.offer"
+    api.put("/api/sources", json={"PELIKAN": pelikan})
+
+    on_disk = json.loads((data / "sources.json").read_text(encoding="utf-8"))
+    assert set(on_disk) == {"PELIKAN", "LETUSKA", "SKYSCANNER"}
+    assert on_disk["LETUSKA"]["role"] == "check"
