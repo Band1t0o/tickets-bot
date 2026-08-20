@@ -6,22 +6,27 @@ name: sweep
 # budget. What constrains it is pelikan.cz, and the shape of that constraint is
 # now measured rather than assumed.
 #
-# What stops a sweep is a browser session, not an address and not a rate. Read
-# across three cloud runs, the first two of which were read wrongly:
+# pelikan.cz answers about 120 searches per runner and then stops answering at
+# all. Measured four ways on 20 Aug, and the first three readings of it were
+# wrong:
 #
-#   11 Aug, 1 runner:  350 searches, zero timeouts, 86 min
-#   20 Aug, 3 runners: 360 answered - 120 per runner
-#   20 Aug, 1 runner:  120 answered
+#   3 runners, no recycling:      120 answered *each* (360 total)
+#   1 runner,  no recycling:      120 answered
+#   1 runner,  recycle every 40:  120 answered
+#   5 runners, 105 each:          483 answered - coverage 1.0
 #
-# One runner and three runners both answered 120 per runner, at a steady ten
-# seconds a search with no slowdown before a hard cliff. Two workers each hold
-# their own browser, so that is 60 searches per session - and three runners only
-# looked faster because six sessions beat two. PAGE_RECYCLE_EVERY in the runner
-# now replaces the browser every 40 searches, so one runner can finish a whole
-# deep sweep.
+# Replacing the whole browser changes nothing, so it is not a cookie and not a
+# session; what is constant within a runner and differs between runners is the
+# address. The cliff is hard rather than a slowdown - a steady ten seconds a
+# search right through [120/483], then half an hour of silence.
 #
-# DEFAULT_SHARDS stays 1 while that is being proven. Raising it is now purely a
-# wall-clock choice and a dispatch input, so an experiment needs no commit.
+# So DEFAULT_SHARDS must keep every shard under ~120 searches: 483 planned needs
+# 5. Raise it if the plan grows, and check the dry-run count before assuming the
+# current number still fits.
+#
+# Do not trust the old "350 searches, zero timeouts" note. That run was cancelled
+# at the 90-minute ceiling and ran the code that logged a timed-out search as an
+# empty route, so it could not have reported anything but zero.
 #
 # Timing comes from the probe, detrended against each route-day median:
 # 01:00-03:00 UTC runs ~2.2% below the day median and 18:00-22:00 ~0.6% above,
@@ -52,8 +57,9 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # Read the note above before raising this.
-  DEFAULT_SHARDS: 1
+  # Read the note above before changing this. 483 planned / 5 = 105 per shard,
+  # under the ~120 the site answers.
+  DEFAULT_SHARDS: 5
 
 jobs:
   plan:
@@ -127,8 +133,9 @@ jobs:
 
       - name: Sweep this shard
         env:
-          # 483 searches at the proven 4.1/min is ~118 min, so this leaves room
-          # for a slow night without letting a stuck run reach the ceiling.
+          # A ceiling, not an expectation: a 105-search shard takes ~20 min.
+          # Generous so a slow night still finishes, low enough that a stuck
+          # shard gives up rather than running into timeout-minutes.
           SWEEP_BUDGET_MIN: 140
         run: |
           set -euo pipefail
