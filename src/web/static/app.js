@@ -1457,6 +1457,7 @@ async function renderResults() {
     : 'Run a sweep to see itineraries.';
 
   renderVerification(body.verification);
+  $('completeness').hidden = true;
 
   const same = body.best_same_airport;
   const jaw = body.best_open_jaw;
@@ -1496,6 +1497,8 @@ async function renderResults() {
         : '<div class="stat__value muted">—</div><div class="stat__sub">none found</div>');
     $('headline').appendChild(card);
   }
+
+  renderCompleteness(body);
 
   // Airline codes, routes and URLs are all scraped from a third-party page, so
   // every one of them is escaped before it reaches innerHTML. A link is built
@@ -1556,10 +1559,43 @@ async function renderResults() {
    health: the 06 Aug standard sweep reported exactly that while averaging 2.9
    legs a search — roughly 70% silent failure — and read 7% dearer than a quick
    sweep that actually worked. */
+/* How much of the plan this price was found by looking at.
+
+   Said above the itineraries rather than tucked into a tooltip, because these
+   are the numbers you would book on. A sweep with holes in its date grid reports
+   its cheapest total in exactly the same words as a complete one, and the
+   difference is whether a cheaper trip was ever looked at. Silent at 100%: a
+   banner that is always there is a banner nobody reads. */
+function renderCompleteness(body) {
+  const host = $('completeness');
+  if (body.coverage == null || body.coverage >= 1) {
+    host.hidden = true;
+    return;
+  }
+  host.hidden = false;
+  host.className = 'notice notice--warning';
+  const pct = Math.round(body.coverage * 100);
+  host.innerHTML =
+    `<strong>${pct}% of the planned searches were answered.</strong> ` +
+    'The dates that went unasked could have been the cheap ones, so treat the totals below ' +
+    'as the best of what was priced rather than the best there is. Another run fills the gaps.' +
+    (body.focus
+      ? ` This sweep was focused on ${escapeHtml(body.focus[0])} to ${escapeHtml(body.focus[1])}, ` +
+        'so it never priced the rest of the window at all.'
+      : '');
+}
+
 const sweepQuality = (row) => {
   const parts = [`${row.depth ?? '?'} · ${row.searches ?? '?'} searches`];
   if (row.legs_per_search != null) parts.push(`${row.legs_per_search} legs/search`);
   if (row.routes_planned) parts.push(`${row.routes_covered}/${row.routes_planned} routes`);
+  // Only when short of complete. On a full sweep it is noise; on a partial one
+  // it is the reason the best total may not be the best there was - the dates
+  // that went unasked could have been the cheap ones.
+  if (row.coverage != null && row.coverage < 1) {
+    parts.push(`only ${Math.round(row.coverage * 100)}% of searches answered`);
+  }
+  if (row.focus) parts.push(`focused ${row.focus[0]} to ${row.focus[1]}`);
   if (!row.comparable) parts.push('not comparable');
   return parts.join(' · ');
 };
