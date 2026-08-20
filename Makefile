@@ -1,26 +1,46 @@
-.PHONY: install run watch fmt pw-install test ui sweep dry-run probe probe-report
+.PHONY: install run watch fmt lint pw-install test test-ui ui sweep dry-run probe probe-report
 
-# Python 3.12+ is required: config/models use `str | None`, which pydantic
-# evaluates at runtime and 3.9 cannot parse.
+# 3.10+ is the real floor: models use `str | None`, which pydantic evaluates at
+# runtime and 3.9 cannot parse. CI pins 3.12; the suite passes on 3.11.
 PY ?= python3.12
 
+# Windows has no `. .venv/bin/activate`, and calling the venv interpreter
+# directly works on every platform.
+VENV_BIN := $(if $(wildcard .venv/Scripts/python.exe),.venv/Scripts,.venv/bin)
+PYTHON := $(VENV_BIN)/python
+
 install:
-	$(PY) -m venv .venv && . .venv/bin/activate && pip install -U pip && pip install -r requirements.txt
-
-run:
-	. .venv/bin/activate && python -m src.cli scrape
-
-watch:
-	. .venv/bin/activate && python -m src.cli watch
-
-fmt:
-	. .venv/bin/activate && pip install -q ruff && ruff check --select I --fix src
+	$(PY) -m venv .venv && $(PYTHON) -m pip install -U pip && $(PYTHON) -m pip install -r requirements-dev.txt
 
 pw-install:
-	. .venv/bin/activate && python -m playwright install --with-deps chromium
+	$(PYTHON) -m playwright install --with-deps chromium
 
 test:
-	. .venv/bin/activate && pytest -q
+	$(PYTHON) -m pytest -q -m "not slow"
+
+# Drives the route editor in a real browser. Needs `make pw-install`.
+test-ui:
+	$(PYTHON) -m pytest -q -m slow
+
+lint:
+	$(PYTHON) -m ruff check .
+
+fmt:
+	$(PYTHON) -m ruff check --fix .
 
 ui:
-	. .venv/bin/activate && uvicorn src.web.app:app --reload --port 8000
+	$(PYTHON) -m uvicorn src.web.app:app --reload --port 8000
+
+# These were declared .PHONY but never existed, so `make sweep` silently did
+# nothing. They exist now.
+sweep:
+	$(PYTHON) -m src.cli sweep --scenario $(SCENARIO) $(if $(DEPTH),--depth $(DEPTH),)
+
+dry-run:
+	$(PYTHON) -m src.cli sweep --scenario $(SCENARIO) --dry-run
+
+probe:
+	$(PYTHON) -m src.cli probe
+
+probe-report:
+	$(PYTHON) -m src.cli probe-report

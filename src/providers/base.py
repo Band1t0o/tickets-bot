@@ -1,30 +1,24 @@
 from __future__ import annotations
 
-from abc import ABC
+from abc import ABC, abstractmethod
 from datetime import date
-from typing import Iterable
 
-from ..models import Leg, Offer
+from ..models import Leg
 
 
 class BaseProvider(ABC):
     """Interface shared by flight sources.
 
-    Two entry points exist during the migration to the scenario platform:
-
-    - `search_leg` is the current interface. It searches a single one-way (or
-      round-trip) hop and returns Legs, which the sweep runner assembles into
-      itineraries.
-    - `scrape` is the legacy round-trip interface still used by the
-      `scrape`/`watch` CLI commands.
-
-    Neither is abstract, so a provider may implement only the one it supports;
-    calling the other raises NotImplementedError rather than failing at
-    instantiation.
+    One method now. A second, `scrape`, existed alongside it during the
+    migration to the scenario platform and returned a different model for a
+    single round trip; nothing in the sweep path ever called it. Providers that
+    cannot be swept - letuska.cz has no deep-link grammar - expose their own
+    method instead of pretending to fit here.
     """
 
     NAME: str = "BASE"
 
+    @abstractmethod
     def search_leg(
         self,
         page,
@@ -35,15 +29,3 @@ class BaseProvider(ABC):
         adults: int = 1,
     ) -> list[Leg]:
         """Search one hop using a caller-supplied Playwright page."""
-        raise NotImplementedError(f"{self.NAME} does not implement search_leg")
-
-    def scrape(
-        self,
-        origin: str,
-        destination: str,
-        departure_date: str,
-        adults: int,
-        arrival_date: str,
-    ) -> Iterable[Offer]:
-        """Legacy round-trip search."""
-        raise NotImplementedError(f"{self.NAME} does not implement scrape")

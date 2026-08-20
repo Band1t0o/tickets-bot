@@ -1,8 +1,10 @@
 from __future__ import annotations
+
 from datetime import date
-from typing import Iterable
-from ..models import Leg, Offer
+
+from ..models import Leg
 from .base import BaseProvider
+
 
 class DemoStaticProvider(BaseProvider):
     NAME = "DEMO_STATIC"
@@ -21,37 +23,4 @@ class DemoStaticProvider(BaseProvider):
                 price_currency="CZK", price_amount=16000.0,
                 url="https://example.test/demo-static/qh89",
                 depart_time="18:25", arrive_time="08:00", duration_minutes=1775),
-        ]
-
-    def scrape(self, origin: str, destination: str, departure_date: str, adults: int, arrival_date: str) -> Iterable[Offer]:
-        # Produces a couple of fake offers to validate the pipeline end-to-end.
-        return [
-            Offer(
-                provider=self.NAME,
-                origin=origin,
-                destination=destination,
-                departure_date=departure_date,
-                return_date=arrival_date,
-                airline="VN",
-                flight_number="VN750",
-                cabin="Economy",
-                fare_class=None,
-                price_currency="EUR",
-                price_amount=699.0,
-                url="https://example.test/demo-static/vn750",
-            ),
-            Offer(
-                provider=self.NAME,
-                origin=origin,
-                destination=destination,
-                departure_date=departure_date,
-                return_date=arrival_date,
-                airline="QH",
-                flight_number="QH89",
-                cabin="Economy",
-                fare_class=None,
-                price_currency="EUR",
-                price_amount=640.0,
-                url="https://example.test/demo-static/qh89",
-            ),
         ]

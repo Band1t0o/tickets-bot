@@ -8,10 +8,17 @@ env/
 venv/
 ENV/
 .venv
+.pytest_cache/
+.ruff_cache/
 
 # Environment
 .env.local
 .env
+
+# Credentials written by the app itself — the Discord webhook URL is a bearer
+# token, and this repo is public. Ignored as a directory so anything added here
+# later is covered without anyone having to remember.
+/.secrets/
 
 # Data (optional - comment out if you want to commit scraped data)
 # data/

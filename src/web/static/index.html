@@ -13,6 +13,9 @@
     <span class="status-strip__dot"></span>
     <span id="status-text">Idle</span>
     <span class="spacer"></span>
+    <button class="small" id="stop-btn" hidden title="Stop after the searches in flight">
+      Stop
+    </button>
     <button class="small" id="theme-toggle" title="Toggle light / dark">◐</button>
   </div>
 
@@ -26,53 +29,107 @@
           panel over it.
         </p>
       </div>
-      <label class="field">
-        Scenario
-        <select id="scenario-select"></select>
-      </label>
+      <div class="trip-picker">
+        <label class="field">
+          Saved trips
+          <select id="scenario-select"></select>
+        </label>
+        <div class="row">
+          <button class="small" id="new-trip-btn">+ New trip</button>
+          <button class="small" id="delete-trip-btn" title="Delete this trip">Delete</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- An empty trip picker is what "you have no saved trips" looks like, so a
+         failed request must never be allowed to render as one. Anything that
+         stops the page loading says so here, in words, with the reason. -->
+    <div class="notice notice--error" id="blocker" hidden>
+      <h2 id="blocker-title"></h2>
+      <p id="blocker-detail"></p>
+      <p class="small" id="blocker-reassure">
+        Nothing has been deleted — this is about reaching the server, not about
+        what is saved on disk.
+      </p>
+      <button class="small" id="blocker-retry">Try again</button>
     </div>
 
     <div class="tabs" id="tabs">
       <button data-tab="search" class="is-active">Search</button>
+      <button data-tab="explore">Explore</button>
       <button data-tab="results">Results</button>
       <button data-tab="prices">Prices</button>
+      <button data-tab="sources">Sources</button>
     </div>
 
     <!-- ------------------------------------------------------------ Search -->
     <section data-panel="search">
       <div class="panel">
-        <div class="panel__header"><h2>Trip</h2></div>
+        <div class="panel__header"><h2>When</h2></div>
         <div class="form-grid">
-          <label class="field">Trip type
-            <select id="trip-type">
-              <option value="multi_city">Japan → Philippines</option>
-              <option value="round_trip">Round trip</option>
-            </select>
+          <label class="field field--wide">Trip name
+            <input type="text" id="trip-name" placeholder="named after the route if left blank">
           </label>
           <label class="field">Window opens<input type="date" id="window-start"></label>
           <label class="field">Window closes<input type="date" id="window-end"></label>
           <label class="field">Travellers<input type="number" id="adults" min="1" max="9"></label>
-        </div>
-        <div class="form-grid" style="margin-top:12px" id="stay-fields">
-          <label class="field">Japan stay, min days<input type="number" id="jp-min" min="1"></label>
-          <label class="field">Japan stay, max days<input type="number" id="jp-max" min="1"></label>
-          <label class="field">Philippines stay, min days<input type="number" id="ph-min" min="1"></label>
-          <label class="field">Philippines stay, max days<input type="number" id="ph-max" min="1"></label>
+          <label class="field">Currency<input type="text" id="currency" maxlength="3"></label>
         </div>
       </div>
 
       <div class="panel">
-        <div class="panel__header"><h2>Airports</h2></div>
+        <div class="panel__header"><h2>Route</h2></div>
         <p class="panel__hint">
-          Checked live against pelikan.cz on a sample January date. Airports with no
-          inventory are kept visible rather than hidden, so the finding is not lost.
+          A trip is a chain of stops, read top to bottom. Add as many as you like — search
+          cost grows with the number of legs, not with the number of date combinations.
+          Type a city, an airport code or a country and press Enter. Badges come from your
+          own sweep history; airports nothing has ever been found for are flagged.
         </p>
+
         <h3 class="muted small">Depart from</h3>
-        <div class="airport-grid" id="airports-europe"></div>
-        <h3 class="muted small" style="margin-top:16px">Japan</h3>
-        <div class="airport-grid" id="airports-japan"></div>
-        <h3 class="muted small" style="margin-top:16px" id="ph-heading">Philippines</h3>
-        <div class="airport-grid" id="airports-philippines"></div>
+        <div class="chips" id="origins"></div>
+
+        <div id="stops"></div>
+
+        <div class="row" style="margin-top:16px">
+          <button class="small" id="add-stop-btn">+ Add stop</button>
+        </div>
+
+        <h3 class="muted small" style="margin-top:20px">
+          Return to <span class="muted" id="return-note"></span>
+        </h3>
+        <div class="chips" id="return-to"></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel__header"><h2>What gets sent to Discord</h2></div>
+        <p class="panel__hint">
+          Each sweep reports the picks you tick below, so a daily ping is a short list
+          rather than the whole deep search.
+        </p>
+        <div class="row">
+          <label class="check small">
+            <input type="checkbox" id="notify-cheapest"> Cheapest overall
+          </label>
+          <label class="check small">
+            <input type="checkbox" id="notify-preferred"> Cheapest from airports you prefer
+          </label>
+          <label class="check small">
+            <input type="checkbox" id="notify-quiet"> Only when it beats the best so far
+          </label>
+        </div>
+
+        <h3 class="muted small" style="margin-top:20px">Airports you'd rather fly from</h3>
+        <p class="panel__hint" style="margin-top:0">
+          Best first. A trip counts as belonging to a tier only when it both leaves from and
+          returns to that tier — flying out of Prague and home into Frankfurt still strands you
+          in Frankfurt. The best tier that has any trip at all wins, and the message says what
+          preferring it cost against the outright cheapest.
+        </p>
+        <div id="preferred-tiers"></div>
+        <div class="row" style="margin-top:12px">
+          <button class="small" id="add-tier-btn">+ Add a lower choice</button>
+        </div>
       </div>
 
       <div class="panel">
@@ -88,16 +145,82 @@
               <option value="deep">Deep — every day</option>
             </select>
           </label>
+          <label class="check small">
+            <input type="checkbox" id="enabled"> Include in the nightly cloud sweep
+          </label>
           <span class="spacer"></span>
-          <button id="save-btn">Save scenario</button>
-          <button id="run-local-btn" class="primary">Run locally</button>
+          <button id="save-btn">Save trip</button>
+          <button id="explore-btn" class="primary">Explore first</button>
+          <button id="run-local-btn">Run locally</button>
           <button id="run-cloud-btn">Run in cloud</button>
         </div>
-        <p class="panel__hint" style="margin:12px 0 0" id="run-note">
-          Local runs use your machine and cost nothing. Cloud runs spend from the
-          2,000-minute monthly Actions budget — a deep sweep is about 42 minutes.
+        <!--
+          A run searches the trip on disk, and these edits are in the browser
+          until something writes them. Two probes were spent searching the
+          previous day's trip, so the state has to be visible next to the
+          buttons that act on it - not implied by a suffix on a badge.
+        -->
+        <div id="dirty-note" class="badge badge--warning" hidden></div>
+        <div id="leg-breakdown" class="small muted" style="margin-top:12px"></div>
+        <p class="panel__hint" style="margin:12px 0 0" id="explore-note">
+          <strong>Explore first</strong> prices every route in this trip on three spread-out
+          dates — <span id="explore-cost">a few minutes</span> rather than an hour and a half.
+          It will not find you a trip; it tells you which airports are hopeless, so the real
+          sweep can leave them out. The verdicts land in <em>Explore</em>, with a button to
+          drop an airport from the trip.
         </p>
-        <div id="save-error" class="badge badge--error" hidden></div>
+        <p class="panel__hint" style="margin:12px 0 0" id="run-note">
+          Local runs use your machine; cloud runs are free, since the repo is public. What
+          limits depth now is pelikan.cz rather than minutes — it has throttled this client
+          into mass timeouts before, and a sweep that half-fails is worth less than a shallow
+          one that works. The estimate above is measured at the current pace, so it moves when
+          the sweep settings do. A run in progress can be stopped from the strip at the top;
+          it keeps everything it has already found.
+        </p>
+        <div id="save-error" class="panel-error badge badge--error" hidden></div>
+      </div>
+    </section>
+
+    <!-- ----------------------------------------------------------- Explore -->
+    <!--
+      Which airports are worth pricing properly, and the place to act on the
+      answer. Its own tab rather than a corner of Results because choosing what
+      to search is a step before reading itineraries, not a kind of itinerary -
+      and because deciding about six airports should be one pass and one save.
+    -->
+    <section data-panel="explore" hidden>
+      <div class="panel">
+        <div class="panel__header">
+          <h2>Worth searching?</h2>
+          <select id="explore-select"></select>
+        </div>
+        <p class="panel__hint" id="explore-intro"></p>
+        <!--
+          A run searched one trip. Read against a trip edited since, it lists
+          airports that were never asked about and leaves out the ones that
+          were - which is exactly what happened, twice, and the tab drew it as
+          a table of perfectly ordinary verdicts.
+        -->
+        <div class="notice notice--warning" id="explore-mismatch" hidden></div>
+        <div class="notice" id="explore-pending" hidden>
+          <span id="explore-pending-text"></span>
+          <span class="spacer"></span>
+          <button class="small" id="explore-undo">Undo</button>
+          <button class="small primary" id="explore-save">Save trip</button>
+        </div>
+        <div id="explore-report"></div>
+        <div class="empty" id="explore-empty">
+          Nothing to judge yet. Run a probe or a sweep, and this tab will say which
+          airports are worth keeping.
+        </div>
+        <div class="row" style="margin-top:16px">
+          <button id="explore-run-btn">Run a probe</button>
+          <span class="muted small" id="explore-run-note"></span>
+          <span class="small" id="explore-dirty"></span>
+        </div>
+        <!-- The Search panel's copy of this is on a tab you cannot see from
+             here, so a refused save read as a button that did nothing. -->
+        <div id="explore-error" class="panel-error badge badge--error" hidden></div>
       </div>
     </section>
 
@@ -109,12 +232,13 @@
           <select id="sweep-select"></select>
         </div>
         <div class="stat-row" id="headline"></div>
-        <div class="table-scroll">
+        <div class="small" id="verification" style="margin:12px 0"></div>
+        <div class="table-scroll" id="results-scroll">
           <table class="data" id="results-table">
             <thead>
               <tr>
                 <th>Route</th><th>Departs</th><th>Returns</th>
-                <th>Airlines</th><th>Type</th><th class="num">Total</th>
+                <th>Airlines</th><th>Type</th><th>Baggage</th><th class="num">Total incl. bags</th>
               </tr>
             </thead>
             <tbody></tbody>
@@ -130,21 +254,79 @@
         <div class="panel__header"><h2>Cheapest total by departure date</h2></div>
         <p class="panel__hint">Which day to leave on. Lowest point is labelled.</p>
         <div class="chart" id="chart-by-date"></div>
+        <p class="panel__hint small" id="by-date-note"></p>
       </div>
 
       <div class="panel">
         <div class="panel__header"><h2>Best total over time</h2></div>
-        <p class="panel__hint">Whether to book now or wait. Fills in as sweeps accumulate.</p>
+        <p class="panel__hint">
+          Whether to book now or wait. Only sweeps complete enough to compare are joined
+          and labelled — a sweep that half-failed reports a price that says more about the
+          scraper than about the market.
+        </p>
         <div class="chart" id="chart-history"></div>
+        <p class="panel__hint small" id="history-note"></p>
       </div>
 
       <div class="panel">
         <div class="panel__header"><h2>Volatility probe</h2></div>
         <p class="panel__hint">
-          Three fixed routes sampled every two hours, to decide whether daily sweeping
-          is often enough. Disable the probe workflow once it has a week of data.
+          Three fixed routes sampled every two hours, to decide whether daily sweeping is
+          often enough. <strong>Net move</strong> is first observation to last — the figure
+          that says whether a fare is running away from you. <strong>Steps that moved</strong>
+          counts any change at all, including the site rounding by a few crowns; the column
+          beside it counts only moves worth noticing, and the gap between the two is why the
+          steadiest route here used to report the highest volatility.
         </p>
         <div id="probe-body" class="empty">No observations yet.</div>
+      </div>
+    </section>
+
+    <!-- ----------------------------------------------------------- Sources -->
+    <section data-panel="sources" hidden>
+      <div class="panel">
+        <div class="panel__header"><h2>Where the prices come from</h2></div>
+        <p class="panel__hint">
+          Sites move their URLs and rename their CSS classes, and either one stops the sweep
+          without stopping the code. Both are strings, and both are here — edit the one that
+          broke, press <strong>Test this source</strong> to run a single real search, and read
+          what it parsed. Zero cards matched means the markup changed; a page that will not load
+          at all means the URL did. Leave a field alone and it keeps the built-in value, so
+          deleting <code>data/sources.json</code> always restores working defaults.
+        </p>
+        <div id="sources-body" class="empty">Loading…</div>
+      </div>
+
+      <div class="panel">
+        <div class="panel__header">
+          <h2>Where results get sent</h2>
+          <span class="badge badge--muted" id="notify-origin">—</span>
+        </div>
+        <p class="panel__hint">
+          The Discord webhook the picks above are posted to. In Discord:
+          <strong>Edit Channel → Integrations → Webhooks → Copy Webhook URL</strong>.
+        </p>
+        <div class="row">
+          <label class="field field--wide">Webhook URL
+            <input type="password" id="webhook-url" autocomplete="off"
+                   placeholder="https://discord.com/api/webhooks/…">
+          </label>
+        </div>
+        <div class="row" style="margin-top:12px">
+          <button id="webhook-save">Save webhook</button>
+          <button id="webhook-test" class="primary">Send a test message</button>
+          <button class="small" id="webhook-clear">Remove</button>
+        </div>
+        <div id="webhook-result" class="small" style="margin-top:12px"></div>
+        <p class="panel__hint small" style="margin-top:14px">
+          This URL is a password in disguise — anyone holding it can post to the channel —
+          so it is stored in <code id="webhook-path">.secrets/discord.json</code>, outside
+          everything git tracks. It is never sent back to this page; the field above shows
+          it masked. <strong>Cloud sweeps do not read that file.</strong> They read the
+          repository secret, which you set once with
+          <code>gh secret set DISCORD_WEBHOOK_URL</code>. When that variable is present it
+          wins, so a cloud run always posts where the secret says.
+        </p>
       </div>
     </section>
   </main>

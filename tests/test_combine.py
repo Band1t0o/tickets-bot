@@ -10,24 +10,22 @@ from datetime import date
 
 from src.combine import best_open_jaw, best_same_airport, combine
 from src.models import Leg
-from src.scenario import Scenario
+from src.scenario import Scenario, Stop
+from tests.conftest import make_scenario
 
 
 def scenario(**overrides) -> Scenario:
     defaults = dict(
         id="jp-ph",
         name="Test",
-        trip_type="multi_city",
         origins=["PRG", "VIE"],
-        japan_airports=["NRT", "KIX"],
-        ph_airports=["MNL"],
-        window_start=date(2027, 1, 5),
-        window_end=date(2027, 2, 8),
-        japan_stay_days=(9, 11),
-        ph_stay_days=(9, 11),
+        stops=[
+            Stop(airports=["NRT", "KIX"], stay_days=(9, 11), label="Japan"),
+            Stop(airports=["MNL"], stay_days=(9, 11), label="Philippines"),
+        ],
     )
     defaults.update(overrides)
-    return Scenario(**defaults)
+    return make_scenario(**defaults)
 
 
 def leg(origin, destination, depart, price=10000.0, airline="XX") -> Leg:
@@ -114,7 +112,7 @@ def test_best_helpers_return_none_when_nothing_qualifies():
 
 
 def test_round_trip_scenario_pairs_outbound_with_return():
-    rt = scenario(trip_type="round_trip", trip_length_days=(18, 22), ph_airports=[])
+    rt = scenario(stops=[Stop(airports=["NRT"], stay_days=(18, 22), label="Japan")])
     out = leg("PRG", "NRT", date(2027, 1, 10), 12000)
     back = leg("NRT", "PRG", date(2027, 1, 30), 13000)  # 20 days later
     result = combine([out, back], rt)
@@ -123,7 +121,7 @@ def test_round_trip_scenario_pairs_outbound_with_return():
 
 
 def test_round_trip_rejects_lengths_outside_the_configured_range():
-    rt = scenario(trip_type="round_trip", trip_length_days=(18, 22), ph_airports=[])
+    rt = scenario(stops=[Stop(airports=["NRT"], stay_days=(18, 22), label="Japan")])
     out = leg("PRG", "NRT", date(2027, 1, 10), 12000)
     back = leg("NRT", "PRG", date(2027, 1, 15), 13000)  # only 5 days
     assert combine([out, back], rt) == []
@@ -158,3 +156,44 @@ def test_by_date_series_keeps_the_cheapest_per_departure_date():
 
 def test_empty_input_yields_nothing():
     assert combine([], scenario()) == []
+
+
+def _bag_leg(origin, destination, depart, price, checked_bag):
+    out = leg(origin, destination, depart, price=price)
+    out.checked_bag = checked_bag
+    return out
+
+
+def test_ranking_prefers_a_bag_inclusive_fare_over_a_cheaper_bagless_one():
+    # 23,000 with a bag beats 22,000 where one leg's bag costs ~1,500 extra.
+    # Ranking on the headline fare alone systematically flatters low-cost
+    # carriers, which is exactly the leg the cheapest itinerary rides on.
+    a1 = date(2027, 1, 5)
+    b1 = date(2027, 1, 15)
+    c1 = date(2027, 1, 25)
+    bagged = [
+        _bag_leg("PRG", "NRT", a1, 10000, True),
+        _bag_leg("NRT", "MNL", b1, 4000, True),
+        _bag_leg("MNL", "PRG", c1, 9000, True),
+    ]
+    bagless = [
+        _bag_leg("VIE", "KIX", a1, 10000, True),
+        _bag_leg("KIX", "MNL", b1, 3000, None),  # bag not confirmed
+        _bag_leg("MNL", "VIE", c1, 9000, True),
+    ]
+    out = combine(bagged + bagless, scenario(bag_estimate=1500))
+    assert out[0].total_price == 23000
+    assert out[0].legs[0].origin == "PRG"
+
+
+def test_total_with_bags_only_charges_unconfirmed_legs():
+    it = combine(
+        [
+            _bag_leg("PRG", "NRT", date(2027, 1, 5), 10000, True),
+            _bag_leg("NRT", "MNL", date(2027, 1, 15), 4000, None),
+            _bag_leg("MNL", "PRG", date(2027, 1, 25), 9000, True),
+        ],
+        scenario(),
+    )[0]
+    assert it.total_price == 23000
+    assert it.total_with_bags(1500) == 24500

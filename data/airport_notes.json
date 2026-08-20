@@ -1,0 +1,17 @@
+{
+  "_comment": "Findings no sweep can reproduce, because these airports were checked by hand and then never swept. Kept so nobody re-litigates Brno in six months - that was the whole point of the hardcoded catalogue this replaced. Everything derivable from sweep history is derived instead; see src/viability.py.",
+  "_measured": "2026-08 against pelikan.cz on a sample January 2027 date, 1 adult, CZK. 'Combined' is the cheapest one-way to NRT plus the cheapest one-way back from MNL.",
+  "airports": {
+    "PRG": { "verdict": "ok", "note": "30,735 combined — home base" },
+    "VIE": { "verdict": "ok", "note": "23,624 combined — cheapest measured" },
+    "FRA": { "verdict": "ok", "note": "27,154 combined — 45% under Prague on a live run" },
+    "BER": { "verdict": "ok", "note": "31,054 combined — 319 worse than Prague" },
+    "MUC": { "verdict": "ok", "note": "31,795 combined — 1,060 worse than Prague" },
+    "KRK": { "verdict": "ok", "note": "33,828 combined — 3,093 worse than Prague" },
+    "KTW": { "verdict": "ok", "note": "38,173 combined — 7,438 worse than Prague" },
+    "BTS": { "verdict": "no_return", "note": "No return inventory, and 78% over Prague outbound" },
+    "BRQ": { "verdict": "no_inventory", "note": "No long-haul inventory in either direction" },
+    "MNL": { "verdict": "ok", "note": "NRT→MNL from 3,863" },
+    "CEB": { "verdict": "ok", "note": "KIX→CEB from 4,669" }
+  }
+}

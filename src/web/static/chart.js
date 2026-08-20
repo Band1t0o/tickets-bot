@@ -34,8 +34,14 @@ function svgEl(name, attrs = {}) {
 }
 
 /**
- * points: [{ label: '2027-01-12', value: 27000 }]
+ * points: [{ label: '2027-01-12', value: 27000, note?, muted? }]
  * opts:   { height, valueSuffix, xLabel }
+ *
+ * `muted` marks a point whose value is not trustworthy enough to compare with
+ * the others — a sweep that was starved or never covered the whole trip. It is
+ * drawn hollow, joined by a dashed segment, and excluded from the cheapest
+ * label. Hiding such points entirely would be worse: the gap in the record is
+ * itself worth seeing.
  */
 export function lineChart(points, opts = {}) {
   const wrap = document.createElement('div');
@@ -103,36 +109,54 @@ export function lineChart(points, opts = {}) {
     svg.appendChild(label);
   });
 
-  // 2px series line.
-  const path = points.map((p, i) => `${i === 0 ? 'M' : 'L'}${x(i)},${y(p.value)}`).join(' ');
-  svg.appendChild(svgEl('path', {
-    d: path, fill: 'none', stroke: 'var(--color-chart1)',
-    'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round',
-  }));
+  // Series line, drawn a segment at a time so a segment touching an untrusted
+  // point can be dashed. One continuous solid line would assert a trend across
+  // measurements that cannot support one.
+  for (let i = 1; i < points.length; i += 1) {
+    const uncertain = points[i - 1].muted || points[i].muted;
+    svg.appendChild(svgEl('path', {
+      d: `M${x(i - 1)},${y(points[i - 1].value)} L${x(i)},${y(points[i].value)}`,
+      fill: 'none', stroke: 'var(--color-chart1)',
+      'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round',
+      ...(uncertain ? { 'stroke-dasharray': '4 4', opacity: 0.45 } : {}),
+    }));
+  }
 
-  // Markers, with a surface ring so overlapping points stay separable.
+  // Markers, with a surface ring so overlapping points stay separable. Hollow
+  // where the value is not comparable.
   points.forEach((p, i) => {
     svg.appendChild(svgEl('circle', {
       cx: x(i), cy: y(p.value), r: 4,
-      fill: 'var(--color-chart1)',
-      stroke: 'var(--color-panelBackground)', 'stroke-width': 2,
+      fill: p.muted ? 'var(--color-panelBackground)' : 'var(--color-chart1)',
+      stroke: p.muted ? 'var(--color-chart1)' : 'var(--color-panelBackground)',
+      'stroke-width': 2,
+      ...(p.muted ? { opacity: 0.6 } : {}),
     }));
   });
 
   // Direct-label only the cheapest point: a number on every point is noise.
-  const cheapestIndex = values.indexOf(rawMin);
-  svg.appendChild(svgEl('circle', {
-    cx: x(cheapestIndex), cy: y(rawMin), r: 6,
-    fill: 'none', stroke: 'var(--color-chart1)', 'stroke-width': 2,
-  }));
-  const best = svgEl('text', {
-    x: x(cheapestIndex),
-    y: y(rawMin) - 14,
-    'text-anchor': cheapestIndex === 0 ? 'start' : cheapestIndex === points.length - 1 ? 'end' : 'middle',
-    'font-size': 12, 'font-weight': 600, fill: 'var(--color-pageText)',
-  });
-  best.textContent = `${rawMin.toLocaleString()}${opts.valueSuffix || ''}`;
-  svg.appendChild(best);
+  // Untrusted points are never eligible — the whole reason they are dimmed is
+  // that their number cannot be believed, and calling one "the best" is the
+  // present bug in miniature. With nothing trustworthy to label, label nothing;
+  // the caption under the chart says why.
+  const trusted = points.map((p, i) => [p, i]).filter(([p]) => !p.muted);
+  if (trusted.length) {
+    const [bestPoint, cheapestIndex] = trusted.reduce(
+      (a, b) => (b[0].value < a[0].value ? b : a),
+    );
+    svg.appendChild(svgEl('circle', {
+      cx: x(cheapestIndex), cy: y(bestPoint.value), r: 6,
+      fill: 'none', stroke: 'var(--color-chart1)', 'stroke-width': 2,
+    }));
+    const best = svgEl('text', {
+      x: x(cheapestIndex),
+      y: y(bestPoint.value) - 14,
+      'text-anchor': cheapestIndex === 0 ? 'start' : cheapestIndex === points.length - 1 ? 'end' : 'middle',
+      'font-size': 12, 'font-weight': 600, fill: 'var(--color-pageText)',
+    });
+    best.textContent = `${bestPoint.value.toLocaleString()}${opts.valueSuffix || ''}`;
+    svg.appendChild(best);
+  }
 
   wrap.appendChild(svg);
 

@@ -96,6 +96,47 @@ table.data th.num,
   font-size: 13px;
 }
 
+/* Airports dropped in the Explore tab but not yet saved. Sticks to the top of
+   the panel so that after scrolling through four pools of verdicts, what you
+   have decided - and the button that commits it - are still in front of you. */
+#explore-pending {
+  position: sticky;
+  top: 8px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  background: var(--color-warningBackground);
+  color: var(--color-warningText);
+  border-color: var(--color-warningText);
+}
+
+/* An airport dropped but not yet saved. Struck through rather than removed:
+   the table is a reading of one sweep, and deleting rows from it as you decide
+   would leave you unable to see what you compared against. */
+tr.is-dropped { opacity: 0.45; }
+tr.is-dropped td:first-child { text-decoration: line-through; }
+
+/* An airport this run priced that your trip does not contain. Dimmed, but never
+   struck through: a line through it says *you* took it out, and a whole table
+   of those is what a report of the wrong trip used to look like. */
+tr.is-outside { opacity: 0.6; }
+
+/* One airport pool of the exploration report. Separated by a rule rather than
+   nested panels: they are one reading, not four cards. */
+.panel__section { margin-bottom: 22px; }
+.panel__section:last-child { margin-bottom: 0; }
+.panel__section > h3 {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-pageTextLight);
+  margin: 0 0 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--color-tableBorder);
+}
+
 .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .spacer { flex: 1; }
 .stack { display: flex; flex-direction: column; gap: 12px; }
@@ -106,6 +147,38 @@ table.data th.num,
   padding: 28px 8px;
   text-align: center;
   color: var(--color-pageTextLight);
+}
+
+/* Shown instead of the tabs when the page cannot trust what it would draw.
+   Deliberately loud: the failure it replaces used to look like an empty app. */
+.notice {
+  border: 1px solid var(--color-tableBorder);
+  border-radius: 10px;
+  padding: 18px 20px;
+  margin-bottom: 20px;
+}
+
+.notice--error {
+  background: var(--color-errorBackground);
+  color: var(--color-errorText);
+  border-color: var(--color-errorText);
+}
+
+/* Loud enough to be read before the table under it, which is the whole point:
+   the numbers below are about a trip you are no longer planning. */
+.notice--warning {
+  background: var(--color-warningBackground);
+  color: var(--color-warningText);
+  border-color: var(--color-warningText);
+}
+.notice--warning button { margin-top: 10px; }
+
+.notice h2 { margin: 0 0 8px; font-size: 16px; }
+.notice p  { margin: 0 0 10px; max-width: 80ch; }
+.notice code {
+  background: var(--color-panelBackground);
+  padding: 1px 5px;
+  border-radius: 4px;
 }
 
 /* -------------------------------------------------------------------- tabs */
@@ -191,6 +264,10 @@ table.data tbody tr:hover { background: var(--color-tableRowHover); }
 }
 
 .badge--warning { background: var(--color-warningBackground); color: var(--color-warningText); }
+
+/* Sits under the run buttons rather than beside them: the row is already full,
+   and this must not be the thing that gets pushed off the end. */
+#dirty-note { display: block; margin-top: 12px; width: fit-content; }
 .badge--muted   { background: var(--color-tableRowAlternate); color: var(--color-pageTextLight); }
 .badge--error   { background: var(--color-errorBackground); color: var(--color-errorText); }
 .badge--good    { background: var(--color-noticeBackground); color: var(--color-noticeText); }
@@ -210,6 +287,14 @@ button {
 
 button:hover:not(:disabled) { background: var(--color-buttonNormalBackgroundHover); }
 button:disabled { opacity: 0.5; cursor: default; }
+
+/* A filled button at half opacity still reads as "press me". The sweep buttons
+   are disabled until a new trip is saved, so they have to look it. */
+button.primary:disabled {
+  background: transparent;
+  color: var(--color-textMuted);
+  border: 1px solid var(--color-border);
+}
 
 button.primary {
   background: var(--color-buttonPrimaryBackground);
@@ -405,3 +490,184 @@ label.field > select { font-weight: 400; color: var(--color-formInputText); }
   .main { padding: 20px 16px 48px; }
   .status-strip { padding: 8px 16px; }
 }
+
+/* ------------------------------------------------------------------ chips --
+   Airport selection is a chip list with a typeahead, not a checkbox grid. The
+   grid worked when there were nine hardcoded European airports; there are now
+   ~4,000 with scheduled service, so the picker has to search rather than list.
+*/
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px 4px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-surfaceRaised, var(--color-surface));
+  font-size: 13px;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.chip__code { font-weight: 600; }
+.chip__city { color: var(--color-textMuted); }
+
+.chip--dead {
+  border-color: var(--color-warning, #b7791f);
+}
+
+.chip__remove {
+  border: 0;
+  background: transparent;
+  color: var(--color-textMuted);
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: 15px;
+  line-height: 1;
+}
+.chip__remove:hover { color: var(--color-danger, #e12d39); }
+
+/* ------------------------------------------------------------- typeahead -- */
+
+.typeahead { position: relative; display: inline-block; }
+
+.typeahead input {
+  min-width: 190px;
+  padding: 5px 9px;
+  border: 1px dashed var(--color-border);
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+}
+
+.typeahead__menu {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 280px;
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 18%);
+}
+.typeahead__menu[hidden] { display: none; }
+
+.typeahead__item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.typeahead__item:hover,
+.typeahead__item.is-active { background: var(--color-surfaceRaised, rgb(127 127 127 / 14%)); }
+.typeahead__item .muted { margin-left: 6px; }
+
+/* "No airport matches X", "20 of 83 in Japan", "Search failed - ...". A query
+   that finds nothing used to close the menu, which looked identical to a query
+   that had not run yet. */
+.typeahead__note {
+  padding: 6px 8px;
+  font-size: 12px;
+}
+.typeahead__note.is-error { color: var(--color-danger, #e12d39); }
+
+/* Text left in the box adds nothing but looks like a chip about to appear. */
+.typeahead input.is-unresolved {
+  border-style: solid;
+  border-color: var(--color-danger, #e12d39);
+}
+
+/* Airports already in use, offered as one-click adds. */
+.chips--suggest {
+  flex-basis: 100%;
+  margin-top: 2px;
+  gap: 4px;
+}
+
+.chip--add {
+  padding: 3px 9px;
+  border-style: dashed;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+.chip--add:hover { border-style: solid; border-color: var(--color-accent, currentColor); }
+
+/* --------------------------------------------------------- trip picker -- */
+
+.trip-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-end;
+}
+
+.field--wide { grid-column: 1 / -1; }
+
+/* ------------------------------------------------------------------ stops -- */
+
+.stop {
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+}
+
+.stop__head {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.stop__index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--color-surfaceRaised, rgb(127 127 127 / 14%));
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.stop__label {
+  flex: 1;
+  padding: 4px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+}
+.stop__label:hover, .stop__label:focus { border-color: var(--color-border); }
+
+.stop__stay { display: flex; gap: 6px; align-items: center; font-size: 13px; }
+.stop__stay input { width: 62px; }
+
+.check { display: inline-flex; gap: 6px; align-items: center; }

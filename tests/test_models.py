@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import date
 
-from src.models import Itinerary, Leg
+from src.models import Itinerary
 
 
 def test_legs_differing_only_by_flight_number_have_different_hashes(make_leg):
@@ -80,3 +80,78 @@ def test_itinerary_exposes_departure_and_return_dates(make_leg):
     )
     assert it.departure_date == date(2027, 1, 12)
     assert it.return_date == date(2027, 2, 1)
+
+
+# --------------------------------------------------------------- observed_at
+#
+# A deep sweep runs ~97 minutes and the probe caught FRA->NRT moving 21% inside
+# a single two-hour window, so a leg read at minute 3 and one read at minute 95
+# are not the same measurement. Every price therefore carries the moment it was
+# read off the page.
+
+
+def test_observed_at_survives_a_round_trip(make_leg):
+    leg = make_leg(observed_at="2026-08-10T11:59:04+00:00")
+    from src.models import Leg
+
+    assert Leg.from_dict(leg.to_dict()).observed_at == "2026-08-10T11:59:04+00:00"
+
+
+def test_a_leg_written_before_observed_at_existed_still_loads(make_leg):
+    """The four committed sweeps predate the field; they must not fail to load."""
+    from src.models import Leg
+
+    payload = make_leg().to_dict()
+    del payload["observed_at"]
+    assert Leg.from_dict(payload).observed_at is None
+
+
+def test_observed_at_does_not_change_the_content_hash(make_leg):
+    """Hashing it would give one flight two hashes and make _dedupe a no-op.
+
+    The same reasoning already keeps checked_bag out: the timestamp belongs to
+    the observation, not to the flight.
+    """
+    early = make_leg(observed_at="2026-08-10T11:59:04+00:00")
+    late = make_leg(observed_at="2026-08-10T13:22:47+00:00")
+    assert early.content_hash() == late.content_hash()
+
+
+def test_itinerary_observed_at_is_its_stalest_leg(make_leg):
+    """A trip is only as fresh as the oldest price in it."""
+    it = Itinerary(
+        legs=[
+            make_leg(observed_at="2026-08-10T12:40:00+00:00"),
+            make_leg(observed_at="2026-08-10T11:15:00+00:00"),
+            make_leg(observed_at="2026-08-10T12:05:00+00:00"),
+        ]
+    )
+    assert it.observed_at == "2026-08-10T11:15:00+00:00"
+
+
+def test_itinerary_observed_span_reports_how_far_apart_the_prices_were(make_leg):
+    it = Itinerary(
+        legs=[
+            make_leg(observed_at="2026-08-10T11:15:00+00:00"),
+            make_leg(observed_at="2026-08-10T12:45:00+00:00"),
+        ]
+    )
+    assert it.observed_span_minutes == 90
+
+
+def test_itinerary_without_timestamps_reports_neither(make_leg):
+    it = Itinerary(legs=[make_leg(), make_leg()])
+    assert it.observed_at is None
+    assert it.observed_span_minutes is None
+
+
+def test_itinerary_to_dict_carries_the_observation_window(make_leg):
+    it = Itinerary(
+        legs=[
+            make_leg(observed_at="2026-08-10T11:15:00+00:00"),
+            make_leg(observed_at="2026-08-10T12:45:00+00:00"),
+        ]
+    )
+    payload = it.to_dict()
+    assert payload["observed_at"] == "2026-08-10T11:15:00+00:00"
+    assert payload["observed_span_minutes"] == 90

@@ -1,36 +1,84 @@
 name: sweep
 
-# One deep sweep per day. The previous schedule fired 20x/day and each run
-# spent ~11 of its ~13.6 minutes on pip + playwright install, costing roughly
-# 8,000 min/month against a 2,000-minute private-repo tier. Caching the browser
-# and searching via deep links (15s instead of 150s) is what makes daily
-# full-depth coverage affordable.
+# One deep sweep per day, split across three runners.
+#
+# The repo is public, so Actions minutes are free and depth is not rationed by
+# budget. What constrains it is pelikan.cz: this client has been throttled into
+# 58 of 93 timeouts in a single sweep, and a starved sweep is worse than no
+# sweep - it spends time, commits thin results, and its price is not comparable
+# with anything.
+#
+# Sharding is how depth and politeness stop competing. Each runner is a separate
+# VM with its own address, so three of them at the unchanged two workers and
+# four-second delay put exactly the per-address load that measured zero timeouts
+# over 350 searches on 11 Aug, while finishing in a third of the wall clock.
+# Free minutes are still not a reason to hammer the site harder.
+#
+# Timing comes from the probe, detrended against each route-day's median:
+# 01:00-03:00 UTC runs ~2.2% below the day's median and 18:00-22:00 ~0.6% above,
+# so a true evening slot would systematically sample the day's high. 02:00 lands
+# results before you wake; 13:00 (~15:00 local) is near-median and actionable
+# while you are awake to act on it.
 on:
   schedule:
-    - cron: '0 2 * * *'      # 02:00 UTC daily, full-depth multi-city sweep
+    - cron: '0 2 * * *'
+    - cron: '0 13 * * *'
   workflow_dispatch:
     inputs:
       scenario:
         description: 'Scenario id (default: every enabled scenario)'
         required: false
       depth:
-        description: 'quick | standard | deep (default: the scenario setting)'
+        description: 'quick | standard | deep (default: deep)'
         required: false
 
 permissions:
   contents: write
 
 concurrency:
-  # A queued run must not start while the previous one is still committing.
   group: sweep
   cancel-in-progress: false
 
+env:
+  SHARDS: 3
+
 jobs:
-  sweep:
+  plan:
     runs-on: ubuntu-latest
-    # A deep sweep is ~42 min. Without a ceiling, one hung browser could burn
-    # the entire monthly budget overnight.
-    timeout-minutes: 90
+    outputs:
+      scenarios: ${{ steps.pick.outputs.scenarios }}
+      shards: ${{ steps.pick.outputs.shards }}
+      depth: ${{ steps.pick.outputs.depth }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - id: pick
+        env:
+          INPUT_SCENARIO: ${{ inputs.scenario }}
+          INPUT_DEPTH: ${{ inputs.depth }}
+        run: |
+          set -euo pipefail
+          echo "depth=${INPUT_DEPTH:-deep}" >> "$GITHUB_OUTPUT"
+          FOCUSED=""
+          if [ "${{ github.event.schedule }}" = "0 13 * * *" ]; then
+            FOCUSED="--focused"
+          fi
+          python scripts/plan_sweep.py --shards "$SHARDS" \
+            --only "${INPUT_SCENARIO:-}" $FOCUSED >> "$GITHUB_OUTPUT"
+          cat "$GITHUB_OUTPUT"
+
+  sweep:
+    needs: plan
+    if: needs.plan.outputs.scenarios != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: ${{ fromJson(needs.plan.outputs.scenarios) }}
+        shard: ${{ fromJson(needs.plan.outputs.shards) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
 
@@ -47,57 +95,81 @@ jobs:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-pw-${{ hashFiles('requirements.txt') }}
 
-      # chromium only: the providers never touch firefox or webkit, and
-      # installing all three is most of the setup cost.
       - run: python -m playwright install --with-deps chromium
 
       - name: Report the planned cost before spending it
         run: |
-          for f in scenarios/*.json; do
-            id=$(basename "$f" .json)
-            python -m src.cli sweep --scenario "$id" --dry-run || true
-          done
+          python -m src.cli sweep --scenario "${{ matrix.scenario }}" \
+            --depth "${{ needs.plan.outputs.depth }}" \
+            --shard "${{ matrix.shard }}/${{ env.SHARDS }}" --dry-run || true
 
-      - name: Run sweep
+      - name: Sweep this shard
         env:
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          # Scheduled runs sweep at full depth; the scenario's own depth is the
-          # interactive default and stays lower so local runs are quick.
-          INPUT_SCENARIO: ${{ inputs.scenario }}
-          INPUT_DEPTH: ${{ inputs.depth }}
+          SWEEP_BUDGET_MIN: 55
         run: |
           set -euo pipefail
-          DEPTH="${INPUT_DEPTH:-deep}"
+          python -m src.cli sweep \
+            --scenario "${{ matrix.scenario }}" \
+            --depth "${{ needs.plan.outputs.depth }}" \
+            --shard "${{ matrix.shard }}/${{ env.SHARDS }}" \
+            --max-minutes "$SWEEP_BUDGET_MIN"
 
-          if [ -n "${INPUT_SCENARIO:-}" ]; then
-            python -m src.cli sweep --scenario "$INPUT_SCENARIO" --depth "$DEPTH"
-            exit 0
-          fi
+      - name: Hand the shard to the merge
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sweep-${{ matrix.scenario }}-shard-${{ matrix.shard }}
+          path: data/sweeps/${{ matrix.scenario }}/
+          if-no-files-found: warn
+          retention-days: 3
 
-          python - <<'PY' > /tmp/enabled.txt
-          from src.scenario import load_scenarios
-          print("\n".join(s.id for s in load_scenarios("scenarios") if s.enabled))
-          PY
+  merge:
+    needs: [plan, sweep]
+    if: always() && needs.plan.outputs.scenarios != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      max-parallel: 1
+      matrix:
+        scenario: ${{ fromJson(needs.plan.outputs.scenarios) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements.txt
 
-          while read -r id; do
-            [ -z "$id" ] && continue
-            echo "::group::sweep $id ($DEPTH)"
-            python -m src.cli sweep --scenario "$id" --depth "$DEPTH"
-            echo "::endgroup::"
-          done < /tmp/enabled.txt
+      - name: Collect the shards
+        uses: actions/download-artifact@v4
+        with:
+          pattern: sweep-${{ matrix.scenario }}-shard-*
+          path: shards
+
+      - name: Stitch them into one sweep and report
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          set -euo pipefail
+          python -m src.cli merge-shards --scenario "${{ matrix.scenario }}" --from shards
 
       - name: Commit results
+        if: always()
         run: |
           set -euo pipefail
           git config user.name "github-actions"
           git config user.email "github-actions@users.noreply.github.com"
-          # No `|| true` on `git add`: a persistence failure must be loud.
-          # A blanket `data/` ignore rule silently discarded every result for
-          # months precisely because that error was being swallowed.
           git add data/
           if git diff --staged --quiet; then
             echo "No new data to commit"
-          else
-            git commit -m "chore(data): sweep $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-            git push
+            exit 0
           fi
+          git commit -m "chore(data): sweep ${{ matrix.scenario }} $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          for attempt in 1 2 3; do
+            if git push; then
+              exit 0
+            fi
+            echo "push rejected (attempt $attempt), rebasing onto origin"
+            git pull --rebase --autostash
+          done
+          echo "::error::could not push sweep results after 3 attempts"
+          exit 1
