@@ -56,6 +56,25 @@ MODES = ("sweep", "explore")
 # circuit breaker end the passes early when the site is refusing outright.
 MAX_FILL_PASSES = 3
 
+# Searches one browser session may run before it is thrown away and replaced.
+#
+# Measured, and the measurement is unusually clean. Two cloud sweeps on 20 Aug
+# were cut off after a *hard cliff* - a steady 10s per search for 120 searches,
+# then nothing at all, with no slowdown leading up to it:
+#
+#   1 runner  x 2 workers = 2 sessions -> 120 searches answered
+#   3 runners x 2 workers = 6 sessions -> 360 searches answered
+#
+# 60 per session, both times, whatever the runner count. That is not a rate
+# limit and not a per-address quota - both of which the first two readings were
+# wrongly taken for. It behaves like a session or cookie budget, and a fresh
+# browser context is a fresh session.
+#
+# 40 leaves room in case the real number is a little under 60, and a context
+# restart costs ~1-2s against ~10s per search, so recycling the whole of a deep
+# sweep costs well under a minute.
+PAGE_RECYCLE_EVERY = 40
+
 # Consecutive timeouts that mean the site is refusing this client rather than
 # having one slow moment. Five, because a working sweep's failures are scattered
 # - the 10 Aug cloud run had none at all in 350 searches - while a throttled one
@@ -402,6 +421,7 @@ def run_sweep(
     backoff_s=BACKOFF_S,
     on_backoff: Callable[[float], None] | None = None,
     shard: tuple[int, int] | None = None,
+    recycle_after: int = PAGE_RECYCLE_EVERY,
 ) -> SweepResult:
     """Run every search `scenario` implies and persist the legs found.
 
@@ -417,6 +437,10 @@ def run_sweep(
 
     `backoff_s` is how long to wait out a run of timeouts before giving up on
     the site entirely; tests pass zeroes so they need not sleep.
+
+    `recycle_after` searches, the browser is replaced. 0 keeps one for the whole
+    run, which is what every sweep did until the site started refusing a session
+    after about sixty searches.
 
     `shard=(index, count)` runs only this machine's share of the plan, so a deep
     sweep can be split across several cloud runners and merged afterwards. Each
@@ -578,7 +602,7 @@ def run_sweep(
                     # reports the shortfall.
                     return outstanding + list(searches[index:])
                 try:
-                    legs = _search(provider, page, search, scenario.adults)
+                    legs = _search(provider, session.page(), search, scenario.adults)
                 except SearchTimeout as exc:
                     wait = breaker.record_timeout()
                     outstanding.append(search)
@@ -600,12 +624,15 @@ def run_sweep(
                     time.sleep(delay_s)
             return outstanding
 
-        with _browser_page(provider) as page:
+        session = _Session(provider, recycle_after)
+        try:
             pending = chunk
             for attempt in range(1, MAX_FILL_PASSES + 1):
                 pending = run_pass(pending, last=attempt == MAX_FILL_PASSES)
                 if not pending or (stop is not None and stop.is_set()) or breaker.tripped:
                     break
+        finally:
+            session.close()
 
     try:
         with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
@@ -697,6 +724,45 @@ def load_legs(directory: Path) -> list[Leg]:
             if leg.observed_at is None:
                 leg.observed_at = fallback
     return legs
+
+
+class _Session:
+    """A browser page that throws itself away every `recycle_after` searches.
+
+    One page was reused for a whole worker's chunk, which is what makes a sweep
+    affordable - a browser launch per search would dominate the cost. But it
+    also means one session carries the whole sweep, and pelikan.cz stops
+    answering a session after about sixty searches (see PAGE_RECYCLE_EVERY).
+
+    So the page is still reused, just not forever. Everything about the browser
+    is replaced together - context and all - because a fresh context is what
+    drops the cookies, and keeping the cookies is the thing being tested.
+    """
+
+    def __init__(self, provider, recycle_after: int = PAGE_RECYCLE_EVERY):
+        self._provider = provider
+        self._recycle_after = recycle_after
+        self._browser = None
+        self._page = None
+        self._used = 0
+        self.recycles = 0
+
+    def page(self):
+        """The page to run the next search on, replaced when it is due."""
+        if self._page is None or (self._recycle_after and self._used >= self._recycle_after):
+            if self._page is not None:
+                self.recycles += 1
+            self.close()
+            self._browser = _browser_page(self._provider)
+            self._page = self._browser.__enter__()
+            self._used = 0
+        self._used += 1
+        return self._page
+
+    def close(self) -> None:
+        if self._browser is not None:
+            self._browser.__exit__(None, None, None)
+        self._browser = self._page = None
 
 
 class _NullPage:

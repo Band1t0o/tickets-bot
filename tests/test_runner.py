@@ -850,3 +850,93 @@ def test_a_committed_sweep_is_not_mistaken_for_a_shard(tmp_path):
     (old / "status.json").write_text(json.dumps({"state": "done"}), encoding="utf-8")
     with pytest.raises(ShardMismatch, match="not shards of one run"):
         merge_shards([*shards, old], tmp_path / "merged")
+
+
+# ------------------------------------------------------- browser recycling
+#
+# pelikan.cz stops answering a browser session after about sixty searches. Two
+# cloud sweeps on 20 Aug were cut off after a hard cliff - a steady 10s per
+# search, then nothing - at 120 searches on two workers, whether they ran on one
+# runner or three. 60 per session both times.
+
+
+class CountingProvider(FakeProvider):
+    """Records how many searches each browser page was asked for.
+
+    Pages are tagged rather than identified by `id()`: a closed page is dropped
+    immediately, and CPython happily hands the same address to the next one, so
+    counting by id would silently merge two sessions into one.
+    """
+
+    NAME = "FAKE"
+
+    def __init__(self, dies_after: int | None = None):
+        super().__init__()
+        self.dies_after = dies_after
+        self.per_page: dict[int, int] = {}
+
+    def search_leg(self, page, origin, destination, depart, ret=None, adults=1):
+        tag = getattr(page, "_tag", None)
+        if tag is None:
+            tag = len(self.per_page) + 1
+            page._tag = tag
+        seen = self.per_page.get(tag, 0) + 1
+        self.per_page[tag] = seen
+        # Stands in for the site refusing a session that has asked too much.
+        if self.dies_after is not None and seen > self.dies_after:
+            from src.providers.pelikan import SearchTimeout
+
+            raise SearchTimeout("session exhausted")
+        return super().search_leg(page, origin, destination, depart, ret, adults)
+
+
+def deep():
+    """Enough searches that a session limit is actually reached."""
+    return scenario(depth="deep")
+
+
+def test_a_worker_reuses_one_browser_between_recycles(tmp_path):
+    """A browser launch per search would dominate the cost of a sweep."""
+    provider = CountingProvider()
+    run_sweep(deep(), provider=provider, data_dir=tmp_path, workers=1, delay_s=0, recycle_after=0)
+    assert len(provider.per_page) == 1
+
+
+def test_the_browser_is_replaced_once_it_has_asked_enough(tmp_path):
+    provider = CountingProvider()
+    result = run_sweep(
+        deep(), provider=provider, data_dir=tmp_path, workers=1, delay_s=0, recycle_after=10
+    )
+    assert result.total > 20, "needs enough searches to recycle more than once"
+    assert len(provider.per_page) == -(-result.total // 10)
+    assert max(provider.per_page.values()) <= 10
+
+
+def test_recycling_carries_a_sweep_past_a_session_limit(tmp_path):
+    """The whole point. Two cloud sweeps on 20 Aug were cut off after a hard
+    cliff - a steady 10s per search, then nothing - at 60 searches per session,
+    whether they ran on one runner or three."""
+    provider = CountingProvider(dies_after=10)
+    result = run_sweep(
+        deep(), provider=provider, data_dir=tmp_path, workers=1, delay_s=0,
+        recycle_after=10, backoff_s=(0, 0, 0),
+    )
+    assert result.coverage == 1.0
+    assert not result.throttled
+
+
+def test_without_recycling_a_session_limit_stops_the_sweep_dead(tmp_path):
+    """The behaviour being fixed, pinned so it cannot come back unnoticed.
+
+    Note what it reports: `error_count` stays 0, because the breaker abandons
+    what is left rather than attempting and failing it. Coverage is the only
+    figure that shows the hole.
+    """
+    provider = CountingProvider(dies_after=10)
+    result = run_sweep(
+        deep(), provider=provider, data_dir=tmp_path, workers=1, delay_s=0,
+        recycle_after=0, backoff_s=(0, 0, 0),
+    )
+    assert result.throttled
+    assert result.coverage < 1.0
+    assert not result.errors

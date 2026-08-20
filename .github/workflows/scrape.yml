@@ -6,19 +6,22 @@ name: sweep
 # budget. What constrains it is pelikan.cz, and the shape of that constraint is
 # now measured rather than assumed.
 #
-# Sharding was introduced believing the limit applied per address, so three
-# runners could go three times as fast. The first sharded run disproved it:
-# three shards on three separate runner addresses were each cut off at search
-# 120, within 90 seconds of one another, having had zero timeouts up to that
-# point. 360 searches in 21 minutes is 17/min; the clean single-runner sweep of
-# 11 Aug held 4.1/min for 86 minutes without one. The limit is on this client as
-# a whole.
+# What stops a sweep is a browser session, not an address and not a rate. Read
+# across three cloud runs, the first two of which were read wrongly:
 #
-# So DEFAULT_SHARDS is 1. The machinery stays -- it is the right tool if the
-# site changes its behaviour, and a lost shard thins the date grid evenly
-# instead of truncating the sweep -- but raising it means lowering the rate per
-# shard by the same factor for no net gain. It is a dispatch input rather than a
-# constant so a deliberate experiment does not need a commit.
+#   11 Aug, 1 runner:  350 searches, zero timeouts, 86 min
+#   20 Aug, 3 runners: 360 answered - 120 per runner
+#   20 Aug, 1 runner:  120 answered
+#
+# One runner and three runners both answered 120 per runner, at a steady ten
+# seconds a search with no slowdown before a hard cliff. Two workers each hold
+# their own browser, so that is 60 searches per session - and three runners only
+# looked faster because six sessions beat two. PAGE_RECYCLE_EVERY in the runner
+# now replaces the browser every 40 searches, so one runner can finish a whole
+# deep sweep.
+#
+# DEFAULT_SHARDS stays 1 while that is being proven. Raising it is now purely a
+# wall-clock choice and a dispatch input, so an experiment needs no commit.
 #
 # Timing comes from the probe, detrended against each route-day median:
 # 01:00-03:00 UTC runs ~2.2% below the day median and 18:00-22:00 ~0.6% above,
