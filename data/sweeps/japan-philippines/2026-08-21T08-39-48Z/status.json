@@ -1,0 +1,123 @@
+{
+  "scenario_id": "japan-philippines",
+  "state": "unhealthy",
+  "mode": "sweep",
+  "total": 84,
+  "completed": 84,
+  "current": "",
+  "legs_found": 472,
+  "errors": [],
+  "error_count": 0,
+  "legs_per_search": 5.62,
+  "route_coverage": 0.714,
+  "routes_planned": 21,
+  "routes_with_legs": 15,
+  "routes_with_no_results": [
+    "HND->CEB",
+    "HND->MNL",
+    "KIX->MNL",
+    "PRG->HND",
+    "PRG->KIX",
+    "PRG->NRT"
+  ],
+  "route_searches": {
+    "PRG->NRT": 4,
+    "HND->MNL": 4,
+    "HND->CEB": 4,
+    "PRG->HND": 4,
+    "KIX->MNL": 4,
+    "PRG->KIX": 4,
+    "KIX->CEB": 4,
+    "VIE->NRT": 4,
+    "MNL->PRG": 4,
+    "VIE->HND": 4,
+    "MNL->VIE": 4,
+    "VIE->KIX": 4,
+    "MNL->FRA": 4,
+    "FRA->NRT": 4,
+    "FRA->HND": 4,
+    "CEB->PRG": 4,
+    "FRA->KIX": 4,
+    "CEB->VIE": 4,
+    "NRT->MNL": 4,
+    "CEB->FRA": 4,
+    "NRT->CEB": 4
+  },
+  "route_legs": {
+    "PRG->NRT": 0,
+    "HND->MNL": 0,
+    "HND->CEB": 0,
+    "PRG->HND": 0,
+    "KIX->MNL": 0,
+    "PRG->KIX": 0,
+    "KIX->CEB": 40,
+    "VIE->NRT": 40,
+    "MNL->PRG": 10,
+    "VIE->HND": 20,
+    "MNL->VIE": 30,
+    "VIE->KIX": 38,
+    "MNL->FRA": 29,
+    "FRA->NRT": 30,
+    "FRA->HND": 10,
+    "CEB->PRG": 29,
+    "FRA->KIX": 40,
+    "CEB->VIE": 38,
+    "NRT->MNL": 40,
+    "CEB->FRA": 38,
+    "NRT->CEB": 40
+  },
+  "route_errors": {
+    "PRG->NRT": 0,
+    "HND->MNL": 0,
+    "HND->CEB": 0,
+    "PRG->HND": 0,
+    "KIX->MNL": 0,
+    "PRG->KIX": 0,
+    "KIX->CEB": 0,
+    "VIE->NRT": 0,
+    "MNL->PRG": 0,
+    "VIE->HND": 0,
+    "MNL->VIE": 0,
+    "VIE->KIX": 0,
+    "MNL->FRA": 0,
+    "FRA->NRT": 0,
+    "FRA->HND": 0,
+    "CEB->PRG": 0,
+    "FRA->KIX": 0,
+    "CEB->VIE": 0,
+    "NRT->MNL": 0,
+    "CEB->FRA": 0,
+    "NRT->CEB": 0
+  },
+  "answered": 84,
+  "planned": 84,
+  "coverage": 1.0,
+  "unanswered": 0,
+  "shard": null,
+  "shards": [
+    [
+      0,
+      5
+    ],
+    [
+      1,
+      5
+    ],
+    [
+      2,
+      5
+    ],
+    [
+      3,
+      5
+    ],
+    [
+      4,
+      5
+    ]
+  ],
+  "focus": null,
+  "started_at": "2026-08-21T08:34:56+00:00",
+  "finished_at": "2026-08-21T08:39:26+00:00",
+  "depth": "quick"
+}
