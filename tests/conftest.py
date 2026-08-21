@@ -4,6 +4,14 @@ Tests here must never touch the network or launch a browser: the scrapers are
 slow (~15s per real search) and the sites are third-party. Provider behaviour is
 tested against saved HTML fixtures instead.
 
+That promise was not being kept. `run_sweep_command` takes `notify=True` by
+default and two tests here call it without saying otherwise, so every run of the
+suite posted fake flights - 10,000 CZK, airline "XX", a URL on example.test - to
+whatever real Discord channel `.secrets/discord.json` named. It went unnoticed
+because it looks like a message from the app. `no_real_webhook` below closes it
+for every test at once rather than at the two call sites, because the next test
+to forget is the one nobody will think to check.
+
 The scenario builders live here rather than in each test module because they
 used to be copied into four files, and every schema change meant finding all
 four. A test that wants a different shape passes overrides.
@@ -18,6 +26,27 @@ from src.scenario import Scenario, Stop
 
 WINDOW_START = date(2027, 1, 5)
 WINDOW_END = date(2027, 2, 8)
+
+
+@pytest.fixture(autouse=True)
+def no_real_webhook(tmp_path_factory, monkeypatch):
+    """Point every webhook lookup at an empty directory, for every test.
+
+    `SECRETS_DIR` is the relative `Path(".secrets")`, so it resolves against the
+    working directory - which, running the suite from the repo root, is the real
+    one. Both routes in are closed here: the environment variable the cloud sets,
+    and the file the Sources tab writes.
+
+    A test that wants to prove notification behaviour still monkeypatches `post`
+    and its own secrets directory, as `test_notify.py` does; those run after this
+    and win.
+    """
+    from src import notify_discord
+
+    monkeypatch.delenv("DISCORD_WEBHOOK_URL", raising=False)
+    monkeypatch.setattr(
+        notify_discord, "SECRETS_DIR", tmp_path_factory.mktemp("no-webhook")
+    )
 
 
 def make_scenario(**overrides) -> Scenario:
