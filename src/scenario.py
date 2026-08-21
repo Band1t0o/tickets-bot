@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import asdict, dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 DEPTHS = ("quick", "standard", "deep")
@@ -75,10 +75,35 @@ class Stop:
     # meanings, in files that read each other is how the round-trip and
     # multi-city branches drifted until neither could build a trip.
     overland: bool = False
+    # Once the crossing is decided, the alternatives are searched for nothing.
+    # `overland` opens every in/out combination so a probe can find out which
+    # one is worth having; these spend that answer. None means "still open", so
+    # a trip that has not been probed behaves exactly as it did before.
+    #
+    # Two fields rather than one pair because the sides are decided separately:
+    # a probe often settles the way out of a country long before the way in.
+    # They are only meaningful on an overland stop - see `validate`.
+    arrive_via: str | None = None
+    depart_via: str | None = None
 
     def describe(self, index: int) -> str:
         """Human name for error messages; falls back to a position."""
         return self.label or f"stop {index + 1}"
+
+    @property
+    def arrive_at(self) -> list[str]:
+        """Airports a leg may land at to satisfy this stop."""
+        return [self.arrive_via] if self.arrive_via else list(self.airports)
+
+    @property
+    def depart_from(self) -> list[str]:
+        """Airports the next leg may leave from.
+
+        Equal to `arrive_at` for an ordinary stop by construction, since the
+        chain rule already forces leaving from where you landed. It differs
+        only where the rule is suspended, which is the one case this exists for.
+        """
+        return [self.depart_via] if self.depart_via else list(self.airports)
 
 
 @dataclass(frozen=True)
@@ -111,6 +136,57 @@ class Watch:
     @property
     def key(self) -> str:
         return self.depart_dates[0].isoformat() if self.depart_dates else ""
+
+
+@dataclass(frozen=True)
+class LegWatch:
+    """One route on one date, followed on its own.
+
+    A `Watch` follows a whole chained trip: every airport pair of every leg on
+    its pinned dates, 21 searches a candidate on the Japan trip. This follows
+    exactly what you point at, and costs one search. The two coexist because
+    they answer different questions - a `Watch` asks "is this trip moving", this
+    asks "is this ticket moving" - and a decision is usually assembled from the
+    second: watch Vienna to Haneda on the 10th and the 12th, and Manila home on
+    the 2nd and the 4th, because those were the days that looked promising.
+
+    Deliberately **not** required to be a leg of a trip the sweep could build.
+    Picking freely is the whole point; the API says when a route is not one this
+    trip searches, and leaves the choice alone.
+
+    There is no cap here. A leg watch is exactly one search, so the honest limit
+    is the one `web.app.WATCH_SEARCH_CAP` applies to the whole planned run -
+    trip watches and leg watches together - rather than a count of rows that
+    would mean something different for each kind.
+    """
+
+    origin: str
+    destination: str
+    depart_date: date
+    added_at: str = ""
+    # What it cost when it was picked, so the first check can already say which
+    # way it has gone rather than only setting a baseline.
+    added_price: float | None = None
+    currency: str = "CZK"
+
+    @property
+    def key(self) -> str:
+        return f"{self.origin}-{self.destination}@{self.depart_date.isoformat()}"
+
+    @property
+    def route(self) -> str:
+        return f"{self.origin}→{self.destination}"
+
+
+# How far past the window a watched leg may depart.
+#
+# The final leg of a trip legitimately leaves after `window_end` - the site
+# substitutes nearby dates, so the sweep searches past the end of the window for
+# exactly that reason (`planner.RETURN_SLACK_DAYS`). Restated here as its own
+# number rather than imported, because `scenario` cannot import the planner
+# without a cycle, and because this is answering a different question: not "how
+# far should a sweep look" but "is this date a typo". Generous on purpose.
+WATCH_DATE_SLACK_DAYS = 14
 
 
 @dataclass
@@ -158,6 +234,21 @@ class Scenario:
     # rather than by the daily sweep of the whole window. Empty means the trip
     # is not watched at all, and the watch workflow skips it entirely.
     watches: list[Watch] = field(default_factory=list)
+    # Individual routes on individual dates, followed one search each. Kept
+    # alongside `watches` rather than replacing them: a trip watch answers what
+    # a whole chained trip costs, a leg watch answers what one ticket costs, and
+    # the second is how a decision is usually put together.
+    leg_watches: list[LegWatch] = field(default_factory=list)
+    # Sample the stops in the reverse order too, but only in the probe.
+    #
+    # "Is it cheaper to fly Philippines first?" is a real question and an
+    # expensive one to answer properly: a deep sweep of both orders is twice a
+    # ~480-search plan against a site that answers about 120 per runner. The
+    # probe prices three dates a leg, so asking it there costs tens of searches
+    # rather than hundreds - enough to rule an order out, never enough to pick a
+    # day. When the answer is "the other way round", you reorder the stops and
+    # sweep that; nothing here reorders anything on its own.
+    probe_both_orders: bool = False
     # Stay silent unless a pick actually improved on the best recorded for it.
     # Default True: at two sweeps a day, unconditional reporting is ~60 messages
     # a month, most of them "still 21,324". Set false for a digest every run.
@@ -177,6 +268,28 @@ class Scenario:
         if not self.one_way:
             pools.append(self.return_to or self.origins)
         return pools
+
+    @property
+    def leg_pools(self) -> list[tuple[list[str], list[str]]]:
+        """(origins, destinations) per leg, in travel order.
+
+        `airport_pools` holds one list per *place*, which cannot describe a stop
+        that is arrived at through one airport and left through another - so
+        everything that walks legs reads this instead, and everything that talks
+        about a place still reads `airport_pools`. Both are derived from the same
+        fields, so the planner and the combiner cannot disagree about the shape
+        of a trip any more than they could before.
+
+        Identical to consecutive pairs of `airport_pools` whenever nothing is
+        pinned, which is every trip that has not been probed yet.
+        """
+        pools = self.airport_pools
+        arrive, depart = list(pools), list(pools)
+        for index, stop in enumerate(self.stops):
+            position = index + 1
+            arrive[position] = stop.arrive_at
+            depart[position] = stop.depart_from
+        return [(depart[i], arrive[i + 1]) for i in range(len(pools) - 1)]
 
     @property
     def pool_roles(self) -> list[dict]:
@@ -288,6 +401,26 @@ class Scenario:
                     f"or untick travelling overland."
                 )
 
+            for side, code in (("arrive at", stop.arrive_via), ("leave from", stop.depart_via)):
+                if code is None:
+                    continue
+                # Without overland the chain rule already forces leaving from
+                # the airport you landed at, so a pin is not a narrowing but a
+                # contradiction. Ignoring it silently would leave someone
+                # waiting for Kansai departures nothing was ever going to chain.
+                if not stop.overland:
+                    raise ValueError(
+                        f"{name}: pinning which airport to {side} only means something "
+                        f"when you travel overland between them. Tick travelling "
+                        f"overland, or clear the pin."
+                    )
+                if code not in stop.airports:
+                    raise ValueError(
+                        f"{name}: pinned to {side} {code}, which is not one of its "
+                        f"airports ({', '.join(stop.airports)}). Add it to the stop, "
+                        f"or pin a different one."
+                    )
+
         if self.window_end < self.window_start:
             raise ValueError(
                 f"window_end ({self.window_end}) must not precede "
@@ -334,6 +467,7 @@ class Scenario:
                 )
 
         self._validate_watches()
+        self._validate_leg_watches()
 
         unknown = [name for name in self.notify if name not in NOTIFY_SELECTIONS]
         if unknown:
@@ -408,6 +542,45 @@ class Scenario:
                     f"watching that day"
                 )
 
+    def _validate_leg_watches(self) -> None:
+        """A watched leg must be a search that could return something.
+
+        Deliberately light. The route need not be one this trip flies - picking
+        freely is the point - so the only things refused are a search that
+        cannot be run at all and a date far enough outside the window to be a
+        typo rather than a choice.
+        """
+        seen: set[str] = set()
+        for watch in self.leg_watches:
+            for label, code in (("origin", watch.origin), ("destination", watch.destination)):
+                if not IATA_RE.match(code):
+                    raise ValueError(
+                        f"watched leg {watch.key}: {code!r} is not a 3-letter IATA "
+                        f"airport code ({label})"
+                    )
+            if watch.origin == watch.destination:
+                raise ValueError(
+                    f"watched leg {watch.key}: a flight from {watch.origin} to itself "
+                    f"is not something any site will price"
+                )
+            if watch.key in seen:
+                raise ValueError(
+                    f"{watch.route} on {watch.depart_date} is already being watched; "
+                    f"it cannot be watched twice"
+                )
+            seen.add(watch.key)
+
+            # The window, plus slack for a final leg that legitimately departs
+            # after it. Outside that it is a mistyped year, not a choice, and a
+            # watch on it would report "nothing found" every four hours forever.
+            latest = self.window_end + timedelta(days=WATCH_DATE_SLACK_DAYS)
+            if not self.window_start <= watch.depart_date <= latest:
+                raise ValueError(
+                    f"watched leg {watch.route} departs {watch.depart_date}, outside "
+                    f"the window {self.window_start}..{self.window_end}; widen the "
+                    f"window or pick a date inside it"
+                )
+
     # ---------------------------------------------------------- serialisation
 
     def to_dict(self) -> dict:
@@ -425,12 +598,25 @@ class Scenario:
             }
             for w in self.watches
         ]
+        data["leg_watches"] = [
+            {
+                "origin": w.origin,
+                "destination": w.destination,
+                "depart_date": w.depart_date.isoformat(),
+                "added_at": w.added_at,
+                "added_price": w.added_price,
+                "currency": w.currency,
+            }
+            for w in self.leg_watches
+        ]
         data["stops"] = [
             {
                 "label": s.label,
                 "airports": list(s.airports),
                 "stay_days": list(s.stay_days),
                 "overland": s.overland,
+                "arrive_via": s.arrive_via,
+                "depart_via": s.depart_via,
             }
             for s in self.stops
         ]
@@ -454,6 +640,18 @@ class Scenario:
             # Absent from every file written before the Watch tab existed.
             for w in payload.get("watches") or []
         ]
+        payload["leg_watches"] = [
+            LegWatch(
+                origin=w["origin"],
+                destination=w["destination"],
+                depart_date=date.fromisoformat(w["depart_date"]),
+                added_at=w.get("added_at", ""),
+                added_price=w.get("added_price"),
+                currency=w.get("currency", "CZK"),
+            )
+            # Absent from every file written before leg watches existed.
+            for w in payload.get("leg_watches") or []
+        ]
         payload["stops"] = [
             Stop(
                 airports=list(s["airports"]),
@@ -462,6 +660,10 @@ class Scenario:
                 # Absent from every file written before overland stops existed,
                 # and those are committed trips that must keep loading.
                 overland=bool(s.get("overland", False)),
+                # Likewise, and None rather than "" so "not pinned" is one value
+                # and not two that behave the same by accident.
+                arrive_via=s.get("arrive_via") or None,
+                depart_via=s.get("depart_via") or None,
             )
             for s in payload["stops"]
         ]

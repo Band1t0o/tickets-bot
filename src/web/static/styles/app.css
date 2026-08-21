@@ -474,6 +474,37 @@ label.field > select { font-weight: 400; color: var(--color-formInputText); }
 .status-strip.is-running .status-strip__dot { background: var(--color-accent); }
 .status-strip.is-error .status-strip__dot { background: var(--color-errorText); }
 
+/* Waiting out a refusal. Its own colour rather than the running green, because
+   the whole point is that this is not the same as progress - it looked exactly
+   like progress for thirteen minutes. */
+.status-strip.is-waiting {
+  background: var(--color-warningBackground);
+  color: var(--color-warningText);
+}
+
+.status-strip.is-waiting .status-strip__dot { background: var(--color-warningText); }
+
+/* The control for the thing the strip is describing, so it reads as part of it
+   rather than as another small grey button. It was `.small` and unstyled, and
+   went unfound: a run could be watched to its end for want of a visible way to
+   end it. */
+.status-strip__stop {
+  padding: 4px 14px;
+  font-weight: 600;
+  color: var(--color-errorText);
+  border: 1px solid var(--color-errorText);
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.status-strip__stop:hover:not(:disabled) {
+  background: var(--color-errorText);
+  color: var(--color-panelBackground);
+}
+
+.status-strip__stop:disabled { opacity: 0.6; cursor: default; }
+
 /* -------------------------------------------------------------- disclosure */
 
 .disclosure > summary {
@@ -686,6 +717,14 @@ label.field > select { font-weight: 400; color: var(--color-formInputText); }
 .stop__overland { margin-top: 10px; }
 .stop__overland input:disabled + span { opacity: 0.5; }
 
+/* The two pins that spend a probe's answer. Indented under the tick they belong
+   to, so they read as a narrowing of it rather than as two more trip settings. */
+.stop__pins {
+  margin: 8px 0 2px 22px;
+  gap: 10px;
+}
+.stop__pins select { font-size: 12px; }
+
 .stop__stay { display: flex; gap: 6px; align-items: center; font-size: 13px; }
 .stop__stay input { width: 62px; }
 
@@ -730,3 +769,54 @@ label.field > select { font-weight: 400; color: var(--color-formInputText); }
 .source-card__repair[hidden] {
   display: none;
 }
+
+/* ------------------------------------------------- results: filter row --
+
+   Sits between the headline cards and the table, and belongs to the table
+   rather than to the panel: boxed and set slightly back so it reads as a
+   control over what is below it, not as another figure alongside what is
+   above it. Aligned to the bottom because the two selects carry labels and
+   the tick does not, and without it the checkbox floats level with their
+   captions instead of with the inputs it sits beside. */
+
+.results-filters {
+  align-items: flex-end;
+  gap: 12px;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  /* tableBorder, not --color-border: the latter is referenced in six places in
+     this file and defined in none of them, so it silently resolves to
+     currentColor. Left alone rather than fixed here - it changes how the stop
+     cards look, which is not this change's business. */
+  border: 1px solid var(--color-tableBorder);
+  border-radius: 10px;
+  background: var(--color-pageBackground);
+}
+
+.results-filters label.field { min-width: 128px; }
+
+/* The checkbox is not a labelled field, so it needs the same optical baseline
+   the selects get from their captions. */
+.results-filters .check { padding-bottom: 7px; }
+
+#filter-count { white-space: nowrap; }
+
+
+/* ------------------------------------------------------------- night sweep */
+
+/* One line per trip, so "which of these runs tonight" is a column to run an eye
+   down rather than a paragraph to parse. Both kinds are listed: a trip left out
+   and hidden is how two trips came to sit unswept for a fortnight while their
+   owner watched for nightly results. */
+.night-list { display: grid; gap: 6px; margin-top: 8px; }
+
+.night-list__row { display: flex; gap: 10px; align-items: baseline; }
+.night-list__name { flex: 1; min-width: 0; }
+.night-list__cost { color: var(--color-pageTextLight); white-space: nowrap; }
+
+/* Dimmed rather than dropped, and it still carries its cost: the question a
+   left-out trip raises is "what would it cost to put it back in". */
+.night-list__row.is-out .night-list__name { text-decoration: line-through; }
+.night-list__row.is-out { opacity: 0.6; }
+
+#night-cloud { display: block; margin-top: 12px; max-width: 80ch; }

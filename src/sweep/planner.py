@@ -15,8 +15,9 @@ combiner could ever close into a trip.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, timedelta
+from itertools import zip_longest
 
 from ..scenario import Scenario
 
@@ -139,14 +140,55 @@ def _focus_start(scenario: Scenario) -> date:
     return scenario.focus_start or scenario.window_start
 
 
+def _deal(searches: list[LegSearch]) -> list[LegSearch]:
+    """Round-robin the plan across routes: one date from each, then the next.
+
+    The order a plan is emitted in only matters when the plan does not finish -
+    and then it decides whether what did finish is worth anything. Emitted leg
+    by leg, a run cut short leaves each route's *tail* unasked, and the legs end
+    up on date bands that cannot reach each other. Measured 21 Aug: a run that
+    answered 37 of 66 searches found 357 real flights and `combine_all` returned
+    **no complete trip at all**, because the return leg was priced 22-28 January
+    and the trip it had to complete needed 2-7 February.
+
+    Dealt this way, a run that answers half its plan holds half of *every*
+    route's dates and still chains. It is the rule `shard_of` already applies
+    across runners, for the same reason and in the same words: thin the date
+    grid evenly rather than delete part of the trip from it.
+
+    A prefix is each route's *earlier* dates rather than a spread of its window,
+    which is honest but worth knowing - the legs' windows are offset by the
+    minimum stays, so early dates of every leg do reach each other. `coverage`
+    is what reports how much of the window was really seen.
+    """
+    by_route: dict[tuple[int, str, str], list[LegSearch]] = {}
+    for search in searches:
+        key = (search.leg_index, search.origin, search.destination)
+        by_route.setdefault(key, []).append(search)
+
+    return [
+        search
+        for row in zip_longest(*by_route.values())
+        for search in row
+        if search is not None
+    ]
+
+
 def _searches_for(scenario: Scenario, dates_by_leg: dict[int, list[date]]) -> list[LegSearch]:
-    """Every route pair of each leg, on that leg's dates, deduplicated."""
-    pools = scenario.airport_pools
+    """Every route pair of each leg, on that leg's dates, deduplicated and dealt.
+
+    Walks `leg_pools` rather than consecutive `airport_pools`, so a stop pinned
+    to arrive at one airport and leave from another is searched only the way it
+    is actually going to be flown. The two are identical on any trip that has
+    pinned nothing, which is every trip until a probe has settled the crossing.
+    """
+    pools = scenario.leg_pools
     searches: list[LegSearch] = []
     for leg_index, dates in dates_by_leg.items():
+        origins, destinations = pools[leg_index]
         for depart in dates:
-            for origin in pools[leg_index]:
-                for destination in pools[leg_index + 1]:
+            for origin in origins:
+                for destination in destinations:
                     # Pools may overlap once any airport can appear anywhere - a
                     # trip returning to its own departure list would otherwise
                     # generate PRG->PRG, which no site will price.
@@ -155,7 +197,7 @@ def _searches_for(scenario: Scenario, dates_by_leg: dict[int, list[date]]) -> li
                     searches.append(LegSearch(origin, destination, depart, None, leg_index))
 
     # Different date arithmetic can land on the same search; run each once.
-    return list(dict.fromkeys(searches))
+    return _deal(list(dict.fromkeys(searches)))
 
 
 def plan_searches(scenario: Scenario) -> list[LegSearch]:
@@ -183,7 +225,30 @@ def plan_exploration(
     Depth is deliberately ignored. Depth decides how finely a trip is priced;
     this decides which airports deserve to be priced at all, and sampling that
     question more finely on a `deep` trip would make the cheap pass expensive.
+
+    With `probe_both_orders` it also samples the stops the other way round, so
+    "would Philippines first be cheaper?" can be answered for tens of searches
+    instead of the several hundred a second sweep would cost. Only here: the
+    sweep prices the order the stops are actually listed in.
     """
+    searches = _explore_pass(scenario, dates_per_leg)
+    for other in reordered(scenario):
+        searches += _explore_pass(other, dates_per_leg)
+
+    # Deduplicated on the search itself rather than on the whole `LegSearch`.
+    # The two orders overlap, and a record carries the leg index it came from -
+    # VIE->MNL is leg 0 one way round and MNL->VIE is leg 2 the other - so
+    # `dict.fromkeys` over the frozen dataclass would let one route on one date
+    # through twice under two indices. That is a real search against a site
+    # that answers about 120 of them per runner.
+    unique: dict[tuple[str, str, date], LegSearch] = {}
+    for search in searches:
+        unique.setdefault((search.origin, search.destination, search.depart_date), search)
+    return list(unique.values())
+
+
+def _explore_pass(scenario: Scenario, dates_per_leg: int) -> list[LegSearch]:
+    """One order's worth of reconnaissance: every route on a few spread dates."""
     return _searches_for(
         scenario,
         {
@@ -191,6 +256,23 @@ def plan_exploration(
             for leg_index in range(scenario.leg_count)
         },
     )
+
+
+def reordered(scenario: Scenario) -> list[Scenario]:
+    """The other stop orders worth sampling, or nothing.
+
+    Only the full reverse today, and only for a trip that asked. Reversing is
+    enough for the two-stop trip this exists for; every permutation of four
+    stops is 24 orders and a probe that costs more than the sweep it was meant
+    to make unnecessary.
+
+    Reversing carries each stop's stay range with it, which is the point: a
+    Philippines-first trip spends the Philippines stay first, so its later legs
+    open on different dates.
+    """
+    if not scenario.probe_both_orders or len(scenario.stops) < 2:
+        return []
+    return [replace(scenario, stops=list(reversed(scenario.stops)))]
 
 
 def plan_watch(scenario: Scenario) -> list[LegSearch]:
@@ -211,30 +293,94 @@ def plan_watch(scenario: Scenario) -> list[LegSearch]:
     Dates are pooled across candidates before the pairs are built, so two
     candidates ten days apart share the search where one's second leg lands on
     the other's first. `_searches_for` deduplicates the rest.
+
+    Leg watches are added on top, one search each: they name a route and a date
+    outright rather than a trip, so there is nothing to expand. A route the trip
+    does not fly is still planned - picking freely is the point of them - and
+    the deduplication below means a leg that a trip watch already covers costs
+    nothing extra.
     """
     dates_by_leg: dict[int, list[date]] = {}
     for watch in scenario.watches:
         for leg_index, depart in enumerate(watch.depart_dates):
             dates_by_leg.setdefault(leg_index, []).append(depart)
-    return _searches_for(scenario, dates_by_leg)
+    searches = _searches_for(scenario, dates_by_leg)
+
+    seen = {(s.origin, s.destination, s.depart_date) for s in searches}
+    for leg in scenario.leg_watches:
+        key = (leg.origin, leg.destination, leg.depart_date)
+        if key in seen:
+            continue
+        seen.add(key)
+        searches.append(
+            LegSearch(
+                leg.origin,
+                leg.destination,
+                leg.depart_date,
+                None,
+                # Reporting only - it groups the dry-run breakdown and the
+                # per-leg estimate. A route the trip does not fly has no
+                # position in the chain, and 0 is a label rather than a claim.
+                _chain_position(scenario, leg.origin, leg.destination),
+            )
+        )
+    return searches
+
+
+def _chain_position(scenario: Scenario, origin: str, destination: str) -> int:
+    """Which leg of the trip this route belongs to, or 0 when it belongs to none."""
+    for index, (origins, destinations) in enumerate(scenario.leg_pools):
+        if origin in origins and destination in destinations:
+            return index
+    return 0
 
 
 def planned_routes(scenario: Scenario) -> set[tuple[str, str]]:
     """The distinct origin-destination pairs this trip requires, ignoring dates.
 
     What a sweep has to cover before its result may be compared with another
-    sweep of the same trip. Walks `airport_pools` exactly as `plan_searches`
-    does - including the self-pair skip - so the two cannot disagree about
-    which routes a trip implies.
+    sweep of the same trip. Walks `leg_pools` exactly as `plan_searches` does -
+    including the self-pair skip - so the two cannot disagree about which routes
+    a trip implies.
     """
-    pools = scenario.airport_pools
     return {
         (origin, destination)
-        for index in range(len(pools) - 1)
-        for origin in pools[index]
-        for destination in pools[index + 1]
+        for origins, destinations in scenario.leg_pools
+        for origin in origins
+        for destination in destinations
         if origin != destination
     }
+
+
+# How many searches one runner may be handed.
+#
+# Measured four ways on 20 Aug and wrong three times before that: pelikan.cz
+# answers about **120** searches from one client and then stops answering at
+# all - a steady ten seconds a search right through [120/483], then half an
+# hour of silence. Replacing the whole browser changes nothing, so it is not a
+# cookie and not a session; what is constant within a runner and differs
+# between runners is the address.
+#
+# 100 rather than 120 is the margin. A shard that goes over does not fail
+# loudly - it simply stops answering, and the merged sweep has a hole in its
+# date grid that only `coverage` can see.
+SEARCHES_PER_RUNNER = 100
+
+
+def shards_for(planned: int) -> int:
+    """How many runners a plan of this size has to be split across.
+
+    Replaces a bare `DEFAULT_SHARDS: 5` in the workflow. The 5 was right, and
+    was derived exactly this way - 483 planned over ~100 a runner - but it was
+    written down as a number rather than as the rule, so it stayed 5 when
+    pinning the Japan crossing took that trip to 66 searches, and it applied to
+    every trip in the matrix whatever its size.
+
+    Never zero: a matrix with no jobs is a night that reports success and
+    sweeps nothing, which is the shape of failure this repo has already had
+    thirteen times in a row.
+    """
+    return max(1, -(-planned // SEARCHES_PER_RUNNER))
 
 
 def shard_of(searches: list[LegSearch], index: int, count: int) -> list[LegSearch]:

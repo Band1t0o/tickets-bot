@@ -29,6 +29,12 @@
 
 const PAD = { top: 18, right: 18, bottom: 34, left: 62 };
 
+/* Every moment drawn here is a Prague moment, pinned rather than left to the
+   machine. Declared again instead of imported because app.js imports this file,
+   and importing back would close the cycle for one string. Kept in step with
+   `PRAGUE` in app.js. */
+const PRAGUE = 'Europe/Prague';
+
 function niceTicks(min, max, count = 5) {
   if (min === max) return [min];
   const span = max - min;
@@ -345,7 +351,8 @@ export function multiLineChart(series, opts = {}) {
       y: height - 12, 'text-anchor': anchor,
       'font-size': 11, fill: 'var(--color-chartAxis)',
     });
-    label.textContent = new Date(stamp).toLocaleString(undefined, {
+    label.textContent = new Date(stamp).toLocaleString('en-GB', {
+      timeZone: PRAGUE,
       month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
     });
     svg.appendChild(label);
@@ -441,7 +448,7 @@ export function multiLineChart(series, opts = {}) {
     tooltip.innerHTML =
       `<strong>${best.entry.name}</strong><br>` +
       `${best.point.value.toLocaleString()}${opts.valueSuffix || ''}<br>` +
-      `<span class="muted">${new Date(best.point.t).toLocaleString()}</span>` +
+      `<span class="muted">${new Date(best.point.t).toLocaleString('en-GB', { timeZone: PRAGUE })}</span>` +
       (best.point.muted ? '<br><span class="muted">from a run that was refused part way</span>' : '');
     tooltip.style.left = `${(x(best.point.t) / scale) + 12}px`;
     tooltip.style.top = `${(y(best.point.value) / scale) - 8}px`;

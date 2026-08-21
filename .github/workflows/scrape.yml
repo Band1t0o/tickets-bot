@@ -20,9 +20,12 @@ name: sweep
 # address. The cliff is hard rather than a slowdown - a steady ten seconds a
 # search right through [120/483], then half an hour of silence.
 #
-# So DEFAULT_SHARDS must keep every shard under ~120 searches: 483 planned needs
-# 5. Raise it if the plan grows, and check the dry-run count before assuming the
-# current number still fits.
+# So every shard must stay under ~120 searches. That is no longer a number kept
+# here: `scripts/plan_sweep.py` plans each trip at the depth this run will use
+# and asks `planner.shards_for` how many runners it needs, so the matrix carries
+# a count per trip. It gives back 5 for the 483-search shape that has finished
+# whole every night since 20 Aug, and 1 for the 66-search shape that pinning the
+# Japan crossing produced - which the old fixed 5 would have split 13 apiece.
 #
 # Do not trust the old "350 searches, zero timeouts" note. That run was cancelled
 # at the 90-minute ceiling and ran the code that logged a timed-out search as an
@@ -46,7 +49,7 @@ on:
         description: 'quick | standard | deep (default: deep)'
         required: false
       shards:
-        description: 'Runners to split across. Leave blank unless testing the rate limit.'
+        description: 'Force a runner count. Leave blank; it is sized per trip.'
         required: false
 
 permissions:
@@ -56,18 +59,12 @@ concurrency:
   group: sweep
   cancel-in-progress: false
 
-env:
-  # Read the note above before changing this. 483 planned / 5 = 105 per shard,
-  # under the ~120 the site answers.
-  DEFAULT_SHARDS: 5
-
 jobs:
   plan:
     runs-on: ubuntu-latest
     outputs:
       scenarios: ${{ steps.pick.outputs.scenarios }}
-      shards: ${{ steps.pick.outputs.shards }}
-      shard_count: ${{ steps.pick.outputs.shard_count }}
+      jobs: ${{ steps.pick.outputs.jobs }}
       depth: ${{ steps.pick.outputs.depth }}
     steps:
       - uses: actions/checkout@v4
@@ -81,25 +78,31 @@ jobs:
           INPUT_SHARDS: ${{ inputs.shards }}
         run: |
           set -euo pipefail
-          echo "depth=${INPUT_DEPTH:-deep}" >> "$GITHUB_OUTPUT"
+          DEPTH="${INPUT_DEPTH:-deep}"
+          echo "depth=$DEPTH" >> "$GITHUB_OUTPUT"
           FOCUSED=""
           if [ "${{ github.event.schedule }}" = "0 13 * * *" ]; then
             FOCUSED="--focused"
           fi
-          python scripts/plan_sweep.py --shards "${INPUT_SHARDS:-$DEFAULT_SHARDS}" --only "${INPUT_SCENARIO:-}" $FOCUSED >> "$GITHUB_OUTPUT"
+          # --depth is the depth the sweep will run at, not the one on the file.
+          # Sizing a trip saved as `quick` and dispatched as `deep` from the file
+          # would hand a seven-times bigger plan to one runner.
+          python scripts/plan_sweep.py --depth "$DEPTH" --shards "${INPUT_SHARDS:-0}" --only "${INPUT_SCENARIO:-}" $FOCUSED >> "$GITHUB_OUTPUT"
           cat "$GITHUB_OUTPUT"
 
   sweep:
     needs: plan
-    if: needs.plan.outputs.scenarios != '[]'
+    if: needs.plan.outputs.jobs != '[]'
     strategy:
       # One throttled shard must not bin the others. A sweep missing part of its
       # date grid is worth committing and says so through coverage; nothing at
       # all is what the thirteen cancelled nights produced.
       fail-fast: false
+      # One entry per runner, each carrying the count it is a share of. A cross
+      # product of trips and shard indices cannot give one trip five runners and
+      # another one, which is exactly what sizing per trip needs.
       matrix:
-        scenario: ${{ fromJson(needs.plan.outputs.scenarios) }}
-        shard: ${{ fromJson(needs.plan.outputs.shards) }}
+        include: ${{ fromJson(needs.plan.outputs.jobs) }}
     runs-on: ubuntu-latest
     # A ceiling, never the budget. The budget is --max-minutes below, which the
     # sweep enforces on itself so it always reaches the upload step.
@@ -129,17 +132,18 @@ jobs:
 
       - name: Report the planned cost before spending it
         run: |
-          python -m src.cli sweep --scenario "${{ matrix.scenario }}" --depth "${{ needs.plan.outputs.depth }}" --shard "${{ matrix.shard }}/${{ needs.plan.outputs.shard_count }}" --dry-run || true
+          python -m src.cli sweep --scenario "${{ matrix.scenario }}" --depth "${{ needs.plan.outputs.depth }}" --shard "${{ matrix.shard }}/${{ matrix.shard_count }}" --dry-run || true
 
       - name: Sweep this shard
         env:
-          # A ceiling, not an expectation: a 105-search shard takes ~20 min.
-          # Generous so a slow night still finishes, low enough that a stuck
-          # shard gives up rather than running into timeout-minutes.
+          # A ceiling, not an expectation: a shard is capped near 105 searches
+          # by the sizing above, which takes ~20 min. Generous so a slow night
+          # still finishes, low enough that a stuck shard gives up rather than
+          # running into timeout-minutes.
           SWEEP_BUDGET_MIN: 140
         run: |
           set -euo pipefail
-          python -m src.cli sweep --scenario "${{ matrix.scenario }}" --depth "${{ needs.plan.outputs.depth }}" --shard "${{ matrix.shard }}/${{ needs.plan.outputs.shard_count }}" --data-dir shard-out --max-minutes "$SWEEP_BUDGET_MIN"
+          python -m src.cli sweep --scenario "${{ matrix.scenario }}" --depth "${{ needs.plan.outputs.depth }}" --shard "${{ matrix.shard }}/${{ matrix.shard_count }}" --data-dir shard-out --max-minutes "$SWEEP_BUDGET_MIN"
 
       - name: Hand the shard to the merge
         # Always: legs are appended as they are found, so there is nearly always

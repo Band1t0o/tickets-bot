@@ -21,7 +21,7 @@ posts anything. `src/cli.py` runs the search, this records what it found, and
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from .combine import combine_all
@@ -41,6 +41,16 @@ DEFAULT_WATCH_DIR = Path("data/watch")
 # six messages a day about rounding, and the one that mattered would be lost in
 # them. See `probe.MEANINGFUL_MOVE_PCT`, which exists for the same reason.
 MEANINGFUL_DROP_PCT = 1.0
+
+# How far from the asked-for day a leg may be and still count as that day.
+#
+# pelikan.cz substitutes nearby dates - asking for 22 January can return the
+# 23rd - which is why the combiner computes stays from the dates on the legs
+# rather than from the dates requested. A leg watch asks for one exact day, so
+# without this a run that came back a day early records "nothing found" and the
+# series grows a hole where a real observation was made. What is recorded is
+# always the date actually returned, and whether it was the one asked for.
+NEARBY_DATE_DAYS = 3
 
 
 def _now() -> str:
@@ -119,6 +129,157 @@ def record_observations(
     return rows
 
 
+def record_leg_observations(
+    legs: list[Leg],
+    scenario: Scenario,
+    status: dict,
+    directory: Path | str = DEFAULT_WATCH_DIR,
+) -> list[dict]:
+    """Append one row per watched leg and return them.
+
+    Its own file beside `observations.jsonl` rather than a `kind` column in it.
+    Append-only files are what makes both survive a killed run, and two
+    workflows appending to different files never conflict on a rebase - the same
+    reasoning that put the trip observations in their own file to begin with.
+    Mixing them would also make every existing reader filter for a column that
+    did not exist when its rows were written.
+    """
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+
+    by_route: dict[tuple[str, str], list[Leg]] = {}
+    for leg in legs:
+        if leg.depart_date is None:
+            continue
+        by_route.setdefault((leg.origin, leg.destination), []).append(leg)
+
+    comparable = _comparable(status)
+    ts = _now()
+    rows: list[dict] = []
+    for watch in scenario.leg_watches:
+        found = _nearest(by_route.get((watch.origin, watch.destination), []), watch.depart_date)
+        rows.append(
+            {
+                "ts": ts,
+                "scenario_id": scenario.id,
+                "key": watch.key,
+                "route": watch.route,
+                "origin": watch.origin,
+                "destination": watch.destination,
+                "depart_date": watch.depart_date.isoformat(),
+                # What was really priced. The site substitutes nearby dates, and
+                # a price for the 23rd recorded as the 22nd is a price for a
+                # flight you cannot buy on the day you asked about.
+                "found_date": found.depart_date.isoformat() if found else None,
+                "exact": bool(found and found.depart_date == watch.depart_date),
+                # None, never 0, for the same reason the trip rows use None: a
+                # leg that found nothing means the search broke or the site
+                # refused, and a zero averaged into the series would put the
+                # cheapest fare you ever saw at the bottom of the chart.
+                "price": found.price_amount if found else None,
+                "currency": found.price_currency if found else watch.currency,
+                "airline": found.airline if found else None,
+                "stops": found.stops if found else None,
+                "checked_bag": found.checked_bag if found else None,
+                "coverage": status.get("coverage"),
+                "legs_per_search": legs_per_search_of(status),
+                "comparable": comparable,
+            }
+        )
+
+    with (directory / "leg-observations.jsonl").open("a", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+    return rows
+
+
+def _nearest(candidates: list[Leg], wanted: date) -> Leg | None:
+    """Cheapest leg on the day asked for, else on the nearest day within slack.
+
+    The exact day wins outright even when a neighbouring one is cheaper: the
+    question a watch asks is what *this* day costs, and quietly answering about
+    a different one is how a series stops meaning anything.
+    """
+    exact = [leg for leg in candidates if leg.depart_date == wanted]
+    near = exact or [
+        leg
+        for leg in candidates
+        if abs((leg.depart_date - wanted).days) <= NEARBY_DATE_DAYS
+    ]
+    return min(near, key=lambda leg: leg.price_amount) if near else None
+
+
+def leg_report(directory: Path | str = DEFAULT_WATCH_DIR) -> dict:
+    """Each watched leg's series and how far it has moved.
+
+    Shaped like the `candidates` block of `watch_report` so the tab, the chart
+    and the drop detection can treat the two the same way. Same rules as well:
+    a point with no price is dropped because there is nothing to draw, a point
+    from a starved run is kept and flagged because the gap is worth seeing, and
+    only trustworthy points are counted into the summary figures.
+    """
+    path = Path(directory) / "leg-observations.jsonl"
+    if not path.exists():
+        return {"legs": {}}
+
+    series: dict[str, list[dict]] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        if row.get("price") is None:
+            continue
+        series.setdefault(row["key"], []).append(row)
+
+    legs: dict[str, dict] = {}
+    for key, rows in series.items():
+        trusted = [row for row in rows if row.get("comparable")]
+        last = (trusted or rows)[-1]
+        summary = {
+            "key": key,
+            "route": last["route"],
+            "origin": last["origin"],
+            "destination": last["destination"],
+            "depart_date": last["depart_date"],
+            "series": [
+                {
+                    "ts": row["ts"],
+                    "total": row["price"],
+                    "comparable": bool(row.get("comparable")),
+                }
+                for row in rows
+            ],
+            "currency": last["currency"],
+            "airline": last.get("airline"),
+            "stops": last.get("stops"),
+            "checked_bag": last.get("checked_bag"),
+            # True only when the latest trustworthy price really was for the day
+            # asked about, so the tab can flag a substituted date rather than
+            # quietly presenting it as the day you picked.
+            "exact": bool(last.get("exact")),
+            "found_date": last.get("found_date"),
+            "observations": len(rows),
+            "first": None,
+            "latest": None,
+            "net_change": 0,
+            "net_change_pct": 0.0,
+            "low": None,
+            "high": None,
+        }
+        if trusted:
+            prices = [row["price"] for row in trusted]
+            summary["first"] = prices[0]
+            summary["latest"] = prices[-1]
+            summary["low"] = min(prices)
+            summary["high"] = max(prices)
+            summary["net_change"] = round(prices[-1] - prices[0], 2)
+            if prices[0]:
+                summary["net_change_pct"] = round((prices[-1] - prices[0]) / prices[0] * 100, 1)
+        legs[key] = summary
+
+    return {"legs": legs}
+
+
 def watch_report(directory: Path | str = DEFAULT_WATCH_DIR) -> dict:
     """Each candidate's series and how far it has moved.
 
@@ -183,6 +344,72 @@ def watch_report(directory: Path | str = DEFAULT_WATCH_DIR) -> dict:
         candidates[key] = summary
 
     return {"candidates": candidates}
+
+
+def leg_drops(
+    report: dict,
+    scenario: Scenario,
+    directory: Path | str = DEFAULT_WATCH_DIR,
+    min_drop_pct: float = MEANINGFUL_DROP_PCT,
+) -> list[dict]:
+    """Watched legs that have genuinely fallen since anything was last said.
+
+    The same rules as `drops`, against `leg_report` instead of `watch_report`:
+    measured from the level last *reported* rather than the last observed, so a
+    slow slide of five 0.4% steps is still news by the fifth; seeded from the
+    price it was picked at so the first run can already say something; and
+    recorded only on a report, which is what makes running it twice report once.
+
+    Under `legwatch:` rather than `watch:`, so a leg and a trip watch cannot
+    overwrite each other's recorded best in the one `best.json` they share. VIE
+    to HND on 10 January and a trip departing 10 January would otherwise collide
+    on the same slot and silence one of them.
+    """
+    directory = Path(directory)
+    added = {watch.key: watch.added_price for watch in scenario.leg_watches}
+
+    found: list[dict] = []
+    for key, leg in sorted(report.get("legs", {}).items()):
+        price = leg.get("latest")
+        if price is None:
+            continue
+        previous = load_best(directory, _leg_alert_name(key))
+        if previous is None:
+            previous = added.get(key)
+        if previous is None:
+            save_best(directory, price, leg["currency"], _leg_alert_name(key))
+            continue
+
+        # `scenario.alert_threshold` is deliberately not consulted here, unlike
+        # in `drops`. It is a figure for a whole trip, and a 4,000 CZK hop is
+        # under any trip threshold ever set - applying it would fire an alert on
+        # every leg on every run forever.
+        fallen = previous - price
+        if not (previous > 0 and (fallen / previous * 100) >= min_drop_pct):
+            continue
+
+        found.append(
+            {
+                "key": key,
+                "route": leg["route"],
+                "depart_date": leg["depart_date"],
+                "price": price,
+                "currency": leg["currency"],
+                "airline": leg.get("airline"),
+                "previous_best": previous,
+                "drop": round(fallen, 2),
+                "drop_pct": round(fallen / previous * 100, 1) if previous else 0.0,
+                "exact": bool(leg.get("exact")),
+                "found_date": leg.get("found_date"),
+            }
+        )
+        save_best(directory, price, leg["currency"], _leg_alert_name(key))
+
+    return found
+
+
+def _leg_alert_name(key: str) -> str:
+    return f"legwatch:{key}"
 
 
 def _alert_name(key: str) -> str:

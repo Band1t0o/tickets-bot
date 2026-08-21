@@ -12,7 +12,7 @@ import json
 from datetime import date
 
 from src.models import Leg
-from src.scenario import Scenario, Stop, Watch
+from src.scenario import LegWatch, Scenario, Stop, Watch
 from tests.conftest import make_scenario
 
 CANDIDATE = [date(2027, 1, 10), date(2027, 1, 20), date(2027, 1, 30)]
@@ -331,3 +331,247 @@ def test_watching_nothing_is_refused_rather_than_run_empty(tmp_path, monkeypatch
         run_watch_command(
             "jp-ph", provider=OneLegProvider(), data_dir=tmp_path / "data", notify=False
         )
+
+
+# --------------------------------------------------------------- leg watches
+#
+# A trip watch answers "is this trip moving" for 21 searches; a leg watch
+# answers "is this ticket moving" for one. The tests below are about the same
+# honesty properties as the trip ones - a gap is not a zero, a starved run is
+# marked not plotted, a ping is a real fall - plus the one thing only a leg
+# watch has to get right: this site substitutes nearby dates, and a price for
+# the 23rd is not a price for the 22nd.
+
+WATCHED_LEG = LegWatch(origin="PRG", destination="NRT", depart_date=date(2027, 1, 10))
+
+
+def leg_trip(*watched, **overrides) -> Scenario:
+    defaults = dict(
+        id="jp-ph",
+        origins=["PRG"],
+        stops=[
+            Stop(airports=["NRT"], stay_days=(9, 11), label="Japan"),
+            Stop(airports=["MNL"], stay_days=(9, 11), label="Philippines"),
+        ],
+        watches=[],
+        leg_watches=list(watched or [WATCHED_LEG]),
+        bag_estimate=0,
+    )
+    defaults.update(overrides)
+    return make_scenario(**defaults)
+
+
+def test_a_watched_leg_records_what_that_ticket_costs_now(tmp_path):
+    from src.watch import record_leg_observations
+
+    rows = record_leg_observations(
+        [leg("PRG", "NRT", date(2027, 1, 10), 12000.0)], leg_trip(), status(), tmp_path
+    )
+    assert len(rows) == 1
+    assert rows[0]["key"] == "PRG-NRT@2027-01-10"
+    assert rows[0]["route"] == "PRG→NRT"
+    assert rows[0]["price"] == 12000
+    assert rows[0]["exact"] is True
+    assert rows[0]["found_date"] == "2027-01-10"
+
+
+def test_a_leg_that_found_nothing_records_a_gap_and_never_a_zero(tmp_path):
+    from src.watch import record_leg_observations
+
+    rows = record_leg_observations([], leg_trip(), status(), tmp_path)
+    assert rows[0]["price"] is None
+
+
+def test_a_substituted_date_is_recorded_as_the_day_it_really_is(tmp_path):
+    """The site answers 22 January with the 23rd.
+
+    Recording that as the 22nd prices a flight you cannot buy on the day you
+    asked about.
+    """
+    from src.watch import record_leg_observations
+
+    rows = record_leg_observations(
+        [leg("PRG", "NRT", date(2027, 1, 11), 11000.0)], leg_trip(), status(), tmp_path
+    )
+    assert rows[0]["price"] == 11000
+    assert rows[0]["found_date"] == "2027-01-11"
+    assert rows[0]["exact"] is False
+
+
+def test_the_day_asked_about_wins_even_when_a_neighbour_is_cheaper(tmp_path):
+    """A watch asks what *this* day costs.
+
+    Quietly answering about another one is how a series stops meaning anything.
+    """
+    from src.watch import record_leg_observations
+
+    rows = record_leg_observations(
+        [
+            leg("PRG", "NRT", date(2027, 1, 10), 12000.0),
+            leg("PRG", "NRT", date(2027, 1, 11), 8000.0),
+        ],
+        leg_trip(),
+        status(),
+        tmp_path,
+    )
+    assert rows[0]["price"] == 12000
+    assert rows[0]["exact"] is True
+
+
+def test_a_date_far_from_the_one_asked_about_is_not_used_at_all(tmp_path):
+    from src.watch import record_leg_observations
+
+    rows = record_leg_observations(
+        [leg("PRG", "NRT", date(2027, 1, 25), 5000.0)], leg_trip(), status(), tmp_path
+    )
+    assert rows[0]["price"] is None
+
+
+def test_leg_observations_go_in_their_own_file(tmp_path):
+    """Two workflows appending to different files never conflict on a rebase."""
+    from src.watch import record_leg_observations, record_observations
+
+    record_observations(legs_for(CANDIDATE), trip(), status(), tmp_path)
+    record_leg_observations(
+        [leg("PRG", "NRT", date(2027, 1, 10), 12000.0)], leg_trip(), status(), tmp_path
+    )
+    assert (tmp_path / "observations.jsonl").exists()
+    assert (tmp_path / "leg-observations.jsonl").exists()
+
+
+def test_a_leg_series_reports_how_far_it_has_moved(tmp_path):
+    from src.watch import leg_report, record_leg_observations
+
+    for price in (12000.0, 11500.0, 10800.0):
+        record_leg_observations(
+            [leg("PRG", "NRT", date(2027, 1, 10), price)], leg_trip(), status(), tmp_path
+        )
+    summary = leg_report(tmp_path)["legs"]["PRG-NRT@2027-01-10"]
+    assert summary["observations"] == 3
+    assert summary["first"] == 12000
+    assert summary["latest"] == 10800
+    assert summary["low"] == 10800
+    assert summary["net_change"] == -1200
+    assert summary["net_change_pct"] == -10.0
+
+
+def test_a_starved_run_is_kept_in_the_leg_series_but_not_counted(tmp_path):
+    from src.watch import leg_report, record_leg_observations
+
+    record_leg_observations(
+        [leg("PRG", "NRT", date(2027, 1, 10), 12000.0)], leg_trip(), status(), tmp_path
+    )
+    record_leg_observations(
+        [leg("PRG", "NRT", date(2027, 1, 10), 3000.0)],
+        leg_trip(),
+        status(legs_per_search=2.9),
+        tmp_path,
+    )
+    summary = leg_report(tmp_path)["legs"]["PRG-NRT@2027-01-10"]
+    assert len(summary["series"]) == 2
+    assert summary["series"][-1]["comparable"] is False
+    assert summary["latest"] == 12000, "a refused run must not become the headline"
+
+
+def test_a_leg_that_falls_far_enough_is_reported(tmp_path):
+    from src.watch import leg_drops, leg_report, record_leg_observations
+
+    scenario = leg_trip()
+    record_leg_observations(
+        [leg("PRG", "NRT", date(2027, 1, 10), 12000.0)], scenario, status(), tmp_path
+    )
+    assert leg_drops(leg_report(tmp_path), scenario, tmp_path) == [], "first run sets the level"
+
+    record_leg_observations(
+        [leg("PRG", "NRT", date(2027, 1, 10), 10000.0)], scenario, status(), tmp_path
+    )
+    fell = leg_drops(leg_report(tmp_path), scenario, tmp_path)
+    assert len(fell) == 1
+    assert fell[0]["route"] == "PRG→NRT"
+    assert fell[0]["drop"] == 2000
+    assert fell[0]["drop_pct"] == 16.7
+
+
+def test_a_few_crowns_off_a_leg_is_not_worth_a_message(tmp_path):
+    from src.watch import leg_drops, leg_report, record_leg_observations
+
+    scenario = leg_trip()
+    for price in (12000.0, 11950.0):
+        record_leg_observations(
+            [leg("PRG", "NRT", date(2027, 1, 10), price)], scenario, status(), tmp_path
+        )
+    assert leg_drops(leg_report(tmp_path), scenario, tmp_path) == []
+
+
+def test_reporting_a_leg_drop_twice_says_it_once(tmp_path):
+    from src.watch import leg_drops, leg_report, record_leg_observations
+
+    scenario = leg_trip()
+    record_leg_observations(
+        [leg("PRG", "NRT", date(2027, 1, 10), 12000.0)], scenario, status(), tmp_path
+    )
+    # Sets the level and says nothing, exactly as `drops` does: with no price it
+    # was picked at, there is nothing yet to have fallen from.
+    assert leg_drops(leg_report(tmp_path), scenario, tmp_path) == []
+
+    record_leg_observations(
+        [leg("PRG", "NRT", date(2027, 1, 10), 10000.0)], scenario, status(), tmp_path
+    )
+    assert len(leg_drops(leg_report(tmp_path), scenario, tmp_path)) == 1
+    # Idempotent: the level is recorded on a report, so a second call has
+    # nothing new to say about the same observation.
+    assert leg_drops(leg_report(tmp_path), scenario, tmp_path) == []
+
+
+def test_the_price_a_leg_was_picked_at_seeds_the_level(tmp_path):
+    """Add a leg at 12,000 and find it at 10,000 an hour later.
+
+    That is precisely the message worth having, and waiting a run to say it
+    wastes it.
+    """
+    from src.watch import leg_drops, leg_report, record_leg_observations
+
+    scenario = leg_trip(
+        LegWatch(
+            origin="PRG",
+            destination="NRT",
+            depart_date=date(2027, 1, 10),
+            added_price=12000.0,
+        )
+    )
+    record_leg_observations(
+        [leg("PRG", "NRT", date(2027, 1, 10), 10000.0)], scenario, status(), tmp_path
+    )
+    assert len(leg_drops(leg_report(tmp_path), scenario, tmp_path)) == 1
+
+
+def test_a_leg_and_a_trip_cannot_overwrite_each_others_recorded_best(tmp_path):
+    """They share one best.json, and a collision silences one of them.
+
+    A leg watched on 10 January and a trip departing 10 January are the case:
+    both would key on that date if the names were not namespaced apart.
+    """
+    from src.watch import (
+        drops,
+        leg_drops,
+        leg_report,
+        record_leg_observations,
+        record_observations,
+        watch_report,
+    )
+
+    combined = trip()
+    combined.leg_watches = [WATCHED_LEG]
+
+    record_observations(legs_for(CANDIDATE), combined, status(), tmp_path)
+    record_leg_observations(
+        [leg("PRG", "NRT", date(2027, 1, 10), 12000.0)], combined, status(), tmp_path
+    )
+    drops(watch_report(tmp_path), combined, tmp_path)
+    leg_drops(leg_report(tmp_path), combined, tmp_path)
+
+    recorded = json.loads((tmp_path / "best.json").read_text(encoding="utf-8"))
+    assert "watch:2027-01-10" in recorded
+    assert "legwatch:PRG-NRT@2027-01-10" in recorded
+    assert recorded["watch:2027-01-10"]["best_total"] == 30000
+    assert recorded["legwatch:PRG-NRT@2027-01-10"]["best_total"] == 12000

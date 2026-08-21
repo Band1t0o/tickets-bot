@@ -1,34 +1,44 @@
 {
-  "id": "tokyo-round-trip",
-  "name": "Tokyo round trip",
+  "id": "eu-phil-japan-eu",
+  "name": "EU - Phil - Japan - EU",
   "origins": [
-    "VIE",
     "PRG",
+    "VIE",
     "FRA",
     "BER",
-    "KRK",
-    "KTW",
-    "MUC"
+    "KRK"
   ],
   "stops": [
     {
-      "label": "Japan",
+      "label": "",
       "airports": [
-        "NRT",
-        "HND",
-        "KIX"
+        "CEB",
+        "MNL"
       ],
       "stay_days": [
-        16,
-        21
+        7,
+        10
+      ],
+      "overland": false,
+      "arrive_via": null,
+      "depart_via": null
+    },
+    {
+      "label": "",
+      "airports": [
+        "HND"
+      ],
+      "stay_days": [
+        7,
+        10
       ],
       "overland": false,
       "arrive_via": null,
       "depart_via": null
     }
   ],
-  "window_start": "2027-01-05",
-  "window_end": "2027-02-08",
+  "window_start": "2027-01-07",
+  "window_end": "2027-02-05",
   "return_to": null,
   "one_way": false,
   "focus_start": null,
@@ -39,7 +49,7 @@
   "alert_threshold": null,
   "bag_estimate": 1500,
   "enabled": false,
-  "notes": "Simpler comparison case: straight return to Japan, no Philippines leg.",
+  "notes": "",
   "preferred_origins": [],
   "notify": [
     "cheapest",

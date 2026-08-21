@@ -24,6 +24,7 @@ from __future__ import annotations
 from ..models import Leg
 from ..scenario import Scenario
 from ..viability import MIN_ATTEMPTS_FOR_A_VERDICT
+from .planner import reordered
 
 # Distance above the cheapest airport in the same pool, in percent. Sampled on
 # three dates, so they are deliberately coarse: the report is meant to separate
@@ -106,11 +107,16 @@ def explore_report(
     """
     pools = scenario.airport_pools
     roles = scenario.pool_roles
+    # Every order this probe sampled, not just the one the stops are listed in:
+    # a both-orders probe priced VIE->MNL, and a `wanted` built from the listed
+    # order alone would throw those legs away as belonging to another trip.
+    orders = [scenario, *reordered(scenario)]
     wanted = {
         _route_key(origin, destination)
-        for index in range(len(pools) - 1)
-        for origin in pools[index]
-        for destination in pools[index + 1]
+        for order in orders
+        for origins, destinations in order.leg_pools
+        for origin in origins
+        for destination in destinations
         if origin != destination
     }
 
@@ -168,6 +174,9 @@ def explore_report(
         "scenario_id": scenario.id,
         "currency": scenario.currency,
         "shape_changed": shape_changed,
+        # Empty unless the probe sampled more than one order, so a trip that
+        # never asked draws nothing rather than a panel comparing one thing.
+        "orders": _order_totals(orders, routes),
         # False whenever a row here is about an airport you no longer fly, or an
         # airport you do fly is absent. Either way the report answers a question
         # you did not ask, and the tab has to say so before drawing a table.
@@ -242,3 +251,59 @@ def _rank(rows: list[dict]) -> None:
     best = min(row["total_min"] for row in priced)
     for row in priced:
         row["verdict"], row["vs_best_pct"] = _price_verdict(row["total_min"], best)
+
+
+def _order_totals(orders: list[Scenario], routes: dict[str, dict]) -> list[dict]:
+    """Cheapest sampled leg on each hop, added up, per stop order.
+
+    Deliberately **not** a trip. Three dates a leg almost never chain into one -
+    that is why the Results tab refuses to draw probe legs as itineraries at all -
+    so this adds the cheapest thing seen on each hop regardless of whether those
+    legs could be flown together. It is a lower bound and has to be labelled as
+    one wherever it is shown.
+
+    It is still the right comparison to make. Both orders are sampled on the same
+    dates by the same run, so whatever the figure omits, it omits from both.
+    Ruling an order out is what it is for; picking a departure day is not.
+
+    `None` where any hop went unpriced, which is the difference between "this
+    order is dearer" and "the site never answered about it".
+    """
+    if len(orders) < 2:
+        return []
+
+    rows = []
+    for order in orders:
+        legs = []
+        for origins, destinations in order.leg_pools:
+            priced = [
+                routes[key]["min_price"]
+                for origin in origins
+                for destination in destinations
+                if origin != destination
+                and (key := _route_key(origin, destination)) in routes
+                and routes[key]["min_price"] is not None
+            ]
+            legs.append(min(priced) if priced else None)
+        rows.append(
+            {
+                # Named by where it goes first, which is how the question is
+                # asked: "would Philippines first be cheaper?"
+                "label": f"{order.stops[0].describe(0)} first",
+                "stops": [stop.describe(i) for i, stop in enumerate(order.stops)],
+                "legs": legs,
+                "total": None if any(leg is None for leg in legs) else sum(legs),
+                "unpriced": sum(1 for leg in legs if leg is None),
+            }
+        )
+
+    priced = [row["total"] for row in rows if row["total"] is not None]
+    best = min(priced) if priced else None
+    for row in rows:
+        row["is_best"] = best is not None and row["total"] == best
+        row["vs_best_pct"] = (
+            round((row["total"] - best) / best * 100, 1)
+            if best and row["total"] is not None and best > 0
+            else None
+        )
+    return rows

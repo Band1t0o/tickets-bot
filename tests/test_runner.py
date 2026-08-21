@@ -18,6 +18,7 @@ from src.sweep.planner import plan_exploration, plan_searches, planned_routes, s
 from src.sweep.runner import (
     THROTTLE_STREAK,
     ShardMismatch,
+    _chunk,
     is_comparable,
     load_legs,
     merge_shards,
@@ -348,16 +349,29 @@ def test_legs_reach_disk_while_the_sweep_is_still_running(tmp_path):
 class TimeoutProvider(FakeProvider):
     """Times out on the first `failures` searches, then answers normally."""
 
-    def __init__(self, failures: int, fail_routes: set[str] | None = None):
+    def __init__(
+        self, failures: int, fail_routes: set[str] | None = None, takes: float = 0.0
+    ):
         super().__init__()
         self.failures = failures
         self.fail_routes = fail_routes
+        # A real search costs seconds; this one costs less than the clock can
+        # resolve on Windows, so a test asking "did anything happen during the
+        # pause" got every event stamped at the same instant.
+        self.takes = takes
         self.attempts: list[tuple[str, str, date]] = []
+        # When each search *began*, which is the only way to ask whether the
+        # client was quiet during a pause. `attempts` says what was searched;
+        # a pause is a claim about when.
+        self.started: list[float] = []
 
     def search_leg(self, page, origin, destination, depart, ret=None, adults=1):
         from src.providers.pelikan import SearchTimeout
 
         self.attempts.append((origin, destination, depart))
+        self.started.append(time.monotonic())
+        if self.takes:
+            time.sleep(self.takes)
         route = f"{origin}->{destination}"
         wanted = self.fail_routes is None or route in self.fail_routes
         if wanted and self.failures > 0:
@@ -436,6 +450,54 @@ def test_the_breaker_pauses_before_it_gives_up(tmp_path):
     assert waits == [0, 0, 0], waits
 
 
+def test_a_pause_holds_every_worker_not_only_the_one_that_tripped_it(tmp_path):
+    """A pause one worker sleeps through while another searches is not a pause.
+
+    This is what made the ladder useless in practice. The worker that recorded
+    the fifth timeout was handed the sleep and took it alone; the other kept
+    searching the whole time, so the client was never quiet and the site had
+    nothing to forgive. Measured on 21 Aug: three local runs in a row reached
+    the end of the ladder without the site ever having had two minutes off.
+    """
+    opened: list[float] = []
+    provider = TimeoutProvider(failures=10_000, takes=0.02)
+    run_sweep(
+        scenario(depth="deep"), provider=provider, data_dir=tmp_path,
+        workers=2, delay_s=0, backoff_s=[0.5, 0.5, 0.5],
+        on_backoff=lambda _s: opened.append(time.monotonic()),
+    )
+
+    assert opened, "the breaker never paused"
+    # Searches that *began* inside the pause. One already in flight when it
+    # opened is fair - it cannot be recalled - so the window opens a search's
+    # length after the pause did.
+    started, ends = opened[0] + provider.takes, opened[0] + 0.45
+    during = [t for t in provider.started if started < t < ends]
+    assert during == [], f"{len(during)} searches were made during the pause"
+
+
+def test_a_rung_is_not_spent_while_another_worker_is_still_waiting(tmp_path):
+    """Two workers must not burn two rungs of the ladder between them.
+
+    With the pause held by one worker only, the other could reach the next
+    level before the first had finished sleeping - so 2 + 5 + 15 minutes of
+    intended quiet was spent in about the time the longest one alone should
+    have taken.
+    """
+    opened: list[float] = []
+    provider = TimeoutProvider(failures=10_000, takes=0.02)
+    run_sweep(
+        scenario(depth="deep"), provider=provider, data_dir=tmp_path,
+        workers=2, delay_s=0, backoff_s=[0.4, 0.4],
+        on_backoff=lambda _s: opened.append(time.monotonic()),
+    )
+
+    assert len(opened) >= 2, "the ladder never reached its second rung"
+    assert opened[1] - opened[0] >= 0.4, (
+        "the second rung was spent before the first pause had finished"
+    )
+
+
 def test_a_run_that_recovers_after_a_pause_is_not_marked_throttled(tmp_path):
     """A bad patch is not a refusal. Only failing again after the longest pause
     is evidence enough to abandon the run."""
@@ -470,19 +532,27 @@ def test_scattered_timeouts_never_trip_the_breaker(tmp_path):
 class UnhurriedProvider(FakeProvider):
     """Answers, but slowly enough that a budget can expire mid-sweep."""
 
+    def __init__(self, seconds: float = 0.005):
+        super().__init__()
+        self.seconds = seconds
+
     def search_leg(self, page, origin, destination, depart, ret=None, adults=1):
-        time.sleep(0.005)
+        time.sleep(self.seconds)
         return super().search_leg(page, origin, destination, depart, ret, adults)
 
 
 def test_a_budget_ends_the_sweep_and_keeps_what_it_found(tmp_path):
     from src.cli import run_sweep_command
 
-    # 63 searches at 5 ms each against a 60 ms budget: it expires early enough
-    # to leave most of the plan unrun, whatever the machine.
+    # `run_sweep_command` loads the live `scenarios/japan-philippines.json`, which
+    # is edited through the UI - it planned 63 explore searches when this was
+    # written and 9 after the trip was narrowed to one origin and a pinned
+    # crossing. So the margin is made per-search rather than across the plan:
+    # one search alone overruns the 60 ms budget, which holds at any plan size.
     result = run_sweep_command(
         "japan-philippines", None, dry_run=False, mode="explore",
-        max_minutes=0.001, provider=UnhurriedProvider(), data_dir=tmp_path, delay_s=0,
+        max_minutes=0.001, provider=UnhurriedProvider(0.08), data_dir=tmp_path,
+        delay_s=0, notify=False,
     )
     assert result.stopped
     assert result.completed < result.total
@@ -496,6 +566,7 @@ def test_without_a_budget_the_sweep_runs_to_the_end(tmp_path):
     result = run_sweep_command(
         "japan-philippines", None, dry_run=False, mode="explore",
         max_minutes=None, provider=FakeProvider(), data_dir=tmp_path, delay_s=0,
+        notify=False,
     )
     assert not result.stopped
     assert result.completed == result.total
@@ -1008,3 +1079,267 @@ def test_a_watch_is_never_plotted_beside_a_sweep():
 def test_an_unknown_mode_is_refused(tmp_path):
     with pytest.raises(ValueError, match="mode"):
         run_sweep(scenario(), provider=FakeProvider(), data_dir=tmp_path, mode="wathc")
+
+
+# ------------------------------------------------------- saying it is waiting
+#
+# The runner already knew it was waiting out a refusal; it just never wrote it
+# down. A probe sat at 80/126 for thirteen minutes while the page showed a green
+# "running" dot and "~11 min left", because the only thing that reaches the page
+# is status.json and the backoff never reached status.json.
+
+
+def test_a_backoff_is_written_down_while_it_is_happening(tmp_path):
+    """Written when the wait starts, not when it ends.
+
+    Writing it afterwards would describe a fifteen-minute silence only once the
+    silence was over, which is exactly the stretch that needs explaining.
+    """
+    seen: list[dict] = []
+    provider = TimeoutProvider(failures=10_000)
+
+    def peek(_seconds):
+        directory = next((tmp_path / "sweeps").glob("*/*"))
+        seen.append(json.loads((directory / "status.json").read_text()))
+
+    run_sweep(
+        scenario(), provider=provider, data_dir=tmp_path, workers=1, delay_s=0,
+        # Short, but not zero: a zero wait has no end to count down to, and the
+        # thing being tested is that the end is written where the page can read it.
+        backoff_s=[0.05, 0.05], on_backoff=peek,
+    )
+    assert seen, "the breaker never backed off"
+    assert seen[0]["backoff_seconds"] == 0.05
+    assert seen[0]["backoff_until"], "no time for the page to count down to"
+
+
+def test_a_search_that_answers_clears_the_waiting_notice(tmp_path):
+    """Otherwise the banner outlives the wait and the run looks stuck while it
+    is working."""
+    # Fails enough to trip one backoff, then answers everything after it.
+    provider = TimeoutProvider(failures=THROTTLE_STREAK)
+    result = run_sweep(
+        scenario(), provider=provider, data_dir=tmp_path, workers=1, delay_s=0,
+        backoff_s=[0, 0],
+    )
+    status = json.loads((result.directory / "status.json").read_text())
+    assert not status["backoff_until"]
+    assert not status["backoff_seconds"]
+
+
+def test_a_finished_run_is_never_left_looking_like_it_is_waiting(tmp_path):
+    provider = TimeoutProvider(failures=10_000)
+    result = run_sweep(
+        scenario(), provider=provider, data_dir=tmp_path, workers=1, delay_s=0,
+        backoff_s=[0, 0],
+    )
+    status = json.loads((result.directory / "status.json").read_text())
+    assert status["state"] == "throttled"
+    assert not status["backoff_until"]
+
+
+def test_stop_cuts_a_backoff_short_instead_of_waiting_it_out(tmp_path):
+    """Stop was a lie for up to fifteen minutes.
+
+    `time.sleep(900)` cannot be interrupted, so the button reported "finishing
+    the search in flight" while nothing was in flight and nothing would be for
+    a quarter of an hour.
+    """
+    import threading
+    import time as time_module
+
+    stop = threading.Event()
+    provider = TimeoutProvider(failures=10_000)
+
+    started = time_module.monotonic()
+    run_sweep(
+        scenario(), provider=provider, data_dir=tmp_path, workers=1, delay_s=0,
+        # Long enough that waiting it out would be unmistakable in the elapsed time.
+        backoff_s=[30, 30], on_backoff=lambda _s: stop.set(), stop=stop,
+    )
+    assert time_module.monotonic() - started < 10, "the backoff was slept through"
+
+
+# ------------------------------------------------------- carrying on a run
+#
+# The site answers about 120 searches from one client. A probe that is refused
+# at 80 of 126 has 80 answers worth keeping, and re-asking them to get the
+# remaining 46 spends the very budget that ran out. Resuming asks only for what
+# is missing, and produces one directory holding the whole run - not a pair the
+# reader has to add up.
+
+
+def stopped_partway(tmp_path, after=4):
+    """A run that stopped with part of its plan unasked, and its directory."""
+    stop = threading.Event()
+    provider = FakeProvider()
+    original = provider.search_leg
+
+    def search_leg(*args, **kwargs):
+        if len(provider.calls) >= after - 1:
+            stop.set()
+        return original(*args, **kwargs)
+
+    provider.search_leg = search_leg
+    result = run_sweep(
+        scenario(), provider=provider, data_dir=tmp_path, workers=1, delay_s=0, stop=stop,
+    )
+    assert result.completed < result.total, "the fixture did not stop early"
+    return result
+
+
+def test_resuming_asks_only_for_what_was_never_answered(tmp_path):
+    first = stopped_partway(tmp_path)
+    provider = FakeProvider()
+    run_sweep(
+        scenario(), provider=provider, data_dir=tmp_path, workers=1, delay_s=0,
+        resume_from=first.directory,
+    )
+    asked_again = {(o, d, when) for o, d, when in provider.calls}
+    already = {
+        (row["origin"], row["destination"], date.fromisoformat(row["depart_date"]))
+        for row in _rows(first.directory / "searches.jsonl")
+        if row["answered"]
+    }
+    assert already, "the fixture answered nothing, so there is nothing to skip"
+    assert not (asked_again & already), "a resumed run re-asked what it already had"
+
+
+def test_a_resumed_run_holds_the_whole_plan_when_it_finishes(tmp_path):
+    """One directory, not two to add up. The picker lists directories, and a
+    run split across two of them reads as two short runs."""
+    first = stopped_partway(tmp_path)
+    second = run_sweep(
+        scenario(), provider=FakeProvider(), data_dir=tmp_path, workers=1, delay_s=0,
+        resume_from=first.directory,
+    )
+    status = json.loads((second.directory / "status.json").read_text())
+    assert status["answered"] == status["planned"]
+    assert status["coverage"] == 1.0
+    assert len(_rows(second.directory / "searches.jsonl")) == status["planned"]
+
+
+def test_a_resumed_run_keeps_the_flights_the_first_one_found(tmp_path):
+    """Truncating them is the easy mistake: the ledger is opened for writing."""
+    first = stopped_partway(tmp_path)
+    kept = len(_rows(first.directory / "legs.jsonl"))
+    assert kept, "the fixture found nothing, so there is nothing to lose"
+    second = run_sweep(
+        scenario(), provider=FakeProvider(), data_dir=tmp_path, workers=1, delay_s=0,
+        resume_from=first.directory,
+    )
+    assert len(_rows(second.directory / "legs.jsonl")) > kept
+
+
+def test_a_resumed_run_counts_the_earlier_searches_from_its_first_status(tmp_path):
+    """Otherwise it opens at 0/126 and looks like the 80 were thrown away."""
+    first = stopped_partway(tmp_path)
+    before = json.loads((first.directory / "status.json").read_text())
+    seen: list[int] = []
+    run_sweep(
+        scenario(), provider=FakeProvider(), data_dir=tmp_path, workers=1, delay_s=0,
+        resume_from=first.directory,
+        on_progress=lambda done, total, label: seen.append(done),
+    )
+    assert seen[0] > before["completed"], "the resumed run restarted the count"
+
+
+def test_a_search_that_failed_is_asked_again_rather_than_skipped(tmp_path):
+    """A timeout is exactly the thing a later run should retry. It is recorded
+    in the ledger like any other search, so skipping every recorded row would
+    make a refusal permanent."""
+    provider = FakeProvider(fail_on={"MNL"})
+    first = run_sweep(
+        scenario(), provider=provider, data_dir=tmp_path, workers=1, delay_s=0,
+    )
+    assert first.errors, "the fixture failed nothing"
+    again = FakeProvider()
+    run_sweep(
+        scenario(), provider=again, data_dir=tmp_path, workers=1, delay_s=0,
+        resume_from=first.directory,
+    )
+    assert any(d == "MNL" for _o, d, _when in again.calls), "the failed route was never retried"
+
+
+def test_a_resumed_run_says_which_run_it_continues(tmp_path):
+    first = stopped_partway(tmp_path)
+    second = run_sweep(
+        scenario(), provider=FakeProvider(), data_dir=tmp_path, workers=1, delay_s=0,
+        resume_from=first.directory,
+    )
+    status = json.loads((second.directory / "status.json").read_text())
+    assert status["resumed_from"] == first.directory.name
+
+
+def test_resuming_a_run_that_answered_everything_asks_for_nothing(tmp_path):
+    first = run_sweep(
+        scenario(), provider=FakeProvider(), data_dir=tmp_path, workers=1, delay_s=0,
+    )
+    provider = FakeProvider()
+    second = run_sweep(
+        scenario(), provider=provider, data_dir=tmp_path, workers=1, delay_s=0,
+        resume_from=first.directory,
+    )
+    assert provider.calls == []
+    # And still reports the whole plan rather than a run of nothing.
+    status = json.loads((second.directory / "status.json").read_text())
+    assert status["answered"] == status["planned"]
+
+
+def _rows(path):
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+# --------------------------------------------------- how the work is split up
+#
+# Two bugs have lived in this split. `searches[i::workers]` put every worker on
+# the same origin-destination pair at the same moment, and the fix - contiguous
+# runs - was correct only while the plan was emitted leg by leg. Now that it is
+# dealt across routes so a run cut short still chains, contiguous runs advance
+# through the routes in step: measured on the real trip, two workers shared a
+# route at 33 of 33 steps.
+
+
+def routes_at_each_step(plan, workers):
+    """How often the workers are on the same route at the same moment."""
+    parts = _chunk(plan, workers)
+    steps = min(len(part) for part in parts)
+    return sum(
+        1
+        for index in range(steps)
+        if len({(part[index].origin, part[index].destination) for part in parts})
+        < len(parts)
+    ), steps
+
+
+def test_workers_do_not_advance_through_the_routes_in_step():
+    plan = plan_searches(scenario(depth="deep"))
+    for workers in (2, 3):
+        together, steps = routes_at_each_step(plan, workers)
+        assert together == 0, f"{workers} workers shared a route {together}/{steps} times"
+
+
+def test_splitting_still_partitions_the_plan_exactly():
+    """Staggering rotates a worker's chunk; it must never change what is in it.
+    Coverage and the shard arithmetic are both counted off this."""
+    plan = plan_searches(scenario(depth="deep"))
+    for workers in (1, 2, 3, 5):
+        pieces = [search for part in _chunk(plan, workers) for search in part]
+        assert len(pieces) == len(plan)
+        assert set(pieces) == set(plan)
+
+
+def test_more_workers_than_routes_still_splits_rather_than_refusing():
+    """The collision is unavoidable at that point - there are not enough routes
+    to go round - and pretending otherwise would only move it."""
+    plan = plan_searches(scenario(depth="deep"))
+    parts = _chunk(plan, 40)
+    assert sum(len(part) for part in parts) == len(plan)
+
+
+def test_an_empty_plan_produces_no_workers():
+    assert _chunk([], 4) == []

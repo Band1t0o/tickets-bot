@@ -156,18 +156,26 @@ def test_zero_workers_still_runs_every_search(tmp_path):
     assert result.total > 0
 
 
-def test_workers_get_contiguous_chunks_not_interleaved_ones(tmp_path):
+def test_workers_get_contiguous_chunks_not_interleaved_ones():
     """Interleaving sent every worker at the same route simultaneously.
 
     That is the worst possible pattern against a per-route throttle, and the
     sweep that made timeouts visible reported 58 of 93 searches timing out.
+
+    A chunk may be *rotated* now - the plan is dealt across routes, so two
+    contiguous chunks would otherwise advance through the routes in step - but
+    it is still one unbroken run of the plan rather than every nth search.
     """
+    from src.sweep.planner import plan_searches
     from src.sweep.runner import _chunk
 
-    searches = list(range(10))
-    assert _chunk(searches, 2) == [[0, 1, 2, 3, 4], [5, 6, 7, 8, 9]]
-    assert _chunk(searches, 3) == [[0, 1, 2, 3], [4, 5, 6], [7, 8, 9]]
-    assert sorted(x for chunk in _chunk(searches, 4) for x in chunk) == searches
+    plan = plan_searches(make_scenario(depth="quick"))
+    for workers in (2, 3, 4):
+        chunks = _chunk(plan, workers)
+        assert sorted(plan.index(s) for c in chunks for s in c) == list(range(len(plan)))
+        for chunk in chunks:
+            at = sorted(plan.index(search) for search in chunk)
+            assert at == list(range(at[0], at[-1] + 1)), "the chunk is not one run"
 
 
 def test_a_sweep_that_finds_nothing_is_unhealthy():

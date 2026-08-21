@@ -431,9 +431,23 @@ per session**, every time -- and three runners only looked faster because six se
 
 `PAGE_RECYCLE_EVERY = 40` in [runner.py](src/sweep/runner.py) replaces the browser before a session
 is spent. A context restart costs ~1-2 s against ~10 s per search, so recycling a whole deep sweep
-costs under a minute. Sharding (`--shard i/n`, stitched by `merge-shards`) stays, dealt per route so
-a lost shard thins the date grid rather than deleting routes -- but it is now a wall-clock choice
-rather than a way to buy searches, and `DEFAULT_SHARDS` is 1.
+costs under a minute.
+
+**Recycling did not turn out to buy searches, though, and sharding is not optional.** Re-measured on
+20 August: one runner answered 120 whether or not it recycled, and five runners answered 483 with
+coverage 1.0. What is constant within a runner and differs between runners is the *address*. So the
+shard count is now derived rather than chosen -- `planner.shards_for(planned)` splits a plan at
+`SEARCHES_PER_RUNNER = 100`, and `scripts/plan_sweep.py` sizes **each trip separately** and emits the
+matrix. It gives 5 for the 483-search shape that has finished whole every night since 20 August, and
+1 for a 66-search one. The `DEFAULT_SHARDS` env var it replaced was a bare number applied to every
+trip in the run, and it stayed 5 after pinning a crossing took the main trip to 66 searches -- five
+runners splitting thirteen apiece.
+
+Shards are dealt per route (`shard_of`) so a lost shard thins the date grid rather than deleting
+routes, and **the plan itself is dealt the same way** (`_deal`). That is not cosmetic: emitted leg by
+leg, a run cut short left the legs on date bands that could not reach each other, and a local run of
+37 of 66 searches produced 357 real flights and *no complete trip at all*. `_chunk` then staggers the
+workers so two of them do not advance through the routes in step.
 
 **`timeout-minutes` is a ceiling above the budget, never the budget.** It used to be the budget, set
 from an estimate that was wrong by half, and thirteen consecutive nightly runs -- 8 to 20 August --

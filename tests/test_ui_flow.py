@@ -12,6 +12,7 @@ below is a keystroke sequence, not an internal call.
 from __future__ import annotations
 
 import json
+import re
 import socket
 import threading
 import time
@@ -258,13 +259,17 @@ def seed_sweep(data_dir, stamp, *, status, legs=LEGS, observed_at=None):
     directory = data_dir / "sweeps" / "jp-ph" / stamp
     directory.mkdir(parents=True, exist_ok=True)
     with (directory / "legs.jsonl").open("w", encoding="utf-8") as handle:
-        for origin, destination, depart, price in legs:
+        for row in legs:
+            # A fifth element carries the baggage state. Absent means confirmed,
+            # which is what every leg seeded before the bag filter existed meant.
+            origin, destination, depart, price = row[:4]
+            checked_bag = row[4] if len(row) > 4 else True
             handle.write(json.dumps({
                 "provider": "T", "origin": origin, "destination": destination,
                 "depart_date": depart, "airline": "QR", "flight_number": None,
                 "stops": 1, "price_currency": "CZK", "price_amount": price, "url": "",
                 "depart_time": None, "arrive_time": None, "duration_minutes": None,
-                "checked_bag": True, "observed_at": observed_at,
+                "checked_bag": checked_bag, "observed_at": observed_at,
             }) + "\n")
     (directory / "status.json").write_text(json.dumps(status), encoding="utf-8")
 
@@ -1549,3 +1554,714 @@ def test_the_tab_reports_how_far_a_watched_day_has_moved(ui):
     assert "30 000" in row  # what it cost when picked
     assert "-1 500" in row  # and the move between them
     assert not errors
+
+
+# ----------------------------------------------------- results: filter row
+#
+# Driven through the controls rather than through the endpoint, because the
+# thing worth protecting is that the table and the headline cards above it
+# always describe the same population. The server narrows the whole traversal;
+# if this page ever starts narrowing the fifty rows it was sent instead, the
+# cards keep reporting a Prague trip while the table shows only Vienna ones and
+# nothing on screen says which is the answer.
+
+FILTER_LEGS = [
+    ("PRG", "NRT", "2027-01-10", 12000.0, True),
+    ("VIE", "NRT", "2027-01-10", 13000.0, True),
+    ("NRT", "MNL", "2027-01-20", 4000.0, True),
+    # The cheapest way home, and the site never said whether a bag is included.
+    ("MNL", "PRG", "2027-01-30", 9000.0, None),
+    ("MNL", "PRG", "2027-01-30", 14000.0, True),
+    ("MNL", "VIE", "2027-01-30", 11000.0, True),
+]
+
+
+def digits(text: str) -> str:
+    """Text with every kind of thousands separator squeezed out.
+
+    `money` groups in the browser's own locale, so 25,000 renders as "25 000"
+    with a non-breaking space on this machine and "25,000" on another. Asserting
+    on either spelling makes the test a statement about the runner's locale.
+    """
+    return re.sub(r"[\s ,]", "", text)
+
+
+def seed_for_filters(scenarios):
+    seed_sweep(
+        scenarios.parent / "data", "2026-08-11T09-00-00Z",
+        status={"state": "done", "mode": "sweep", "total": 6, "completed": 6,
+                "legs_found": 6, "depth": "deep", "coverage": 1.0},
+        legs=FILTER_LEGS,
+    )
+
+
+def filter_to(page, *, origin=None, destination=None, bags=False):
+    """Set the controls the way a person does, and let each re-fetch settle."""
+    if origin is not None:
+        page.locator("#filter-from").select_option(origin)
+        page.wait_for_timeout(700)
+    if destination is not None:
+        page.locator("#filter-to").select_option(destination)
+        page.wait_for_timeout(700)
+    if bags:
+        page.locator("#filter-bags").check()
+        page.wait_for_timeout(700)
+
+
+def test_the_filter_offers_the_trips_own_airports(ui):
+    page, scenarios, errors = ui
+    seed_for_filters(scenarios)
+    page.reload(wait_until="networkidle")
+    open_results(page)
+    assert page.locator("#filter-from option").count() >= 3  # "any" plus the pools
+    assert "PRG" in page.locator("#filter-from").inner_text()
+    assert "VIE" in page.locator("#filter-from").inner_text()
+    assert not errors
+
+
+def test_narrowing_to_an_origin_narrows_the_table_and_the_cards_together(ui):
+    page, scenarios, errors = ui
+    seed_for_filters(scenarios)
+    page.reload(wait_until="networkidle")
+    open_results(page)
+
+    filter_to(page, origin="VIE")
+    rows = page.locator("#results-table tbody tr").all_inner_texts()
+    routes = [text for text in rows if "→" in text]
+    assert routes, "expected some itineraries"
+    assert all(text.strip().startswith("VIE") for text in routes), routes
+    # The cards are the point: they must not still be quoting the Prague trip.
+    assert "VIE" in page.locator("#headline").inner_text()
+    assert not errors
+
+
+def test_the_bag_tick_hides_the_cheapest_trip_when_its_bag_is_unknown(ui):
+    """9,000 home is the cheapest and its baggage was never stated.
+
+    It has to disappear, and the note has to say the trips went because nothing
+    confirmed a bag — not because a bag is known to cost extra.
+    """
+    page, scenarios, errors = ui
+    seed_for_filters(scenarios)
+    page.reload(wait_until="networkidle")
+    open_results(page)
+    assert "25000CZK" in digits(page.locator("#headline").inner_text())
+
+    filter_to(page, bags=True)
+    assert "25000CZK" not in digits(page.locator("#headline").inner_text())
+    note = page.locator("#filter-note").inner_text()
+    assert "confirms a checked bag" in note
+    assert not errors
+
+
+def test_a_filter_that_matches_nothing_says_so_rather_than_looking_broken(ui):
+    page, scenarios, errors = ui
+    seed_for_filters(scenarios)
+    page.reload(wait_until="networkidle")
+    open_results(page)
+    filter_to(page, origin="VIE", destination="PRG", bags=True)
+    # VIE out and PRG home exists, but only on the unconfirmed 9,000 fare.
+    assert "No trip in this sweep matches" in page.locator("#results-empty").inner_text()
+    assert not errors
+
+
+def test_reset_puts_every_trip_back(ui):
+    page, scenarios, errors = ui
+    seed_for_filters(scenarios)
+    page.reload(wait_until="networkidle")
+    open_results(page)
+    before = page.locator("#results-table tbody tr").count()
+
+    filter_to(page, origin="VIE")
+    assert page.locator("#filter-reset").is_visible()
+    page.locator("#filter-reset").click()
+    page.wait_for_timeout(800)
+
+    assert page.locator("#filter-reset").is_hidden()
+    assert page.locator("#results-table tbody tr").count() == before
+    assert page.locator("#filter-from").input_value() == ""
+    assert not errors
+
+
+def test_every_time_on_screen_is_a_prague_time(ui):
+    """The sweep ran at 09:00 UTC, which is 11:00 in Prague in August."""
+    page, scenarios, errors = ui
+    seed_for_filters(scenarios)
+    page.reload(wait_until="networkidle")
+    open_results(page)
+    label = page.locator("#sweep-select").inner_text()
+    assert "11:00" in label, label
+    # And never the raw directory stamp it is built from.
+    assert "09-00-00" not in label
+    assert not errors
+
+
+# ------------------------------------------------- pinning an overland crossing
+
+
+def stop_card(page):
+    return page.locator("#stops .stop").first
+
+
+def make_stop_crossable(page):
+    """Give the first stop a second airport, typed the way a person types it.
+
+    The fixture trip has one Japanese airport, and with one airport there is
+    nowhere else to leave from - so the overland box is disabled and says why.
+    Adding HND is the precondition for every test below, not part of what they
+    are checking.
+    """
+    stop_card(page).locator(".typeahead input").click()
+    page.keyboard.type("HND", delay=55)
+    page.keyboard.press("Enter")
+    page.wait_for_timeout(800)
+
+
+def test_the_pins_appear_only_once_overland_is_ticked(ui):
+    """Without overland the chain rule already decides it, so a pin would be a
+    contradiction the server refuses by name."""
+    page, _, errors = ui
+    page.wait_for_timeout(600)
+    make_stop_crossable(page)
+    assert stop_card(page).locator(".stop__pins").count() == 0
+
+    stop_card(page).locator(".stop__overland input").check()
+    page.wait_for_timeout(400)
+    assert stop_card(page).locator(".stop__pins").count() == 1
+    assert not errors
+
+
+def test_pinning_a_crossing_drops_the_searches_it_will_cost(ui):
+    """The whole reason to pin: the badge beside the run buttons must fall."""
+    page, _, errors = ui
+    page.wait_for_timeout(600)
+    make_stop_crossable(page)
+    stop_card(page).locator(".stop__overland input").check()
+    page.wait_for_timeout(900)
+    before = page.locator("#estimate").inner_text()
+
+    stop_card(page).locator(".stop__pins select").first.select_option("NRT")
+    page.wait_for_timeout(1200)
+    after = page.locator("#estimate").inner_text()
+
+    assert digits(before) != digits(after), f"{before} -> {after}"
+    assert int(re.search(r"\d+", digits(after)).group()) < int(
+        re.search(r"\d+", digits(before)).group()
+    )
+    assert not errors
+
+
+def test_a_pinned_crossing_survives_a_save_and_reload(ui):
+    page, _, errors = ui
+    page.wait_for_timeout(600)
+    make_stop_crossable(page)
+    stop_card(page).locator(".stop__overland input").check()
+    page.wait_for_timeout(400)
+    selects = stop_card(page).locator(".stop__pins select")
+    selects.nth(0).select_option("NRT")
+    page.wait_for_timeout(300)
+    selects.nth(1).select_option("HND")
+    page.wait_for_timeout(300)
+
+    page.locator("#save-btn").click()
+    page.wait_for_timeout(1200)
+    page.reload(wait_until="networkidle")
+    page.wait_for_timeout(900)
+
+    reloaded = stop_card(page).locator(".stop__pins select")
+    assert reloaded.nth(0).input_value() == "NRT"
+    assert reloaded.nth(1).input_value() == "HND"
+    assert not errors
+
+
+def test_unticking_overland_clears_the_pins_rather_than_stranding_them(ui):
+    """A stop carrying a pin without overland cannot be saved at all, and the
+    control that would explain why is no longer on screen."""
+    page, _, errors = ui
+    page.wait_for_timeout(600)
+    make_stop_crossable(page)
+    box = stop_card(page).locator(".stop__overland input")
+    box.check()
+    page.wait_for_timeout(400)
+    stop_card(page).locator(".stop__pins select").first.select_option("NRT")
+    page.wait_for_timeout(400)
+
+    box.uncheck()
+    page.wait_for_timeout(400)
+    page.locator("#save-btn").click()
+    page.wait_for_timeout(1200)
+
+    assert page.locator("#save-error").is_hidden()
+    assert not errors
+
+
+# ------------------------------------------------------- which way round to fly
+
+BOTH_ORDER_LEGS = [
+    # Japan first: 12,000 + 4,000 + 9,000
+    ("PRG", "NRT", "2027-01-10", 12000.0),
+    ("NRT", "MNL", "2027-01-24", 4000.0),
+    ("MNL", "PRG", "2027-02-06", 9000.0),
+    # Philippines first, dearer on every hop: 15,000 + 4,500 + 11,000
+    ("PRG", "MNL", "2027-01-10", 15000.0),
+    ("MNL", "NRT", "2027-01-24", 4500.0),
+    ("NRT", "PRG", "2027-02-06", 11000.0),
+]
+
+
+def seed_both_orders(scenarios, *, reverse_is_cheaper=False):
+    """A probe of a trip that asked for both orders, with its scenario snapshot."""
+    legs = list(BOTH_ORDER_LEGS)
+    if reverse_is_cheaper:
+        # Halve the Philippines-first hops so the other way round wins.
+        legs = legs[:3] + [(o, d, t, p / 3) for o, d, t, p in legs[3:]]
+
+    data = scenarios.parent / "data"
+    stamp = "2026-08-11T09-00-00Z"
+    routes = {f"{o}->{d}": 3 for o, d, _, _ in legs}
+    seed_sweep(
+        data, stamp,
+        status={"state": "done", "mode": "explore", "total": len(routes) * 3,
+                "completed": len(routes) * 3, "legs_found": len(legs),
+                "route_searches": routes, "route_errors": dict.fromkeys(routes, 0)},
+        legs=legs,
+    )
+    trip = Scenario(
+        id="jp-ph", name="Japan then Philippines", origins=["PRG"],
+        stops=[
+            Stop(airports=["NRT"], stay_days=(9, 16), label="Japan"),
+            Stop(airports=["MNL"], stay_days=(9, 16), label="Philippines"),
+        ],
+        window_start=date(2027, 1, 5), window_end=date(2027, 2, 8),
+        depth="quick", probe_both_orders=True,
+    )
+    save_scenario(trip, scenarios)
+    (data / "sweeps" / "jp-ph" / stamp / "scenario.json").write_text(
+        json.dumps(trip.to_dict()), encoding="utf-8"
+    )
+    return stamp
+
+
+def test_the_probe_says_which_way_round_is_cheaper(ui):
+    page, scenarios, errors = ui
+    seed_both_orders(scenarios)
+    page.reload(wait_until="networkidle")
+    open_explore(page)
+
+    verdict = page.locator("#explore-orders")
+    assert verdict.is_visible()
+    text = verdict.inner_text()
+    assert "Japan first" in text and "Philippines first" in text
+    assert "cheapest sampled" in text
+    # Never presented as a bookable trip: three dates a leg rarely chain.
+    assert "not a trip you could book" in text
+    assert not errors
+
+
+def test_a_trip_that_probed_one_order_shows_no_comparison(ui):
+    page, scenarios, errors = ui
+    seed_probe(scenarios)
+    page.reload(wait_until="networkidle")
+    open_explore(page)
+    assert page.locator("#explore-orders").is_hidden()
+    assert not errors
+
+
+def test_the_reorder_button_appears_only_when_the_reverse_wins(ui):
+    page, scenarios, errors = ui
+    seed_both_orders(scenarios)
+    page.reload(wait_until="networkidle")
+    open_explore(page)
+    assert page.locator("#explore-orders button").count() == 0
+    assert not errors
+
+
+def test_reordering_edits_the_trip_and_leaves_it_for_you_to_save(ui):
+    """A probe is a reason to look, not a decision. Nothing saves itself."""
+    page, scenarios, errors = ui
+    seed_both_orders(scenarios, reverse_is_cheaper=True)
+    page.reload(wait_until="networkidle")
+    open_explore(page)
+
+    button = page.locator("#explore-orders button")
+    assert button.count() == 1
+    button.click()
+    page.wait_for_timeout(900)
+
+    # Landed back on Search, with the stops the other way round and unsaved.
+    cards = page.locator("#stops .stop__label")
+    labels = [cards.nth(i).input_value() for i in range(cards.count())]
+    assert labels[:2] == ["Philippines", "Japan"], labels
+    assert page.locator("#dirty-note").is_visible()
+    assert not errors
+
+
+# ----------------------------------------------------------- following a leg
+#
+# The flow the feature exists for: read a trip in Results, see a leg that looks
+# promising, follow that one flight. Driven through the buttons rather than the
+# endpoint, because what is worth protecting is that the decision can be made
+# where it is actually made.
+
+
+def test_a_leg_can_be_followed_from_the_trip_you_are_reading(ui):
+    page, scenarios, errors = ui
+    seed_for_filters(scenarios)
+    page.reload(wait_until="networkidle")
+    open_results(page)
+
+    page.locator("#results-table details summary").first.click()
+    page.wait_for_timeout(300)
+    page.locator("#results-table details button", has_text="Follow").first.click()
+    page.wait_for_timeout(1200)
+
+    open_watch(page)
+    assert page.locator("#leg-watch-table tbody tr").count() == 1
+    assert "PRG→NRT" in page.locator("#leg-watch-table").inner_text()
+    assert not errors
+
+
+def test_following_a_leg_carries_the_price_it_was_picked_at(ui):
+    """So the first check says which way it went, not merely where it started."""
+    page, scenarios, errors = ui
+    seed_for_filters(scenarios)
+    page.reload(wait_until="networkidle")
+    open_results(page)
+    page.locator("#results-table details summary").first.click()
+    page.wait_for_timeout(300)
+    page.locator("#results-table details button", has_text="Follow").first.click()
+    page.wait_for_timeout(1200)
+
+    open_watch(page)
+    row = page.locator("#leg-watch-table tbody tr").first.inner_text()
+    assert "12000" in digits(row), row
+    assert not errors
+
+
+def test_a_leg_can_be_added_by_hand(ui):
+    """Not everything worth following is a leg of a trip the sweep built."""
+    page, scenarios, errors = ui
+    seed_for_filters(scenarios)
+    page.reload(wait_until="networkidle")
+    open_watch(page)
+
+    page.locator("#leg-watch-from").fill("VIE")
+    page.locator("#leg-watch-to").fill("NRT")
+    page.locator("#leg-watch-date").fill("2027-01-14")
+    page.locator("#leg-watch-add-btn").click()
+    page.wait_for_timeout(1200)
+
+    assert "VIE→NRT" in page.locator("#leg-watch-table").inner_text()
+    assert not errors
+
+
+def test_a_route_this_trip_never_prices_is_flagged_not_refused(ui):
+    page, scenarios, errors = ui
+    seed_for_filters(scenarios)
+    page.reload(wait_until="networkidle")
+    open_watch(page)
+
+    page.locator("#leg-watch-from").fill("VIE")
+    page.locator("#leg-watch-to").fill("DPS")
+    page.locator("#leg-watch-date").fill("2027-01-14")
+    page.locator("#leg-watch-add-btn").click()
+    page.wait_for_timeout(1200)
+
+    table = page.locator("#leg-watch-table").inner_text()
+    assert "VIE→DPS" in table
+    assert "off-trip" in table
+    assert page.locator("#leg-watch-error").is_hidden()
+    assert not errors
+
+
+def test_a_mistyped_year_says_why_rather_than_doing_nothing(ui):
+    page, scenarios, errors = ui
+    seed_for_filters(scenarios)
+    page.reload(wait_until="networkidle")
+    open_watch(page)
+
+    page.locator("#leg-watch-from").fill("PRG")
+    page.locator("#leg-watch-to").fill("NRT")
+    page.locator("#leg-watch-date").fill("2028-01-14")
+    page.locator("#leg-watch-add-btn").click()
+    page.wait_for_timeout(1200)
+
+    assert "outside the window" in page.locator("#leg-watch-error").inner_text()
+    assert page.locator("#leg-watch-table tbody tr").count() == 0
+    assert not errors
+
+
+def test_the_cost_badge_reports_the_whole_check_not_this_panels_share(ui):
+    """They share a budget because they share a run against a site that answers
+    about 120 searches from one runner."""
+    page, scenarios, errors = ui
+    seed_for_filters(scenarios)
+    page.reload(wait_until="networkidle")
+    open_watch(page)
+
+    page.locator("#leg-watch-from").fill("PRG")
+    page.locator("#leg-watch-to").fill("NRT")
+    page.locator("#leg-watch-date").fill("2027-01-14")
+    page.locator("#leg-watch-add-btn").click()
+    page.wait_for_timeout(1200)
+
+    badge = page.locator("#leg-watch-cost").inner_text()
+    assert "all told" in badge, badge
+    assert not errors
+
+
+def test_following_a_flight_survives_a_reload(ui):
+    page, scenarios, errors = ui
+    seed_for_filters(scenarios)
+    page.reload(wait_until="networkidle")
+    open_watch(page)
+
+    page.locator("#leg-watch-from").fill("PRG")
+    page.locator("#leg-watch-to").fill("NRT")
+    page.locator("#leg-watch-date").fill("2027-01-14")
+    page.locator("#leg-watch-add-btn").click()
+    page.wait_for_timeout(1200)
+
+    page.reload(wait_until="networkidle")
+    open_watch(page)
+    assert page.locator("#leg-watch-table tbody tr").count() == 1
+    assert not errors
+
+
+def test_a_followed_flight_can_be_dropped_again(ui):
+    page, scenarios, errors = ui
+    seed_for_filters(scenarios)
+    page.reload(wait_until="networkidle")
+    open_watch(page)
+
+    page.locator("#leg-watch-from").fill("PRG")
+    page.locator("#leg-watch-to").fill("NRT")
+    page.locator("#leg-watch-date").fill("2027-01-14")
+    page.locator("#leg-watch-add-btn").click()
+    page.wait_for_timeout(1200)
+
+    page.locator("#leg-watch-table .watch-drop").first.click()
+    page.wait_for_timeout(1200)
+    assert page.locator("#leg-watch-table tbody tr").count() == 0
+    assert page.locator("#leg-watch-empty").is_visible()
+    assert not errors
+
+
+def test_check_now_wakes_up_for_a_followed_leg_alone(ui):
+    """A leg watch is a real run even with no pinned trip behind it."""
+    page, scenarios, errors = ui
+    seed_for_filters(scenarios)
+    page.reload(wait_until="networkidle")
+    open_watch(page)
+    assert page.locator("#watch-run-btn").is_disabled()
+
+    page.locator("#leg-watch-from").fill("PRG")
+    page.locator("#leg-watch-to").fill("NRT")
+    page.locator("#leg-watch-date").fill("2027-01-14")
+    page.locator("#leg-watch-add-btn").click()
+    page.wait_for_timeout(1200)
+
+    assert page.locator("#watch-run-btn").is_enabled()
+    assert not errors
+
+
+# ------------------------------------- a run that fell short, and carrying on
+#
+# The three things a throttled run needs to say, none of which it said: how much
+# of its plan it answered, that it is waiting rather than hung, and that what it
+# did get can be carried on rather than re-bought.
+
+
+def seed_short_probe(scenarios, *, answered=31, planned=123, state="throttled"):
+    """A probe the site refused partway, as the 09:16 run on disk was."""
+    status = explore_status(state=state) | {
+        "total": planned, "completed": answered, "answered": answered,
+        "planned": planned, "coverage": round(answered / planned, 4),
+        "unanswered": planned - answered,
+    }
+    seed_sweep(scenarios.parent / "data", "2026-08-11T09-00-00Z",
+               status=status, legs=EXPLORE_LEGS)
+
+
+def test_a_probe_that_answered_a_quarter_of_its_plan_says_so(ui):
+    """It ranked airports off 31 of 123 searches in the words a full run uses."""
+    page, scenarios, errors = ui
+    seed_short_probe(scenarios)
+    page.reload(wait_until="networkidle")
+    open_explore(page)
+
+    banner = page.locator("#explore-coverage")
+    assert banner.is_visible()
+    text = banner.inner_text()
+    assert "25%" in text, text
+    assert "never answered" in text
+    assert not errors
+
+
+def test_a_probe_that_answered_everything_stays_quiet(ui):
+    """A banner that is always there is a banner nobody reads."""
+    page, scenarios, errors = ui
+    seed_short_probe(scenarios, answered=123, state="done")
+    page.reload(wait_until="networkidle")
+    open_explore(page)
+
+    assert page.locator("#explore-coverage").is_hidden()
+    assert not errors
+
+
+def test_a_probe_from_before_coverage_was_recorded_stays_quiet_too(ui):
+    """Not knowing must not be drawn as 100%, nor as a warning."""
+    page, scenarios, errors = ui
+    seed_probe(scenarios)
+    page.reload(wait_until="networkidle")
+    open_explore(page)
+
+    assert page.locator("#explore-coverage").is_hidden()
+    assert not errors
+
+
+def test_a_run_that_fell_short_offers_to_be_carried_on(ui):
+    page, scenarios, errors = ui
+    seed_short_probe(scenarios)
+    page.reload(wait_until="networkidle")
+    page.wait_for_timeout(900)
+
+    button = page.locator("#resume-btn")
+    assert button.is_visible()
+    # What it will cost, before it is pressed.
+    assert "92" in digits(button.inner_text()), button.inner_text()
+    assert not errors
+
+
+def test_carrying_on_says_what_is_already_in_hand(ui):
+    page, scenarios, errors = ui
+    seed_short_probe(scenarios)
+    page.reload(wait_until="networkidle")
+    page.wait_for_timeout(900)
+
+    note = page.locator("#resume-note").inner_text()
+    assert "31" in digits(note) and "123" in digits(note), note
+    # And that it may be refused again, without refusing to try.
+    assert "refusing" in note
+    assert not errors
+
+
+def test_a_complete_run_is_not_offered_a_carry_on(ui):
+    page, scenarios, errors = ui
+    seed_short_probe(scenarios, answered=123, state="done")
+    page.reload(wait_until="networkidle")
+    page.wait_for_timeout(900)
+
+    assert page.locator("#resume-btn").is_hidden()
+    assert not errors
+
+
+def test_the_stop_button_is_where_the_run_was_started(ui):
+    """It was a small grey button in a thin bar, and went unfound."""
+    page, scenarios, errors = ui
+    page.reload(wait_until="networkidle")
+    page.wait_for_timeout(600)
+
+    # Hidden with nothing running, but present in both places and readable.
+    for locator in ("#stop-btn", "#run-stop-btn"):
+        assert page.locator(locator).count() == 1
+        assert "Stop" in page.locator(locator).inner_text()
+    assert not errors
+
+
+
+# ----------------------------------------------------------------- night sweep
+#
+# The scheduled cloud sweep is where a full-sized trip actually finishes -
+# 483/483 in nineteen minutes on 21 Aug, against three throttled local runs the
+# same morning - and none of it was visible here. Which trips it runs, how many
+# runners they need, when it fires, and above all that it sweeps the trips
+# committed to the branch rather than the trip on this screen.
+
+
+def open_night(page):
+    page.locator("#tabs button[data-tab='search']").click()
+    page.wait_for_selector("#night-all .night-list__row")
+
+
+def test_the_night_sweep_lists_what_it_will_run_and_what_that_costs(ui):
+    page, _, _ = ui
+    open_night(page)
+    row = page.locator("#night-all .night-list__row").first
+    assert "Japan then Philippines" in row.inner_text()
+    cost = row.locator(".night-list__cost").inner_text()
+    assert "searches" in cost and "runner" in cost
+
+
+def test_the_night_sweep_names_when_it_next_runs(ui):
+    """The crons are UTC and live in the workflow. Restating them here by hand
+    is how the page and Actions come to disagree about what time it is."""
+    page, _, _ = ui
+    open_night(page)
+    when = page.locator("#night-when").inner_text()
+    assert when.startswith("Next ")
+    assert "whole date window" in when
+    assert "price chart" in when, "the focused afternoon slot is not mentioned"
+
+
+def test_a_trip_in_the_night_sweep_says_what_tonight_costs_it(ui):
+    page, _, _ = ui
+    open_night(page)
+    assert page.locator("#enabled").is_checked()
+    assert "Tonight this trip is" in page.locator("#night-this-trip").inner_text()
+
+
+def test_a_trip_taken_out_of_the_night_sweep_says_so_rather_than_going_quiet(ui):
+    """Both of this repo's trips sat switched off while their owner watched for
+    nightly results. Nothing anywhere said the night sweep had nothing to do."""
+    page, _, _ = ui
+    open_night(page)
+    page.locator("#enabled").uncheck()
+    page.locator("#save-btn").click()
+    page.wait_for_timeout(900)
+
+    assert "Not swept overnight" in page.locator("#night-this-trip").inner_text()
+    assert page.locator("#night-badge").inner_text() == "nothing scheduled"
+    assert "is-out" in (page.locator("#night-all .night-list__row").first.get_attribute("class"))
+
+
+def test_a_trip_the_branch_has_never_seen_says_the_night_sweep_cannot_run_it(ui):
+    """Ticking the box is not enough: the workflow reads the trips committed to
+    the branch, so a trip that was never pushed is not swept whatever this page
+    says about it."""
+    page, _, _ = ui
+    open_night(page)
+    warning = page.locator("#night-cloud")
+    assert warning.is_visible()
+    assert "not on it" in warning.inner_text()
+    assert "commit and" in warning.inner_text().lower()
+
+
+def test_a_trip_the_branch_has_differently_says_which_trip_tonight_is_about(ui, monkeypatch):
+    """The live trap on 21 Aug: the nightly sweep was searching three origins
+    and 483 dates while this screen showed a one-origin trip of 66, and the
+    results being read were of the other trip."""
+    import src.web.app as app_module
+
+    wider = Scenario(
+        id="jp-ph",
+        name="Japan then Philippines",
+        origins=["PRG", "VIE", "FRA"],
+        stops=[
+            Stop(airports=["NRT", "HND"], stay_days=(9, 11), label="Japan"),
+            Stop(airports=["MNL"], stay_days=(9, 11), label="Philippines"),
+        ],
+        window_start=date(2027, 1, 5),
+        window_end=date(2027, 2, 8),
+    )
+    monkeypatch.setattr(app_module, "_cloud_scenario", lambda _id: wider)
+
+    page, _, _ = ui
+    page.reload(wait_until="networkidle")
+    open_night(page)
+
+    warning = page.locator("#night-cloud")
+    assert warning.is_visible()
+    text = warning.inner_text()
+    assert "running a different version of this trip" in text
+    assert "the airports it searches" in text

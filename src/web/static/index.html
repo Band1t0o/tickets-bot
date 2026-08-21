@@ -13,8 +13,9 @@
     <span class="status-strip__dot"></span>
     <span id="status-text">Idle</span>
     <span class="spacer"></span>
-    <button class="small" id="stop-btn" hidden title="Stop after the searches in flight">
-      Stop
+    <button class="status-strip__stop" id="stop-btn" hidden
+            title="Stop after the searches already in flight">
+      Stop this run
     </button>
     <button class="small" id="theme-toggle" title="Toggle light / dark">◐</button>
   </div>
@@ -146,14 +147,36 @@
               <option value="deep">Deep — every day</option>
             </select>
           </label>
-          <label class="check small">
-            <input type="checkbox" id="enabled"> Include in the nightly cloud sweep
+          <!--
+            The probe only. Sweeping both orders is two full plans against a
+            site that answers about 120 searches a runner; three dates a leg is
+            enough to rule an order out for a few dozen.
+          -->
+          <label class="check small" id="both-orders-field" hidden>
+            <input type="checkbox" id="probe-both-orders"> Probe the stops in
+            reverse order too
           </label>
           <span class="spacer"></span>
           <button id="save-btn">Save trip</button>
           <button id="explore-btn" class="primary">Explore first</button>
           <button id="run-local-btn">Run locally</button>
           <button id="run-cloud-btn">Run in cloud</button>
+          <!--
+            The same stop as the one in the strip, next to the buttons that
+            start a run. The strip is sticky and always on screen, but it is a
+            thin bar people read as decoration - the one control that ends a
+            two-hour run should also be where the run was begun.
+          -->
+          <button id="run-stop-btn" class="status-strip__stop" hidden
+                  title="Stop after the searches already in flight">
+            Stop this run
+          </button>
+          <!--
+            Offered when the last run left part of its plan unasked. The site
+            answers about 120 searches from one client, so the answers a refused
+            run already has cost more to replace than they did to get.
+          -->
+          <button id="resume-btn" class="primary" hidden></button>
         </div>
         <!--
           A run searches the trip on disk, and these edits are in the browser
@@ -162,6 +185,7 @@
           buttons that act on it - not implied by a suffix on a badge.
         -->
         <div id="dirty-note" class="badge badge--warning" hidden></div>
+        <div id="resume-note" class="small muted" hidden></div>
         <div id="leg-breakdown" class="small muted" style="margin-top:12px"></div>
         <p class="panel__hint" style="margin:12px 0 0" id="explore-note">
           <strong>Explore first</strong> prices every route in this trip on three spread-out
@@ -179,6 +203,40 @@
           it keeps everything it has already found.
         </p>
         <div id="save-error" class="panel-error badge badge--error" hidden></div>
+      </div>
+
+      <!--
+        What happens overnight, on the tab where the trip is decided.
+
+        This was invisible from the page, and all of it mattered. The scheduled
+        sweep is the only place a full-sized trip has ever been swept whole -
+        483/483 in 19 minutes on 21 Aug, against three throttled local runs the
+        same morning - and the page said nothing about which trips it would run,
+        how many runners they would need, when it fires, or that it sweeps the
+        trip on the branch rather than the trip on this screen. A whole day was
+        spent reading results of a trip nobody was still planning.
+      -->
+      <div class="panel">
+        <div class="panel__header">
+          <h2>Night sweep</h2>
+          <span class="badge badge--muted" id="night-badge">—</span>
+        </div>
+        <p class="panel__hint">
+          GitHub Actions sweeps on a schedule and commits the results back to the repo, so it
+          runs whether or not this page is open. It is also the only place a full-sized trip
+          finishes: your machine is one client, and pelikan.cz answers about 120 searches from
+          one client before it stops answering at all. The cloud splits the plan so that no
+          single runner is handed more than <strong id="night-cap">100</strong>.
+        </p>
+        <label class="check small">
+          <input type="checkbox" id="enabled"> Sweep this trip every night
+        </label>
+        <div id="night-this-trip" class="small" style="margin-top:12px"></div>
+        <div id="night-cloud" class="badge badge--warning" hidden></div>
+
+        <h3 class="muted small" style="margin-top:20px">Everything it will run tonight</h3>
+        <div id="night-all" class="night-list small"></div>
+        <p class="panel__hint small" id="night-when" style="margin:12px 0 0"></p>
       </div>
     </section>
 
@@ -202,7 +260,15 @@
           were - which is exactly what happened, twice, and the tab drew it as
           a table of perfectly ordinary verdicts.
         -->
+        <!--
+          How much of the probe's plan was actually answered. First, because it
+          qualifies every verdict below it: a probe the site refused after 31 of
+          123 searches ranks airports in exactly the words a complete one uses.
+        -->
+        <div class="notice notice--warning" id="explore-coverage" hidden></div>
         <div class="notice notice--warning" id="explore-mismatch" hidden></div>
+        <!-- Only drawn when the probe was asked to sample both stop orders. -->
+        <div class="notice" id="explore-orders" hidden></div>
         <div class="notice" id="explore-pending" hidden>
           <span id="explore-pending-text"></span>
           <span class="spacer"></span>
@@ -236,6 +302,30 @@
         <!-- Only drawn when the sweep behind these prices had holes in it. -->
         <div class="notice notice--warning" id="completeness" hidden></div>
         <div class="small" id="verification" style="margin:12px 0"></div>
+
+        <!--
+          Narrowing, applied by the server across the whole traversal rather
+          than by this page across the fifty rows it was sent. Chaining prunes
+          a trip the moment a cheaper one covers every target it could win, so
+          the fifty cheapest are not a superset of "the cheapest from Vienna" -
+          filtering them here would report that Vienna has nothing.
+        -->
+        <div class="row results-filters" id="results-filters">
+          <label class="field">From
+            <select id="filter-from"><option value="">any airport</option></select>
+          </label>
+          <label class="field">Back to
+            <select id="filter-to"><option value="">any airport</option></select>
+          </label>
+          <label class="check small">
+            <input type="checkbox" id="filter-bags"> Bags included
+          </label>
+          <span class="spacer"></span>
+          <span class="small muted" id="filter-count"></span>
+          <button class="small" id="filter-reset" hidden>Reset</button>
+        </div>
+        <p class="panel__hint small" id="filter-note" hidden></p>
+
         <div class="table-scroll" id="results-scroll">
           <table class="data" id="results-table">
             <thead>
@@ -312,6 +402,51 @@
       times a day and one that cannot run at all.
     -->
     <section data-panel="watch" hidden>
+      <!--
+        Individual flights first, because they are how the decision is usually
+        assembled: you saw Vienna to Haneda look good on the 10th and the 12th,
+        and Manila home on the 2nd, and you want to know whether *those* move.
+        A whole pinned trip is the heavier question and sits below.
+      -->
+      <div class="panel">
+        <div class="panel__header">
+          <h2>Flights you are following</h2>
+          <span class="badge badge--muted" id="leg-watch-cost">—</span>
+        </div>
+        <p class="panel__hint">
+          One route on one day, re-priced every four hours for a single search each —
+          so following four of them costs four searches, against the sixty-odd a pinned
+          trip costs. They need not be legs of this trip: pick whatever looked promising.
+          Discord hears about one only when it falls by more than 1%.
+        </p>
+        <div class="chart" id="leg-watch-chart"></div>
+        <div class="table-scroll">
+          <table class="data" id="leg-watch-table">
+            <thead>
+              <tr>
+                <th>Flight</th><th>Departs</th><th class="num">When picked</th>
+                <th class="num">Now</th><th class="num">Change</th><th></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="empty" id="leg-watch-empty">
+          Nothing followed yet. Open a trip in <strong>Results</strong>, expand its legs,
+          and press <strong>Follow</strong> on the flight you care about — or add one by
+          hand below.
+        </div>
+        <div class="row" id="leg-watch-add" style="margin-top:16px">
+          <label class="field">From<input type="text" id="leg-watch-from" maxlength="3"
+                 placeholder="VIE" size="4"></label>
+          <label class="field">To<input type="text" id="leg-watch-to" maxlength="3"
+                 placeholder="HND" size="4"></label>
+          <label class="field">Departs<input type="date" id="leg-watch-date"></label>
+          <button class="small primary" id="leg-watch-add-btn">Follow this flight</button>
+        </div>
+        <div id="leg-watch-error" class="panel-error badge badge--error" hidden></div>
+      </div>
+
       <div class="panel">
         <div class="panel__header">
           <h2>Days you are watching</h2>

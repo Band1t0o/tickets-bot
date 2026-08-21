@@ -6,9 +6,12 @@ from datetime import date
 
 from src.models import Itinerary, Leg
 from src.notify_discord import (
+    COLOR_GOOD,
+    COLOR_RISE,
     build_health_alert,
     build_price_embed,
     load_best,
+    load_last,
     save_best,
     should_alert,
 )
@@ -366,3 +369,119 @@ def test_notify_watch_says_nothing_when_nothing_fell(tmp_path, monkeypatch):
     monkeypatch.setattr(notify_discord, "post", lambda url, embeds: posted.append(url) or True)
     assert notify_discord.notify_watch(make_scenario(), []) is False
     assert posted == []
+
+
+# ------------------------------------------------------- which way it moved
+#
+# The webhook secret only reached Actions on 21 Aug, so `best.json` had never
+# once been written and the "beat the best so far" alert had never fired. What
+# was wanted alongside it was the other direction: a total that has jumped since
+# the last run, as a sign the fare is climbing and the window is closing.
+#
+# Both are said on the same message rather than sent as two. There is one price
+# a night and one thing worth knowing about it - which way it went - and two
+# posts about one number is how a watcher becomes something you mute.
+
+
+def test_a_first_reading_says_it_is_the_first():
+    embed = build_price_embed("S", [pick("cheapest", 30000)])
+    assert "first" in embed["description"].lower(), embed["description"]
+
+
+def test_a_new_best_is_green_and_says_so():
+    embed = build_price_embed(
+        "S", [pick("cheapest", 28000)], previous_best=30000, previous_last=30000
+    )
+    assert embed["color"] == COLOR_GOOD
+    assert "down 2,000" in embed["description"]
+    assert "best" in embed["description"].lower()
+    assert "new best" in embed["title"], embed["title"]
+
+
+def test_a_rise_since_the_last_run_is_amber_and_names_what_it_rose_from():
+    """The signal asked for: not "this is dear" but "this got dearer", which is
+    what says the window is closing rather than that Frankfurt exists."""
+    embed = build_price_embed(
+        "S", [pick("cheapest", 33000)], previous_best=28000, previous_last=31000
+    )
+    assert embed["color"] == COLOR_RISE
+    assert "up 2,000" in embed["description"], embed["description"]
+    assert "31,000" in embed["description"]
+    assert "↗" in embed["title"] or "up since" in embed["title"]
+
+
+def test_a_rise_too_small_to_mean_anything_is_not_called_a_rise():
+    """1% is the same bar `watch.py` uses for a fall. Below it a fare has not
+    moved, it has rounded, and a watcher that says so nightly gets muted."""
+    embed = build_price_embed(
+        "S", [pick("cheapest", 30100)], previous_best=28000, previous_last=30000
+    )
+    assert embed["color"] != COLOR_RISE
+    assert "up" not in embed["description"], embed["description"]
+    assert "unchanged" in embed["description"].lower()
+
+
+def test_a_fall_that_is_still_not_a_best_says_both_things():
+    """Cheaper than yesterday and dearer than the best is the common case, and
+    reporting only the first would read as news it is not."""
+    embed = build_price_embed(
+        "S", [pick("cheapest", 29000)], previous_best=27000, previous_last=31000
+    )
+    assert "down 2,000" in embed["description"]
+    assert "27,000" in embed["description"], "the best it is still above is not stated"
+    assert embed["color"] != COLOR_GOOD
+
+
+def test_an_unchanged_price_says_unchanged_rather_than_repeating_the_number():
+    embed = build_price_embed(
+        "S", [pick("cheapest", 30000)], previous_best=28000, previous_last=30000
+    )
+    assert "unchanged" in embed["description"].lower()
+
+
+def test_the_last_total_is_recorded_even_when_it_is_not_a_best(tmp_path):
+    """Without this there is nothing to compare tomorrow against, and a rise can
+    never be seen at all: `best_total` only ever walks downward by design."""
+    save_best(tmp_path, 30000, "CZK")
+    save_best(tmp_path, 34000, "CZK")
+    assert load_best(tmp_path) == 30000, "the best walked upward"
+    assert load_last(tmp_path) == 34000
+
+
+def test_the_last_total_follows_a_new_best_too(tmp_path):
+    save_best(tmp_path, 30000, "CZK")
+    save_best(tmp_path, 27000, "CZK")
+    assert load_best(tmp_path) == 27000
+    assert load_last(tmp_path) == 27000
+
+
+def test_picks_keep_their_own_history(tmp_path):
+    """A tier-1 trip dropping 3,000 is news on a day the outright cheapest did
+    not move, and one shared figure hid exactly that."""
+    save_best(tmp_path, 30000, "CZK", "cheapest")
+    save_best(tmp_path, 34000, "CZK", "preferred")
+    assert load_last(tmp_path, "cheapest") == 30000
+    assert load_last(tmp_path, "preferred") == 34000
+
+
+def test_load_last_tolerates_a_state_file_written_before_it_existed(tmp_path):
+    """Every `best.json` on disk predates this field. Reading one must mean
+    "nothing to compare against", not a crash in the reporting step."""
+    (tmp_path / "best.json").write_text(
+        json.dumps({"cheapest": {"best_total": 30000, "currency": "CZK"}}),
+        encoding="utf-8",
+    )
+    assert load_last(tmp_path) is None
+    assert load_best(tmp_path) == 30000
+
+
+def test_a_state_file_with_a_best_but_no_previous_run_is_read_honestly(tmp_path):
+    """Every `best.json` written before `last_total` existed is in this state.
+    It can say where the total sits against the best; it cannot claim a
+    direction it has nothing to measure from."""
+    equal = build_price_embed("S", [pick("cheapest", 30000)], previous_best=30000)
+    assert "level with the best" in equal["description"]
+    assert "up" not in equal["description"] and "down" not in equal["description"]
+
+    above = build_price_embed("S", [pick("cheapest", 32000)], previous_best=30000)
+    assert "above the best of 30,000" in above["description"]

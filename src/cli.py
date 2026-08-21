@@ -40,6 +40,7 @@ def run_sweep_command(
     delay_s: float | None = None,
     shard: tuple[int, int] | None = None,
     notify: bool = True,
+    resume_from: Path | str | None = None,
 ):
     """Run one scenario's sweep. Returns the SweepResult.
 
@@ -89,10 +90,15 @@ def run_sweep_command(
     if dry_run:
         # Deliberately exits before launching a browser, so the Actions budget
         # can be checked without spending any of it.
-        pools = scenario.airport_pools
+        # `leg_pools`, so the breakdown names the airports this run will really
+        # search. The dry run is what the sweep workflow checks the shard count
+        # against, and a pinned crossing it reported as three airports wide
+        # would have it sized for a sweep three times the one about to happen.
+        pools = scenario.leg_pools
         for leg_index in sorted({s.leg_index for s in searches}):
             count = sum(1 for s in searches if s.leg_index == leg_index)
-            route = f"{'/'.join(pools[leg_index])} → {'/'.join(pools[leg_index + 1])}"
+            origins, destinations = pools[leg_index]
+            route = f"{'/'.join(origins)} → {'/'.join(destinations)}"
             print(f"  leg {leg_index} {route}: {count} searches")
         raise SystemExit(0)
 
@@ -112,6 +118,7 @@ def run_sweep_command(
             provider=provider,
             data_dir=data_dir,
             shard=shard,
+            resume_from=resume_from,
             delay_s=SEARCH_DELAY_S if delay_s is None else delay_s,
             on_progress=lambda done, total, label: (
                 print(f"  [{done}/{total}] {label}", flush=True) if done % 10 == 0 else None
@@ -255,7 +262,15 @@ def run_watch_command(
     choosing between moved", and sends nothing at all when none of them did.
     """
     from .scenario import load_scenario
-    from .watch import DEFAULT_WATCH_DIR, drops, record_observations, watch_report
+    from .watch import (
+        DEFAULT_WATCH_DIR,
+        drops,
+        leg_drops,
+        leg_report,
+        record_leg_observations,
+        record_observations,
+        watch_report,
+    )
 
     path = Path("scenarios") / f"{scenario_id}.json"
     if not path.exists():
@@ -263,7 +278,7 @@ def run_watch_command(
         raise SystemExit(2)
 
     scenario = load_scenario(path)
-    if not scenario.watches:
+    if not scenario.watches and not scenario.leg_watches:
         # Not an error condition so much as nothing to do, but it exits non-zero
         # so a workflow that dispatched this by mistake says so instead of
         # committing an empty run that reads as a watch which found nothing.
@@ -289,16 +304,26 @@ def run_watch_command(
         price = "nothing found" if row["total"] is None else f"{row['total']:,.0f} {row['currency']}"
         print(f"[{scenario_id}] {row['depart_date']}: {price}")
 
+    # The individual flights being followed, recorded from the same run's legs.
+    # One search each, so they ride along with the trip watch rather than
+    # needing a workflow of their own.
+    leg_rows = record_leg_observations(result.legs, scenario, status, directory)
+    for row in leg_rows:
+        price = "nothing found" if row["price"] is None else f"{row['price']:,.0f} {row['currency']}"
+        substituted = "" if row["exact"] or row["found_date"] is None else f" (on {row['found_date']})"
+        print(f"[{scenario_id}] {row['route']} {row['depart_date']}: {price}{substituted}")
+
     fell = drops(watch_report(directory), scenario, directory)
-    if not fell:
+    legs_fell = leg_drops(leg_report(directory), scenario, directory)
+    if not fell and not legs_fell:
         print(f"[{scenario_id}] nothing fell far enough to be worth a message")
         return result
 
-    print(f"[{scenario_id}] {len(fell)} watched day(s) got cheaper")
+    print(f"[{scenario_id}] {len(fell)} watched day(s) and {len(legs_fell)} watched leg(s) got cheaper")
     if notify:
         from .notify_discord import notify_watch
 
-        notify_watch(scenario, fell)
+        notify_watch(scenario, fell, leg_drops=legs_fell)
     return result
 
 
@@ -457,6 +482,9 @@ def main():
     p_sweep.add_argument("--data-dir", default="data",
                          help="Where to write the sweep. A shard writes outside data/ so its "
                               "artifact holds one sweep rather than the whole committed history")
+    p_sweep.add_argument("--resume-from", metavar="STAMP",
+                         help="carry on the run in this directory, asking only for the "
+                              "searches it never answered (e.g. 2026-08-21T09-55-40Z)")
     p_sweep.add_argument("--shard", metavar="INDEX/COUNT",
                          help="Run one runner's share of the plan, e.g. 0/3. The shards "
                               "partition it exactly; merge them with merge-shards")
@@ -558,6 +586,15 @@ def main():
         raise SystemExit(0)
 
     shard = _parse_shard(args.shard)
+    resume_from = None
+    if args.resume_from:
+        from .sweep.runner import MODE_ROOTS
+
+        resume_from = (
+            Path(args.data_dir) / MODE_ROOTS[args.mode] / args.scenario / args.resume_from
+        )
+        if not resume_from.exists():
+            raise SystemExit(f"no such run to carry on: {resume_from}")
     run_sweep_command(
         args.scenario,
         args.depth,
@@ -566,6 +603,7 @@ def main():
         args.max_minutes,
         data_dir=args.data_dir,
         shard=shard,
+        resume_from=resume_from,
         # A shard has only part of the result, so it has nothing true to say
         # about the cheapest trip. The merge is what reports.
         notify=not (args.no_notify or shard is not None),

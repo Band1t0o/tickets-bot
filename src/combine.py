@@ -9,9 +9,11 @@ pelikan.cz substitutes nearby dates - asking for 22 January can return the
 23rd - so trusting the requested date would silently turn a 10-day stay into
 an 11-day one.
 
-Chaining is a depth-first walk over `scenario.airport_pools`, the same list the
+Chaining is a depth-first walk over `scenario.leg_pools`, the same property the
 planner walks, so the two cannot disagree about the shape of a trip. It handles
-any number of stops, which the previous triple-nested loop could not.
+any number of stops, which the previous triple-nested loop could not - and a
+stop pinned to arrive at one airport and leave from another, which a single pool
+per place could not describe at all.
 
 Two things make an arbitrary-length chain affordable:
 
@@ -108,23 +110,64 @@ def _departures(by_origin, arrived_at: str, stop, bag: float):
     """
     if not stop.overland:
         return by_origin.get(arrived_at, ())
+    # `depart_from`, not `airports`: a stop pinned to leave via Kansai has one
+    # way out even though it still has three airports, and merging all three
+    # here would chain departures the planner never searched.
     return heapq.merge(
-        *(by_origin[code] for code in stop.airports if code in by_origin),
+        *(by_origin[code] for code in stop.depart_from if code in by_origin),
         key=lambda leg: _leg_cost(leg, bag),
     )
 
 
 def combine_all(
-    legs: list[Leg], scenario: Scenario, limit: int | None = MAX_RESULTS
+    legs: list[Leg],
+    scenario: Scenario,
+    limit: int | None = MAX_RESULTS,
+    starts: set[str] | None = None,
+    ends: set[str] | None = None,
 ) -> CombineResult:
-    """Walk every valid itinerary in `legs`, keeping what callers need."""
+    """Walk every valid itinerary in `legs`, keeping what callers need.
+
+    `starts` and `ends` narrow where the trip may begin and finish - "cheapest
+    trip out of Vienna and back into Vienna" rather than "cheapest trip". They
+    must be applied *here* rather than to the result, because pruning has
+    already discarded trips on the grounds that a cheaper one existed: Vienna
+    out and Vienna home is abandoned unheard when a cheaper Prague round trip
+    holds the closed slot and a cheaper Vienna-Prague open jaw holds the other,
+    so a filter applied afterwards reports that Vienna cannot get you home.
+
+    They are sets of airport codes rather than a predicate on the finished
+    itinerary, and that is not a style choice. `same_airport_possible` and
+    `open_jaw_possible` below exist so that a target which can never be hit is
+    kept out of the threshold - an unreachable target sits there as `inf` and
+    disables pruning for the entire traversal. Narrowing both ends to Vienna
+    makes an open jaw impossible, so anything opaque enough that those two flags
+    cannot be derived from it silently turns a 1,000-itinerary traversal into a
+    57,000-itinerary one. Measured, on the 20 August sweep, at 4.3 seconds.
+
+    A whole-itinerary condition that is really a per-leg one - "every leg
+    confirms a checked bag" - belongs in `legs` before the call, where it prunes
+    earliest and needs nothing here at all.
+    """
     result = CombineResult(legs_in=len(legs))
-    pools = scenario.airport_pools
-    leg_count = len(pools) - 1
+    # `leg_pools`, not consecutive `airport_pools`: a stop pinned to arrive at
+    # Haneda and leave from Kansai has two different lists at one place, which
+    # a single pool per position cannot say. The planner walks the same property,
+    # so the two still cannot disagree about the shape of a trip.
+    pools = scenario.leg_pools
+    leg_count = len(pools)
     if not legs or leg_count < 1:
         return result
 
-    allowed = [set(pool) for pool in pools]
+    leg_origins = [set(origins) for origins, _ in pools]
+    leg_dests = [set(destinations) for _, destinations in pools]
+    # Intersected, never replaced: an airport the trip does not fly is not made
+    # flyable by asking for it, and `ZZZ` must narrow to nothing rather than to
+    # everything.
+    if starts is not None:
+        leg_origins[0] &= starts
+    if ends is not None:
+        leg_dests[-1] &= ends
     stops = scenario.stops
     bag = float(scenario.bag_estimate)
 
@@ -144,9 +187,12 @@ def combine_all(
     # which would disable pruning for the whole traversal. A trip that leaves
     # from and returns to the same single airport has no open jaw to find, and
     # would otherwise explore every branch to the end looking for one.
-    starts, ends = set(pools[0]), set(pools[-1])
-    same_airport_possible = bool(starts & ends)
-    open_jaw_possible = any(start != end for start in starts for end in ends)
+    # From the narrowed sets, not from the trip's pools: these are the ends the
+    # traversal may actually reach, and reading the unnarrowed pools here is what
+    # leaves an impossible target sitting in the threshold as `inf`.
+    first, last = leg_origins[0], leg_dests[-1]
+    same_airport_possible = bool(first & last)
+    open_jaw_possible = any(start != end for start in first for end in last)
 
     heap: list[tuple[float, int, Itinerary]] = []  # max-heap on cost, via negation
     tiebreak = itertools.count()
@@ -213,7 +259,7 @@ def combine_all(
             # Candidates are cost-sorted, so everything after this is worse.
             if total >= threshold(date_key):
                 break
-            if leg.destination not in allowed[level + 1]:
+            if leg.destination not in leg_dests[level]:
                 continue
             # Totals across currencies are meaningless, and there is no FX rate
             # here to make them meaningful.
@@ -228,7 +274,7 @@ def combine_all(
     for leg in legs:
         if leg.depart_date is None:
             continue
-        if leg.origin not in allowed[0] or leg.destination not in allowed[1]:
+        if leg.origin not in leg_origins[0] or leg.destination not in leg_dests[0]:
             continue
         date_key = leg.depart_date.isoformat()
         cost = _leg_cost(leg, bag)

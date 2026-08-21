@@ -318,3 +318,101 @@ def test_with_no_other_trip_to_compare_against_the_report_is_about_itself(make_l
     report = explore_report([], trip(), status_for({}))
     assert report["matches_current_trip"] is True
     assert report["shape_changed"] is False
+
+
+# ----------------------------------------------------- which order to fly in
+#
+# A lower bound assembled from separate searches, never a bookable trip. Three
+# dates a leg almost never chain, which is why the Results tab refuses to draw
+# probe legs as itineraries at all - but both orders are sampled by the same run
+# on the same dates, so whatever the figure leaves out it leaves out of both.
+
+
+def both_ways(**overrides):
+    defaults = dict(
+        id="jp-ph",
+        origins=["VIE"],
+        stops=[
+            Stop(airports=["HND"], stay_days=(9, 11), label="Japan"),
+            Stop(airports=["MNL"], stay_days=(9, 11), label="Philippines"),
+        ],
+        probe_both_orders=True,
+    )
+    defaults.update(overrides)
+    return make_scenario(**defaults)
+
+
+ORDER_PRICES = {
+    # Japan first: 12,000 + 4,000 + 9,000 = 25,000
+    "VIE->HND": 12000.0, "HND->MNL": 4000.0, "MNL->VIE": 9000.0,
+    # Philippines first: 15,000 + 4,500 + 11,000 = 30,500
+    "VIE->MNL": 15000.0, "MNL->HND": 4500.0, "HND->VIE": 11000.0,
+}
+
+
+def test_a_trip_that_probes_one_order_reports_no_comparison():
+    """One order compared with itself is not a comparison."""
+    report = explore_report([], trip(), status_for(all_routes_searched(trip())))
+    assert report["orders"] == []
+
+
+def test_both_orders_are_totalled_and_the_cheaper_one_named(make_leg):
+    scenario = both_ways()
+    report = explore_report(
+        priced(make_leg, scenario, ORDER_PRICES),
+        scenario,
+        status_for(all_routes_searched(scenario)),
+    )
+    by_label = {row["label"]: row for row in report["orders"]}
+    assert by_label["Japan first"]["total"] == 25000
+    assert by_label["Philippines first"]["total"] == 30500
+    assert by_label["Japan first"]["is_best"] is True
+    assert by_label["Philippines first"]["is_best"] is False
+    assert by_label["Philippines first"]["vs_best_pct"] == 22.0
+
+
+def test_the_reverse_orders_legs_are_kept_rather_than_read_as_another_trip(make_leg):
+    """VIE->MNL is not a route of the listed order, and used to be discarded."""
+    scenario = both_ways()
+    report = explore_report(
+        priced(make_leg, scenario, ORDER_PRICES),
+        scenario,
+        status_for(all_routes_searched(scenario)),
+    )
+    assert "VIE->MNL" in {row["route"] for row in report["routes"]}
+
+
+def test_an_order_with_an_unpriced_hop_reports_no_total(make_leg):
+    """"Dearer" and "the site never answered" are different answers, and only
+    one of them is a reason to fly the other way round."""
+    scenario = both_ways()
+    partial = {k: v for k, v in ORDER_PRICES.items() if k != "MNL->HND"}
+    report = explore_report(
+        priced(make_leg, scenario, partial),
+        scenario,
+        status_for(all_routes_searched(scenario)),
+    )
+    by_label = {row["label"]: row for row in report["orders"]}
+    assert by_label["Philippines first"]["total"] is None
+    assert by_label["Philippines first"]["unpriced"] == 1
+    assert by_label["Philippines first"]["is_best"] is False
+    # The order that was fully priced still gets its answer.
+    assert by_label["Japan first"]["total"] == 25000
+    assert by_label["Japan first"]["is_best"] is True
+
+
+def test_an_order_totals_the_cheapest_on_each_hop_not_the_first_it_saw(make_leg):
+    scenario = both_ways(
+        stops=[
+            Stop(airports=["HND", "NRT"], stay_days=(9, 11), label="Japan"),
+            Stop(airports=["MNL"], stay_days=(9, 11), label="Philippines"),
+        ]
+    )
+    prices = dict(ORDER_PRICES)
+    prices["VIE->NRT"] = 8000.0  # cheaper way in than HND
+    report = explore_report(
+        priced(make_leg, scenario, prices), scenario,
+        status_for(all_routes_searched(scenario)),
+    )
+    by_label = {row["label"]: row for row in report["orders"]}
+    assert by_label["Japan first"]["legs"][0] == 8000

@@ -1,15 +1,19 @@
 """Tests for turning a Scenario into a concrete list of searches."""
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import timedelta
 
 from src.scenario import Stop
 from src.sweep.planner import (
     RETURN_SLACK_DAYS,
+    SEARCHES_PER_RUNNER,
     estimate_minutes,
     plan_exploration,
     plan_searches,
     planned_routes,
+    shard_of,
+    shards_for,
 )
 from tests.conftest import (
     WINDOW_END,
@@ -506,3 +510,278 @@ def test_a_watch_of_the_real_trip_fits_inside_what_the_site_answers():
 
     trip = make_scenario(watches=[candidate(6), candidate(13), candidate(20)])
     assert len(plan_watch(trip)) <= 110
+
+
+# ------------------------------------------------ pinning an overland stop
+#
+# The point of pinning is that it costs fewer searches. These numbers are the
+# feature: if a pin ever stops shrinking the plan, it is doing nothing.
+
+
+def _japan_ph(**pins):
+    return make_scenario(
+        origins=["VIE", "FRA"],
+        stops=[
+            Stop(airports=["HND", "NRT", "KIX"], stay_days=(8, 13), label="Japan",
+                 overland=True, **pins),
+            Stop(airports=["MNL", "CEB"], stay_days=(8, 13), label="Philippines"),
+        ],
+        depth="deep",
+    )
+
+
+def test_an_unpinned_overland_trip_still_costs_what_it_always_did():
+    """Overland alone changes what can be chained, never what is searched."""
+    assert planned_routes(_japan_ph()) == planned_routes(
+        make_scenario(
+            origins=["VIE", "FRA"],
+            stops=[
+                Stop(airports=["HND", "NRT", "KIX"], stay_days=(8, 13), label="Japan"),
+                Stop(airports=["MNL", "CEB"], stay_days=(8, 13), label="Philippines"),
+            ],
+            depth="deep",
+        )
+    )
+
+
+def test_pinning_the_crossing_halves_the_routes():
+    """2 origins x 3 Japanese airports x 2 Philippine ones is 16 route pairs.
+
+    Pinned to arrive Haneda and leave Kansai it is 8: two ways in, one hop on,
+    and four ways home.
+    """
+    assert len(planned_routes(_japan_ph())) == 16
+    pinned = _japan_ph(arrive_via="HND", depart_via="KIX")
+    assert len(planned_routes(pinned)) == 8
+
+
+def test_a_pinned_trip_never_searches_the_airports_it_ruled_out():
+    pinned = _japan_ph(arrive_via="HND", depart_via="KIX")
+    routes = planned_routes(pinned)
+    assert ("VIE", "NRT") not in routes, "NRT was ruled out as a way in"
+    assert ("HND", "MNL") not in routes, "the way out is Kansai"
+    assert ("VIE", "HND") in routes
+    assert ("KIX", "MNL") in routes
+
+
+def test_pinning_shrinks_the_sweep_it_plans():
+    before = len(plan_searches(_japan_ph()))
+    after = len(plan_searches(_japan_ph(arrive_via="HND", depart_via="KIX")))
+    assert after < before / 1.8, f"{before} -> {after} is not worth a control"
+
+
+def test_pinning_shrinks_the_probe_and_the_watch_too():
+    """All three planners walk the same pools, so none of them can disagree."""
+    for plan in (plan_exploration, plan_searches):
+        before = len(plan(_japan_ph()))
+        after = len(plan(_japan_ph(arrive_via="HND", depart_via="KIX")))
+        assert after < before
+
+
+# --------------------------------------------- probing the stops both ways
+#
+# Only the probe. A deep sweep of both orders is twice a 480-search plan; three
+# dates a leg is cheap enough to answer "is Philippines first even viable"
+# before committing to it, which is the question actually being asked.
+
+
+def _two_ways(**overrides):
+    return make_scenario(
+        origins=["VIE"],
+        stops=[
+            Stop(airports=["HND"], stay_days=(8, 13), label="Japan"),
+            Stop(airports=["MNL"], stay_days=(8, 13), label="Philippines"),
+        ],
+        **overrides,
+    )
+
+
+def test_a_trip_probes_one_order_unless_it_says_otherwise():
+    routes = {(s.origin, s.destination) for s in plan_exploration(_two_ways())}
+    assert ("VIE", "HND") in routes
+    assert ("VIE", "MNL") not in routes
+
+
+def test_probing_both_orders_adds_the_reverse_chain():
+    routes = {
+        (s.origin, s.destination)
+        for s in plan_exploration(_two_ways(probe_both_orders=True))
+    }
+    # Japan first.
+    assert {("VIE", "HND"), ("HND", "MNL"), ("MNL", "VIE")} <= routes
+    # Philippines first.
+    assert {("VIE", "MNL"), ("MNL", "HND"), ("HND", "VIE")} <= routes
+
+
+def test_the_reverse_order_never_reaches_the_sweep():
+    """Depth answers how finely to price one order, not which order to fly."""
+    routes = {
+        (s.origin, s.destination)
+        for s in plan_searches(_two_ways(probe_both_orders=True))
+    }
+    assert ("VIE", "MNL") not in routes
+
+
+def test_one_route_on_one_date_is_never_searched_twice():
+    """The two orders overlap, and `LegSearch` carries the leg it came from.
+
+    Deduplicating on the whole record would run the same search twice under two
+    different leg indices, which is a real search against a site that answers
+    about 120 of them.
+    """
+    searches = plan_exploration(_two_ways(probe_both_orders=True))
+    keys = [(s.origin, s.destination, s.depart_date) for s in searches]
+    assert len(keys) == len(set(keys))
+
+
+def test_probing_both_orders_of_a_single_stop_trip_changes_nothing():
+    """There is no other order of one stop."""
+    trip = make_round_trip()
+    assert len(plan_exploration(replace(trip, probe_both_orders=True))) == len(
+        plan_exploration(trip)
+    )
+
+
+def test_both_orders_stays_affordable():
+    """The point of confining this to the probe.
+
+    Measured on the real trip's shape rather than the two-airport fixture: two
+    origins, three Japanese airports and two Philippine ones. Sweeping both
+    orders would be two ~370-search plans against a site that answers about 120
+    per runner; probing both is a few dozen.
+    """
+    trip = _japan_ph()
+    both = replace(trip, probe_both_orders=True)
+    one_order, two_orders = len(plan_exploration(trip)), len(plan_exploration(both))
+
+    # 48 -> 96. It really did cost something, or the flag does nothing.
+    assert two_orders > one_order
+    # Against 368 for a deep sweep of one order alone.
+    assert two_orders < len(plan_searches(trip)) / 3
+    # The bound that actually binds: pelikan.cz answers about 120 searches from
+    # one runner and then stops answering at all, and the probe runs unsharded.
+    # A both-orders probe that crossed this would report half a trip as though
+    # it were the whole one.
+    assert two_orders <= 120
+
+
+# ------------------------------------------------------- surviving a short run
+#
+# A sweep that is cut short is not the same thing as a sweep of half a trip. A
+# local run on 21 Aug answered 37 of 66 searches and found 357 real flights, and
+# `combine_all` returned **nothing**: emitted leg by leg, the truncation left
+# VIE->HND on 5-23 Jan, KIX->MNL on 25 Jan - 4 Feb and MNL->VIE on 22-28 Jan, so
+# a return 8-13 days after 25 Jan had never been priced. 56% of the searches was
+# 0% of the answer.
+#
+# `shard_of` already deals per route for exactly this reason. These say the same
+# rule holds for the order the searches are made in.
+
+
+def chains(scenario, searches) -> bool:
+    """Whether some trip can be built from the dates these searches cover."""
+    dates = {}
+    for search in searches:
+        dates.setdefault(search.leg_index, set()).add(search.depart_date)
+    if set(dates) != set(range(scenario.leg_count)):
+        return False
+
+    reachable = dates[0]
+    for leg_index in range(1, scenario.leg_count):
+        low, high = scenario.stops[leg_index - 1].stay_days
+        reachable = {
+            later
+            for later in dates[leg_index]
+            for earlier in reachable
+            if low <= (later - earlier).days <= high
+        }
+        if not reachable:
+            return False
+    return True
+
+
+def test_a_whole_plan_chains():
+    """The control: if this ever fails the trip shape is wrong, not the order."""
+    assert chains(two_stop(), plan_searches(two_stop()))
+
+
+def test_a_plan_cut_short_still_chains():
+    trip = two_stop(depth="deep")
+    plan = plan_searches(trip)
+    # The share the 21 Aug run managed before the site refused it.
+    assert chains(trip, plan[: len(plan) * 37 // 66])
+
+
+def test_even_a_tenth_of_a_plan_chains():
+    trip = two_stop(depth="deep")
+    plan = plan_searches(trip)
+    assert chains(trip, plan[: len(plan) // 10])
+
+
+def test_a_prefix_of_the_plan_holds_every_route():
+    """Not just every leg: a run cut short must thin the grid, not delete
+    routes from it. A route missing outright reads downstream as a dead
+    airport, which is a verdict rather than a gap."""
+    plan = plan_searches(two_stop(depth="deep"))
+    routes = {(s.leg_index, s.origin, s.destination) for s in plan}
+    prefix = {(s.leg_index, s.origin, s.destination) for s in plan[: len(plan) // 4]}
+    assert prefix == routes
+
+
+def test_dealing_the_plan_changes_the_order_and_nothing_else():
+    """The set of searches is the trip; the order is only what survives a
+    refusal. Changing one must not change the other."""
+    plan = plan_searches(two_stop(depth="deep"))
+    assert len(plan) == len(set(plan))
+    assert {(s.leg_index, s.origin, s.destination, s.depart_date) for s in plan} == {
+        (s.leg_index, s.origin, s.destination, s.depart_date)
+        for s in plan_searches(two_stop(depth="deep"))
+    }
+
+
+# ---------------------------------------------------------- sizing the runners
+#
+# `DEFAULT_SHARDS: 5` sat in the workflow as a bare number. It was right - 483
+# planned over ~100 a runner - but only for one trip on one day, and pinning the
+# Japan crossing took that trip to 66 searches, at which point five runners were
+# splitting thirteen apiece. One number also cannot be right for two trips at
+# once, and the matrix applied it to every trip in the run.
+
+
+def test_the_shard_count_reproduces_the_number_that_worked():
+    """483 searches over 5 runners is the configuration that has finished whole
+    every night since 20 Aug. The rule has to give back that answer, not a new
+    one."""
+    assert shards_for(483) == 5
+
+
+def test_a_small_trip_gets_one_runner():
+    assert shards_for(66) == 1
+    assert shards_for(SEARCHES_PER_RUNNER) == 1
+
+
+def test_a_plan_one_search_over_the_cap_gets_another_runner():
+    assert shards_for(SEARCHES_PER_RUNNER + 1) == 2
+
+
+def test_no_shard_of_a_real_trip_is_given_more_than_the_site_answers():
+    """The whole point, checked on plans rather than on arithmetic.
+
+    `shard_of` deals within each route, so a shard is the sum of a rounding-up
+    per route and runs a little over `planned / count` - the 483-search sweep
+    of 20 Aug planned 96.6 a runner and handed out 105. That overshoot is what
+    the gap between the 100 target and the measured 120 wall is *for*, so the
+    assertion here is against the wall.
+    """
+    answered_by_one_client = 120
+    for depth in ("quick", "standard", "deep"):
+        plan = plan_searches(make_scenario(depth=depth))
+        count = shards_for(len(plan))
+        biggest = max(len(shard_of(plan, index, count)) for index in range(count))
+        assert biggest <= answered_by_one_client, (depth, len(plan), count, biggest)
+
+
+def test_an_empty_plan_still_asks_for_one_runner():
+    """Zero runners is a matrix with no jobs, which reads as a successful night
+    that swept nothing - the failure thirteen cancelled runs already made."""
+    assert shards_for(0) == 1

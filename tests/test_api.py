@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib
 import json
 import threading
+from dataclasses import replace
 from datetime import date
 
 import pytest
@@ -1486,3 +1487,575 @@ def test_the_watch_reports_the_series_it_has_recorded(client):
     # Carried through from the trip so the tab can say "down 1,500 since you
     # picked it" rather than only "down since the first observation".
     assert candidate["added_price"] == 30000
+
+
+# ------------------------------------------------------- results: narrowing
+#
+# Applied server-side and to the *whole* traversal, not to the fifty rows the
+# endpoint returns. `_combination` combines with limit=None, so filtering in the
+# browser would narrow the fifty cheapest while the headline cards above them
+# still came from all of them - a table and a summary describing two different
+# populations, which is the failure mode this codebase keeps designing against.
+
+
+def _bag_legs():
+    """Two ways home from Manila: the cheaper one has no confirmed bag.
+
+    Built so the bag filter and the price ranking disagree. A filter that
+    happened to keep the cheapest trip anyway would pass on nothing.
+    """
+    return [
+        Leg("T", "PRG", "NRT", date(2027, 1, 10), "QR", None, 1, "CZK", 12000.0, "u",
+            checked_bag=True),
+        Leg("T", "VIE", "NRT", date(2027, 1, 10), "OS", None, 1, "CZK", 13000.0, "u",
+            checked_bag=True),
+        Leg("T", "NRT", "MNL", date(2027, 1, 20), "PR", None, 0, "CZK", 4000.0, "u",
+            checked_bag=True),
+        Leg("T", "MNL", "PRG", date(2027, 1, 30), "QR", None, 1, "CZK", 9000.0, "u",
+            checked_bag=None),
+        Leg("T", "MNL", "PRG", date(2027, 1, 30), "EK", None, 1, "CZK", 14000.0, "u",
+            checked_bag=True),
+        Leg("T", "MNL", "VIE", date(2027, 1, 30), "EY", None, 1, "CZK", 11000.0, "u",
+            checked_bag=True),
+    ]
+
+
+def test_results_can_be_narrowed_to_one_departure_airport(client):
+    api, data = client
+    stamp = seed_sweep(data, legs=_bag_legs())
+    body = api.get(f"/api/sweeps/jp-ph/{stamp}/results?from_airport=VIE").json()
+    assert body["itineraries"]
+    assert {i["legs"][0]["origin"] for i in body["itineraries"]} == {"VIE"}
+
+
+def test_results_can_be_narrowed_to_one_return_airport(client):
+    api, data = client
+    stamp = seed_sweep(data, legs=_bag_legs())
+    body = api.get(f"/api/sweeps/jp-ph/{stamp}/results?to_airport=VIE").json()
+    assert body["itineraries"]
+    assert {i["legs"][-1]["destination"] for i in body["itineraries"]} == {"VIE"}
+
+
+def test_bags_filter_keeps_only_trips_where_every_leg_confirms_one(client):
+    api, data = client
+    stamp = seed_sweep(data, legs=_bag_legs())
+    body = api.get(f"/api/sweeps/jp-ph/{stamp}/results?bags=true").json()
+    assert body["itineraries"]
+    assert all(i["bags_needed"] == 0 for i in body["itineraries"])
+
+
+def test_bags_filter_drops_the_cheapest_trip_when_its_bag_is_unknown(client):
+    """`checked_bag is None` means the site never said, not that a bag is free.
+
+    The 9,000 PRG return is the cheapest way home and its bag is unknown, so a
+    bag-inclusive view must not report it - and must not report its total as the
+    headline either.
+    """
+    api, data = client
+    stamp = seed_sweep(data, legs=_bag_legs())
+    unfiltered = api.get(f"/api/sweeps/jp-ph/{stamp}/results").json()
+    filtered = api.get(f"/api/sweeps/jp-ph/{stamp}/results?bags=true").json()
+    # PRG -> NRT -> MNL -> PRG on the 9,000 return, whose bag is unknown.
+    assert unfiltered["best_same_airport"]["total_price"] == 25000  # 12000+4000+9000
+    # The unknown-bag return is gone, and the cheapest closed trip left is the
+    # Vienna one rather than Prague on the dearer 14,000 return.
+    assert filtered["best_same_airport"]["total_price"] == 28000    # 13000+4000+11000
+    assert filtered["best_same_airport"]["legs"][0]["origin"] == "VIE"
+
+
+def test_headline_cards_follow_the_filter(client):
+    """Otherwise the cards summarise a population the table below does not show."""
+    api, data = client
+    stamp = seed_sweep(data, legs=_bag_legs())
+    body = api.get(f"/api/sweeps/jp-ph/{stamp}/results?from_airport=VIE").json()
+    for card in ("best_same_airport", "best_open_jaw"):
+        if body[card]:
+            assert body[card]["legs"][0]["origin"] == "VIE"
+
+
+def test_results_say_whether_anything_is_being_hidden(client):
+    """`narrowed`, never "matched out of N".
+
+    Pruning makes an unfiltered traversal a different set, not a superset: it
+    drops the Vienna trips because a cheaper Prague trip shares their departure
+    date, while a Vienna-only traversal keeps them. So a filtered count can
+    exceed an unfiltered one, and a ratio of the two would be a fraction that is
+    not a fraction.
+    """
+    api, data = client
+    stamp = seed_sweep(data, legs=_bag_legs())
+    everything = api.get(f"/api/sweeps/jp-ph/{stamp}/results").json()
+    narrowed = api.get(f"/api/sweeps/jp-ph/{stamp}/results?from_airport=VIE").json()
+
+    assert everything["narrowed"] is False
+    assert narrowed["narrowed"] is True
+    assert narrowed["matched"] > 0
+    # What the unfiltered view costs, so the tab can price the preference.
+    assert narrowed["cheapest_unfiltered"] == everything["itineraries"][0]["total_with_bags"]
+
+
+def test_results_offer_the_airports_actually_present(client):
+    """The dropdowns must offer what this sweep found, not what the trip declares.
+
+    A trip listing four origins whose sweep only ever chained two would
+    otherwise offer two options that always return nothing.
+    """
+    api, data = client
+    stamp = seed_sweep(data, legs=_bag_legs())
+    body = api.get(f"/api/sweeps/jp-ph/{stamp}/results").json()
+    assert body["start_airports"] == ["PRG", "VIE"]
+    assert body["end_airports"] == ["PRG", "VIE"]
+
+
+def test_an_impossible_filter_returns_nothing_rather_than_everything(client):
+    api, data = client
+    stamp = seed_sweep(data, legs=_bag_legs())
+    body = api.get(f"/api/sweeps/jp-ph/{stamp}/results?from_airport=ZZZ").json()
+    assert body["itineraries"] == []
+    assert body["matched"] == 0
+    assert body["narrowed"] is True
+    assert body["best_same_airport"] is None
+    assert body["best_open_jaw"] is None
+
+
+# ------------------------------------------------------------- watched legs
+#
+# A trip watch prices every airport pair of every leg on its pinned dates; a leg
+# watch prices exactly one route on one day. They share a budget, because they
+# share a run and the site answers about 120 searches from one runner.
+
+
+def watch_a_leg(api, **overrides):
+    body = {"origin": "PRG", "destination": "NRT", "depart_date": "2027-01-10"}
+    body.update(overrides)
+    return api.post("/api/watch/jp-ph/legs", json=body)
+
+
+def test_following_a_leg_records_it_on_the_trip(client):
+    api, _ = client
+    body = watch_a_leg(api).json()
+    assert [leg["key"] for leg in body["legs"]] == ["PRG-NRT@2027-01-10"]
+    assert body["legs"][0]["route"] == "PRG→NRT"
+    assert body["legs"][0]["off_trip"] is False
+
+
+def test_a_watched_leg_costs_one_search(client):
+    api, _ = client
+    before = api.get("/api/watch/jp-ph").json()["searches"]
+    after = watch_a_leg(api).json()["searches"]
+    assert after == before + 1
+
+
+def test_a_route_the_trip_never_searches_is_allowed_and_flagged(client):
+    """Picking freely is the whole point, so it is said rather than refused."""
+    api, _ = client
+    body = watch_a_leg(api, origin="VIE", destination="DPS").json()
+    assert body["legs"][0]["off_trip"] is True
+
+
+def test_a_leg_and_the_trip_share_one_search_budget(client):
+    """Two panels each looking affordable while the run they add up to is not."""
+    api, _ = client
+    body = watch_a_leg(api).json()
+    assert body["cap"] == 110
+    assert body["searches"] <= body["cap"]
+
+
+def test_the_same_flight_cannot_be_followed_twice(client):
+    api, _ = client
+    assert watch_a_leg(api).status_code == 201
+    refused = watch_a_leg(api)
+    assert refused.status_code == 400
+    assert "already being watched" in refused.json()["detail"]
+
+
+def test_a_flight_from_an_airport_to_itself_is_refused(client):
+    api, _ = client
+    refused = watch_a_leg(api, destination="PRG")
+    assert refused.status_code == 400
+    assert "itself" in refused.json()["detail"]
+
+
+def test_a_mistyped_year_is_refused_rather_than_watched_forever(client):
+    """Outside the window it reports "nothing found" every four hours for good."""
+    api, _ = client
+    refused = watch_a_leg(api, depart_date="2028-01-10")
+    assert refused.status_code == 400
+    assert "outside the window" in refused.json()["detail"]
+
+
+def test_a_final_leg_just_past_the_window_is_still_allowed(client):
+    """The site substitutes nearby dates, so the way home legitimately departs
+    after the window closes."""
+    api, _ = client
+    assert watch_a_leg(api, origin="MNL", depart_date="2027-02-10").status_code == 201
+
+
+def test_a_leg_code_that_is_not_an_airport_is_refused(client):
+    api, _ = client
+    refused = watch_a_leg(api, destination="Tokyo")
+    assert refused.status_code == 400
+    assert "IATA" in refused.json()["detail"]
+
+
+def test_a_followed_leg_survives_a_reload(client):
+    api, _ = client
+    watch_a_leg(api)
+    assert len(api.get("/api/watch/jp-ph").json()["legs"]) == 1
+
+
+def test_unfollowing_a_leg_leaves_the_others(client):
+    api, _ = client
+    watch_a_leg(api)
+    watch_a_leg(api, depart_date="2027-01-12")
+    body = api.delete("/api/watch/jp-ph/legs/PRG-NRT@2027-01-10").json()
+    assert [leg["key"] for leg in body["legs"]] == ["PRG-NRT@2027-01-12"]
+
+
+def test_unfollowing_something_not_followed_is_a_404(client):
+    api, _ = client
+    assert api.delete("/api/watch/jp-ph/legs/PRG-NRT@2027-01-10").status_code == 404
+
+
+def test_the_price_it_was_picked_at_travels_with_the_pick(client):
+    """So the very first check can say which way it has gone."""
+    api, _ = client
+    body = watch_a_leg(api, added_price=12000).json()
+    assert body["legs"][0]["added_price"] == 12000
+
+
+def test_checking_now_is_refused_only_when_nothing_at_all_is_followed(client):
+    api, _ = client
+    assert api.post("/api/watch/jp-ph/run").status_code == 400
+    watch_a_leg(api)
+    # Not started for real here - the point is that it is no longer refused for
+    # having nothing to do.
+    assert api.post("/api/watch/jp-ph/run").status_code != 400
+
+
+# ------------------------------------------------- how much the probe answered
+#
+# Results and Watch both caveat a run that fell short of its plan. Explore did
+# not, and it is the tab that draws conclusions: a 25%-answered probe called
+# airports "poor" in exactly the words a complete one uses.
+
+
+def seed_partial_explore(data_dir, stamp="2026-08-11T10-00-00Z", answered=31, planned=123):
+    directory = data_dir / "sweeps" / "jp-ph" / stamp
+    directory.mkdir(parents=True)
+    (directory / "legs.jsonl").write_text("")
+    (directory / "status.json").write_text(
+        json.dumps(
+            {
+                "state": "throttled",
+                "mode": "explore",
+                "total": planned,
+                "answered": answered,
+                "planned": planned,
+                "coverage": round(answered / planned, 4),
+                "route_searches": {route: 1 for route in ROUTES},
+                "route_errors": {route: 0 for route in ROUTES},
+            }
+        )
+    )
+    return stamp
+
+
+def test_the_explore_report_says_how_much_of_its_plan_was_answered(client):
+    api, data = client
+    stamp = seed_partial_explore(data)
+    body = api.get(f"/api/sweeps/jp-ph/{stamp}/explore").json()
+    assert body["coverage"] == 0.252
+    assert body["answered"] == 31
+    assert body["planned"] == 123
+
+
+def test_a_complete_probe_reports_full_coverage(client):
+    """So the banner can stay quiet rather than nagging on every good run."""
+    api, data = client
+    stamp = seed_partial_explore(data, stamp="2026-08-11T11-00-00Z", answered=123)
+    body = api.get(f"/api/sweeps/jp-ph/{stamp}/explore").json()
+    assert body["coverage"] == 1.0
+
+
+def test_a_probe_from_before_coverage_was_recorded_does_not_claim_completeness(client):
+    """None must not render as 100%: it means "not known", not "all answered"."""
+    api, data = client
+    stamp = seed_explore(data, stamp="2026-08-11T12-00-00Z")
+    body = api.get(f"/api/sweeps/jp-ph/{stamp}/explore").json()
+    assert body["coverage"] is None
+
+
+# ------------------------------------------------------------------ resuming
+#
+# A run refused at 80 of 126 has 80 answers worth keeping. Re-asking them to buy
+# the remaining 46 spends the budget that ran out in the first place.
+
+
+def seed_incomplete(data_dir, stamp="2026-08-21T09-55-40Z", state="throttled",
+                    answered=80, planned=126):
+    directory = data_dir / "sweeps" / "jp-ph" / stamp
+    directory.mkdir(parents=True)
+    (directory / "legs.jsonl").write_text("")
+    (directory / "searches.jsonl").write_text("")
+    (directory / "status.json").write_text(
+        json.dumps(
+            {
+                "state": state, "mode": "explore", "total": planned,
+                "completed": answered, "answered": answered, "planned": planned,
+                "coverage": round(answered / planned, 4),
+            }
+        )
+    )
+    return stamp
+
+
+def test_an_unfinished_run_offers_to_be_carried_on(client):
+    api, data = client
+    stamp = seed_incomplete(data)
+    row = next(
+        s for s in api.get("/api/sweeps/jp-ph").json()["sweeps"] if s["stamp"] == stamp
+    )
+    assert row["resumable"] is True
+    assert row["left_to_ask"] == 46
+
+
+def test_a_finished_run_does_not_offer_to_be_carried_on(client):
+    api, data = client
+    stamp = seed_incomplete(data, stamp="2026-08-21T08-00-00Z", state="done", answered=126)
+    row = next(
+        s for s in api.get("/api/sweeps/jp-ph").json()["sweeps"] if s["stamp"] == stamp
+    )
+    assert row["resumable"] is False
+
+
+def test_resuming_a_run_that_does_not_exist_is_a_404(client):
+    api, _ = client
+    assert api.post("/api/scenarios/jp-ph/resume?stamp=2026-01-01T00-00-00Z").status_code == 404
+
+
+def test_resuming_a_finished_run_is_refused_with_a_reason(client):
+    api, data = client
+    stamp = seed_incomplete(data, stamp="2026-08-21T08-00-00Z", state="done", answered=126)
+    refused = api.post(f"/api/scenarios/jp-ph/resume?stamp={stamp}")
+    assert refused.status_code == 400
+    assert "nothing left" in refused.json()["detail"].lower()
+
+
+def test_resuming_while_a_run_is_going_is_refused(client, monkeypatch):
+    api, data = client
+    stamp = seed_incomplete(data)
+    import src.web.app as module
+
+    monkeypatch.setattr(module, "_is_running", lambda _id: True)
+    assert api.post(f"/api/scenarios/jp-ph/resume?stamp={stamp}").status_code == 409
+
+
+def test_carrying_on_a_run_of_a_different_trip_is_refused(client):
+    """The answers would be for airports the trip no longer has.
+
+    Resuming copies the earlier run's flights into the new directory and stamps
+    it with the trip as it stands now. If the trip was edited in between, that
+    directory would claim to have searched airports it never asked about - the
+    exact reading that made two probes report the wrong trip.
+    """
+    api, data = client
+    stamp = seed_incomplete(data)
+    # The run recorded which trip it searched, and it is not this one.
+    searched = json.loads(api.get("/api/scenarios/jp-ph").text)
+    searched["stops"][0]["airports"] = ["KIX"]
+    (data / "sweeps" / "jp-ph" / stamp / "scenario.json").write_text(json.dumps(searched))
+
+    refused = api.post(f"/api/scenarios/jp-ph/resume?stamp={stamp}")
+    assert refused.status_code == 400
+    assert "different" in refused.json()["detail"].lower()
+
+
+def test_carrying_on_a_run_of_the_same_trip_is_allowed(client, monkeypatch):
+    api, data = client
+    stamp = seed_incomplete(data)
+    searched = json.loads(api.get("/api/scenarios/jp-ph").text)
+    (data / "sweeps" / "jp-ph" / stamp / "scenario.json").write_text(json.dumps(searched))
+
+    # Stubbed, because the real one launches a browser at pelikan.cz. What is
+    # being tested is that the request is accepted and told what to carry on
+    # from, not that a sweep runs.
+    import src.web.app as module
+
+    asked: dict = {}
+    monkeypatch.setattr(module, "run_sweep", lambda *a, **kw: asked.update(kw))
+
+    started = api.post(f"/api/scenarios/jp-ph/resume?stamp={stamp}")
+    assert started.status_code == 200
+    assert started.json()["searches"] == 46
+    assert asked["resume_from"].name == stamp
+
+
+# ----------------------------------------------------------------- night sweep
+#
+# The nightly cloud sweep is the only place a sweep of this trip has ever
+# finished whole - 483/483 in 19 minutes on 21 Aug, against three throttled
+# local runs the same morning. It was also completely invisible from the page:
+# nothing said which trips it would run, how many runners they would be split
+# across, when it fires, or - the one that actually bit - that the trip it
+# sweeps is the trip on the branch, not the trip on this screen.
+
+
+def enable(client_dir, **overrides):
+    """Save a trip the nightly sweep would pick up."""
+    defaults = dict(
+        id="jp-ph",
+        name="Japan then Philippines",
+        origins=["PRG", "VIE"],
+        stops=[
+            Stop(airports=["NRT"], stay_days=(9, 11), label="Japan"),
+            Stop(airports=["MNL"], stay_days=(9, 11), label="Philippines"),
+        ],
+        window_start=date(2027, 1, 5),
+        window_end=date(2027, 2, 8),
+        depth="quick",
+        enabled=True,
+    )
+    defaults.update(overrides)
+    scenario = Scenario(**defaults)
+    save_scenario(scenario, client_dir)
+    return scenario
+
+
+def night(api) -> dict:
+    response = api.get("/api/night-sweep")
+    assert response.status_code == 200
+    return response.json()
+
+
+def trip_named(body, scenario_id) -> dict:
+    return next(t for t in body["trips"] if t["id"] == scenario_id)
+
+
+def test_the_night_sweep_says_which_trips_it_will_run(client, tmp_path):
+    api, _ = client
+    enable(tmp_path / "scenarios")
+    body = night(api)
+    assert trip_named(body, "jp-ph")["included"] is True
+
+
+def test_a_trip_left_out_is_listed_as_left_out_rather_than_hidden(client, tmp_path):
+    """Hiding it is how a trip comes to be quietly unswept for a fortnight.
+    Both of this repo's trips sat `enabled: false` while their owner watched
+    for nightly results."""
+    api, _ = client
+    enable(tmp_path / "scenarios", enabled=False)
+    assert trip_named(night(api), "jp-ph")["included"] is False
+
+
+def test_each_trip_reports_the_runners_its_plan_needs(client, tmp_path):
+    api, _ = client
+    enable(tmp_path / "scenarios", depth="deep")
+    trip = trip_named(night(api), "jp-ph")
+    assert trip["searches"] > 100
+    assert trip["runners"] == -(-trip["searches"] // 100)
+
+
+def test_a_trip_is_sized_for_the_depth_the_night_sweep_forces(client, tmp_path):
+    """A schedule supplies no depth input, so the workflow default wins over
+    whatever the trip is saved as. Sizing from the file reported a plan seven
+    times smaller than the one that would really run."""
+    api, _ = client
+    enable(tmp_path / "scenarios", depth="quick")
+    body = night(api)
+    trip = trip_named(body, "jp-ph")
+    assert trip["saved_depth"] == "quick"
+    assert trip["depth"] == body["forced_depth"] == "deep"
+    assert trip["searches"] > 100, "sized from the file rather than the workflow"
+
+
+def test_a_genuinely_small_trip_reports_one_runner(client, tmp_path):
+    api, _ = client
+    enable(
+        tmp_path / "scenarios",
+        origins=["PRG"],
+        stops=[Stop(airports=["NRT"], stay_days=(9, 11), label="Japan")],
+        window_end=date(2027, 1, 12),
+    )
+    trip = trip_named(night(api), "jp-ph")
+    assert trip["searches"] <= 100
+    assert trip["runners"] == 1
+
+
+def test_the_schedule_comes_from_the_workflow_that_runs_it(client):
+    """Two copies of a cron drift, and the one on screen is the one nobody can
+    check against Actions."""
+    api, _ = client
+    schedule = night(api)["schedule"]
+    assert [slot["cron"] for slot in schedule]
+    assert all(slot["next"] for slot in schedule)
+    assert any(slot["focused"] for slot in schedule), "the focused slot is missing"
+
+
+def test_a_trip_the_cloud_has_never_seen_says_so(client, tmp_path):
+    """A tmp scenario directory is not on any branch, which is the same state
+    as a trip you have created and not pushed."""
+    api, _ = client
+    enable(tmp_path / "scenarios")
+    assert trip_named(night(api), "jp-ph")["cloud"]["known"] is False
+
+
+def test_a_trip_that_matches_the_cloud_reports_no_difference(client, tmp_path, monkeypatch):
+    import src.web.app as app_module
+
+    live = enable(tmp_path / "scenarios")
+    monkeypatch.setattr(app_module, "_cloud_scenario", lambda _id: live)
+    api, _ = client
+    cloud = trip_named(night(api), "jp-ph")["cloud"]
+    assert cloud["known"] is True
+    assert cloud["differs"] == []
+
+
+def test_a_trip_the_cloud_sweeps_differently_names_what_differs(client, tmp_path, monkeypatch):
+    """The live trap on 21 Aug. The nightly sweep was searching three origins
+    and two Philippine airports, 483 searches, while the screen showed a
+    one-origin trip with the Japan crossing pinned - 66 searches. Nothing said
+    so, and the results being read were of the other trip."""
+    import src.web.app as app_module
+
+    enable(tmp_path / "scenarios", origins=["PRG"], depth="quick")
+    wider = Scenario(
+        id="jp-ph",
+        name="Japan then Philippines",
+        origins=["PRG", "VIE", "FRA"],
+        stops=[
+            Stop(airports=["NRT", "HND"], stay_days=(9, 11), label="Japan"),
+            Stop(airports=["MNL"], stay_days=(9, 11), label="Philippines"),
+        ],
+        window_start=date(2027, 1, 5),
+        window_end=date(2027, 2, 8),
+        depth="deep",
+        enabled=True,
+    )
+    monkeypatch.setattr(app_module, "_cloud_scenario", lambda _id: wider)
+    api, _ = client
+
+    body = night(api)
+    trip = trip_named(body, "jp-ph")
+    assert trip["cloud"]["known"] is True
+    assert "the airports it searches" in trip["cloud"]["differs"]
+    # Depth is *not* a difference while the workflow forces one: both copies get
+    # swept at the same depth, and flagging it would be a false alarm on the one
+    # panel whose job is to be trusted.
+    assert body["forced_depth"], "the workflow no longer forces a depth"
+    assert "how finely it prices" not in trip["cloud"]["differs"]
+    # What the cloud will actually spend the night doing, not what this screen
+    # would cost. That difference is the whole point of saying it: on 21 Aug it
+    # was 483 searches against the 66 the page was showing.
+    assert trip["cloud"]["searches"] > trip["searches"]
+
+
+def test_a_trip_enabled_here_but_not_in_the_cloud_says_that_too(client, tmp_path, monkeypatch):
+    import src.web.app as app_module
+
+    live = enable(tmp_path / "scenarios", enabled=True)
+    monkeypatch.setattr(
+        app_module, "_cloud_scenario", lambda _id: replace(live, enabled=False)
+    )
+    api, _ = client
+    assert "whether it runs at all" in trip_named(night(api), "jp-ph")["cloud"]["differs"]

@@ -532,3 +532,109 @@ def test_a_watch_on_a_one_way_trip_has_no_stay_after_the_last_leg():
     """
     trip = make_scenario(one_way=True, watches=[_watch(dates=("2027-01-10", "2027-01-20"))])
     trip.validate()
+
+
+# -------------------------------------------------- pinning an overland stop
+#
+# Once the crossing is decided - in via Haneda, out via Kansai - every other
+# combination is searched for nothing. The probe is what answers the question;
+# these pins are how the answer is spent.
+
+
+def _pinned_trip(**pins):
+    return make_scenario(
+        origins=["VIE", "FRA"],
+        stops=[
+            Stop(airports=["HND", "NRT", "KIX"], stay_days=(9, 11), label="Japan",
+                 overland=True, **pins),
+            Stop(airports=["MNL", "CEB"], stay_days=(9, 11), label="Philippines"),
+        ],
+    )
+
+
+def test_an_unpinned_stop_arrives_and_leaves_through_all_its_airports():
+    stop = _pinned_trip().stops[0]
+    assert stop.arrive_at == ["HND", "NRT", "KIX"]
+    assert stop.depart_from == ["HND", "NRT", "KIX"]
+
+
+def test_pinning_narrows_only_the_side_it_names():
+    stop = _pinned_trip(arrive_via="HND", depart_via="KIX").stops[0]
+    assert stop.arrive_at == ["HND"]
+    assert stop.depart_from == ["KIX"]
+
+    half = _pinned_trip(depart_via="KIX").stops[0]
+    assert half.arrive_at == ["HND", "NRT", "KIX"], "arriving is still open"
+    assert half.depart_from == ["KIX"]
+
+
+def test_leg_pools_carry_the_two_sides_of_a_pinned_stop():
+    """`airport_pools` has one list per place and cannot express this at all."""
+    trip = _pinned_trip(arrive_via="HND", depart_via="KIX")
+    assert trip.leg_pools == [
+        (["VIE", "FRA"], ["HND"]),
+        (["KIX"], ["MNL", "CEB"]),
+        (["MNL", "CEB"], ["VIE", "FRA"]),
+    ]
+
+
+def test_leg_pools_match_airport_pools_when_nothing_is_pinned():
+    """The invariant that keeps every unpinned trip behaving exactly as before."""
+    for trip in (make_scenario(), make_round_trip(), make_three_stop()):
+        pools = trip.airport_pools
+        assert trip.leg_pools == [
+            (pools[i], pools[i + 1]) for i in range(len(pools) - 1)
+        ]
+
+
+def test_a_one_way_trip_has_leg_pools_too():
+    trip = make_scenario(one_way=True)
+    assert len(trip.leg_pools) == trip.leg_count == 2
+
+
+def test_a_pin_must_name_an_airport_the_stop_actually_has():
+    with pytest.raises(ValueError, match="KIX"):
+        _pinned_trip(depart_via="KIX", arrive_via="BCN").validate()
+
+
+def test_a_pin_without_overland_is_refused_rather_than_ignored():
+    """Not overland means leaving from where you landed, so a pin is a
+    contradiction. Ignoring it would leave someone waiting for Kansai
+    departures that were never going to be chained."""
+    trip = make_scenario(
+        stops=[
+            Stop(airports=["HND", "KIX"], stay_days=(9, 11), label="Japan",
+                 depart_via="KIX"),
+            Stop(airports=["MNL"], stay_days=(9, 11), label="Philippines"),
+        ]
+    )
+    with pytest.raises(ValueError, match="overland"):
+        trip.validate()
+
+
+def test_a_pinned_trip_is_valid():
+    _pinned_trip(arrive_via="HND", depart_via="KIX").validate()
+
+
+def test_pins_survive_a_save_and_load(tmp_path):
+    """`to_dict` names a stop's fields by hand; an unnamed one vanishes."""
+    original = _pinned_trip(arrive_via="HND", depart_via="KIX")
+    save_scenario(original, tmp_path)
+    loaded = load_scenario(tmp_path / "japan-philippines.json")
+    assert loaded.stops[0].arrive_via == "HND"
+    assert loaded.stops[0].depart_via == "KIX"
+    assert loaded == original
+
+
+def test_a_trip_saved_before_pins_existed_still_loads(tmp_path):
+    """Every committed scenario file predates these fields."""
+    path = tmp_path / "old.json"
+    path.write_text(json.dumps({
+        "id": "old", "name": "Old", "origins": ["PRG"],
+        "stops": [{"label": "Japan", "airports": ["NRT", "KIX"], "stay_days": [9, 11]}],
+        "window_start": "2027-01-05", "window_end": "2027-02-08",
+    }), encoding="utf-8")
+    loaded = load_scenario(path)
+    assert loaded.stops[0].arrive_via is None
+    assert loaded.stops[0].depart_via is None
+    assert loaded.stops[0].arrive_at == ["NRT", "KIX"]

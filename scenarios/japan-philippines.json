@@ -2,45 +2,50 @@
   "id": "japan-philippines",
   "name": "Europe → Japan → Philippines → Europe",
   "origins": [
-    "PRG",
-    "VIE",
-    "FRA"
+    "VIE"
   ],
   "stops": [
     {
       "label": "Japan",
       "airports": [
-        "NRT",
         "HND",
+        "NRT",
         "KIX"
       ],
       "stay_days": [
-        8,
+        9,
         13
-      ]
+      ],
+      "overland": true,
+      "arrive_via": "HND",
+      "depart_via": "KIX"
     },
     {
       "label": "Philippines",
       "airports": [
-        "MNL",
-        "CEB"
+        "MNL"
       ],
       "stay_days": [
         8,
         13
-      ]
+      ],
+      "overland": false,
+      "arrive_via": null,
+      "depart_via": null
     }
   ],
   "window_start": "2027-01-05",
   "window_end": "2027-02-08",
   "return_to": null,
   "one_way": false,
+  "focus_start": null,
+  "focus_end": null,
   "adults": 1,
-  "depth": "standard",
+  "depth": "deep",
   "currency": "CZK",
   "alert_threshold": null,
   "bag_estimate": 1500,
-  "enabled": true,
+  "enabled": false,
   "notes": "Main trip. Airports chosen from a live viability check: BRQ and BTS returned no long-haul inventory; FRA measured ~45% cheaper than PRG on a sample January date. Stays are 8-13 days: a [9,11] rule silently discarded a real 12-day Japan stay.",
   "preferred_origins": [
     [
@@ -61,5 +66,8 @@
     "cheapest",
     "preferred"
   ],
-  "notify_quiet": true
+  "watches": [],
+  "leg_watches": [],
+  "probe_both_orders": false,
+  "notify_quiet": false
 }

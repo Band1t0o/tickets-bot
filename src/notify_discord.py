@@ -25,7 +25,15 @@ from .webhook_store import SECRETS_DIR, load_webhook
 
 COLOR_GOOD = 0x27AB83   # palette green500
 COLOR_INFO = 0x1980D4   # palette blue600
+COLOR_RISE = 0xF0B429   # palette yellow600
 COLOR_ALERT = 0xE12D39  # palette red500
+
+# How far a total must move before the move is worth saying anything about.
+#
+# The same bar `watch.py` applies to a fall, and for the same reason: below it a
+# fare has not moved, it has rounded, and a watcher that announces rounding
+# nightly is a watcher you mute.
+MEANINGFUL_MOVE_PCT = 1.0
 
 
 def _read_state(directory: Path | str) -> dict:
@@ -50,42 +58,71 @@ def _read_state(directory: Path | str) -> dict:
     return {k: v for k, v in payload.items() if isinstance(v, dict)}
 
 
-def load_best(directory: Path | str, name: str = "cheapest") -> float | None:
-    """Best total previously recorded for one pick, if any."""
+def _figure(directory: Path | str, name: str, field: str) -> float | None:
     entry = _read_state(directory).get(name)
     if not entry:
         return None
     try:
-        return float(entry["best_total"])
+        return float(entry[field])
     except (ValueError, KeyError, TypeError):
         return None
+
+
+def load_best(directory: Path | str, name: str = "cheapest") -> float | None:
+    """Best total previously recorded for one pick, if any."""
+    return _figure(directory, name, "best_total")
+
+
+def load_last(directory: Path | str, name: str = "cheapest") -> float | None:
+    """What this pick cost the *previous* time anything was reported, if ever.
+
+    Distinct from the best on purpose. `best_total` only ever walks downward, so
+    it cannot answer "is this climbing" - which is the question a fare rising
+    towards departure is asking, and the one nothing here could answer at all.
+
+    Every `best.json` written before this field existed reads as None, which is
+    exactly right: there is nothing to compare against.
+    """
+    return _figure(directory, name, "last_total")
 
 
 def save_best(
     directory: Path | str, best_total: float, currency: str, name: str = "cheapest"
 ) -> None:
-    """Record a new best for one pick, but only when it really is one.
+    """Record what this pick cost, and a new best only when it really is one.
 
-    This used to be called unconditionally whenever an alert was sent. With
-    `alert_threshold` set, an alert fires on any total under the threshold -
-    including one *worse* than the recorded best - and the recorded best then
-    walked upward, quietly destroying the "only alert on genuine improvement"
-    guarantee for every later run.
+    Two figures, because they answer two questions. `best_total` used to be
+    written unconditionally whenever an alert was sent: with `alert_threshold`
+    set, an alert fires on any total under the threshold - including one *worse*
+    than the recorded best - and the recorded best then walked upward, quietly
+    destroying the "only alert on genuine improvement" guarantee for every later
+    run. It only ever walks downward now.
 
-    Picks are recorded separately because they improve separately: a tier-1
-    trip dropping 3,000 CZK is news even on a day Frankfurt did not move, and
-    one shared figure hid exactly that.
+    Which is exactly why `last_total` had to be kept beside it. A figure that
+    only falls cannot say whether a fare is climbing, and climbing is the thing
+    worth knowing when the departure is fixed and the window is closing.
+
+    Picks are recorded separately because they move separately: a tier-1 trip
+    dropping 3,000 CZK is news even on a day Frankfurt did not move, and one
+    shared figure hid exactly that.
     """
     directory = Path(directory)
     state = _read_state(directory)
     previous = load_best(directory, name)
-    if previous is not None and best_total >= previous:
-        return
-    state[name] = {
-        "best_total": best_total,
-        "currency": currency,
-        "recorded_at": datetime.now(UTC).isoformat(timespec="seconds"),
-    }
+    now = datetime.now(UTC).isoformat(timespec="seconds")
+
+    entry = dict(state.get(name) or {})
+    # Always. This is what the next run is compared against, and without it a
+    # rise can never be seen - the best walks downward by design, so a total
+    # above it is indistinguishable from a total above it yesterday.
+    entry["last_total"] = best_total
+    entry["currency"] = currency
+    entry["recorded_at"] = now
+    if previous is None or best_total < previous:
+        entry["best_total"] = best_total
+        entry["best_at"] = now
+
+    state[name] = entry
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "best.json").write_text(json.dumps(state, indent=2), encoding="utf-8")
 
@@ -135,12 +172,71 @@ def _pick_field(pick, bag_estimate: float = 0.0) -> dict:
     }
 
 
+def describe_move(
+    total: float, previous_best: float | None, previous_last: float | None
+) -> tuple[str, str, int]:
+    """Which way this total went, said in a sentence, with a colour.
+
+    Returns `(kind, sentence, colour)`. The kinds are ordered by what a reader
+    needs first: a new best is the thing worth acting on, a rise is the thing
+    worth knowing, and everything else is context that stops the message reading
+    as news when nothing has happened.
+
+    A rise must clear `MEANINGFUL_MOVE_PCT` before it is called one. Fares wobble
+    by tens of crowns between readings, and "up 40 since yesterday" every night
+    is how a watcher stops being read at all.
+    """
+    if previous_best is None and previous_last is None:
+        return "first", "the first reading of this trip", COLOR_INFO
+
+    if previous_best is not None and total < previous_best:
+        return (
+            "best",
+            f"a new best, down {previous_best - total:,.0f} from {previous_best:,.0f}",
+            COLOR_GOOD,
+        )
+
+    if previous_last is None:
+        # A `best.json` written before `last_total` existed: there is a best to
+        # measure against but no previous run, so the only honest thing to say
+        # is where this sits against the best.
+        if total == previous_best:
+            return "flat", f"level with the best of {previous_best:,.0f}", COLOR_INFO
+        return "flat", f"above the best of {previous_best:,.0f}", COLOR_INFO
+
+    move = total - previous_last
+    big_enough = previous_last > 0 and abs(move) / previous_last * 100 >= MEANINGFUL_MOVE_PCT
+    # Skipped when the last run *was* the best: "up 4,600 since the last run's
+    # 31,200, still above the best of 31,200" states one number as two facts.
+    still_above = (
+        f", still above the best of {previous_best:,.0f}"
+        if previous_best is not None
+        and total > previous_best
+        and previous_best != previous_last
+        else ""
+    )
+    if move > 0 and big_enough:
+        return (
+            "up",
+            f"**up {move:,.0f}** since the last run's {previous_last:,.0f}{still_above}",
+            COLOR_RISE,
+        )
+    if move < 0 and big_enough:
+        return (
+            "down",
+            f"down {-move:,.0f} since the last run's {previous_last:,.0f}{still_above}",
+            COLOR_INFO,
+        )
+    return "flat", f"unchanged since the last run{still_above}", COLOR_INFO
+
+
 def build_price_embed(
     scenario_name: str,
     picks: list,
     previous_best: float | None = None,
     bag_estimate: float = 0.0,
     coverage: float | None = None,
+    previous_last: float | None = None,
 ) -> dict | None:
     """One embed carrying every pick worth reporting, or None if there are none.
 
@@ -160,24 +256,73 @@ def build_price_embed(
     fields = [_pick_field(pick, bag_estimate) for pick in picks]
     headline = min(pick.itinerary.total_with_bags(bag_estimate) for pick in picks)
 
-    description = f"Best total: **{headline:,.0f}**"
-    if previous_best is not None:
-        delta = previous_best - headline
-        if delta > 0:
-            description += f" — down {delta:,.0f} from {previous_best:,.0f}"
+    # Which way it went, not just what it is. A message that restates a number
+    # every night is one nobody opens; the movement is the whole reason to look.
+    kind, moved, colour = describe_move(headline, previous_best, previous_last)
+    description = f"Best total: **{headline:,.0f}** — {moved}"
     if coverage is not None and coverage < 1.0:
         description += (
             f"\n⚠️ Only **{coverage:.0%}** of the planned searches were answered, "
             "so a cheaper trip may simply not have been seen."
         )
 
+    # Said in the title as well, because that is all a phone notification shows.
+    mark = "↗️" if kind == "up" else "✈️"
+    suffix = {"best": " — new best", "up": " — up since the last run"}.get(kind, "")
+
     return {
-        "title": f"✈️ {scenario_name}",
+        "title": f"{mark} {scenario_name}{suffix}",
         "description": description,
-        "color": COLOR_GOOD,
+        "color": colour,
         "fields": fields,
         "timestamp": datetime.now(UTC).isoformat(),
         "footer": {"text": "Flight scenario watcher"},
+    }
+
+
+def build_leg_watch_embed(scenario_name: str, drops: list[dict]) -> dict | None:
+    """One embed for the watched legs that fell, or None.
+
+    Its own embed rather than more fields on the trip one, because it is a
+    different claim. That one says a whole trip on a given day got cheaper;
+    this says one ticket did, and a ticket price sitting unlabelled beside trip
+    totals reads as an impossibly cheap trip.
+    """
+    if not drops:
+        return None
+
+    fields = []
+    for drop in drops:
+        lines = [
+            f"down **{drop['drop']:,.0f} {drop['currency']}** ({drop['drop_pct']:.1f}%) "
+            f"from {drop['previous_best']:,.0f}"
+        ]
+        if drop.get("airline"):
+            lines.append(f"_{drop['airline']}_")
+        # The site substitutes nearby dates. A price found for the 23rd is not a
+        # price for the 22nd, and this message is read away from the app where
+        # nothing else can say so.
+        if not drop.get("exact") and drop.get("found_date"):
+            lines.append(f"_priced on {drop['found_date']}, not the day watched_")
+        fields.append(
+            {
+                "name": f"{drop['route']} {drop['depart_date']} — "
+                        f"{drop['price']:,.0f} {drop['currency']}",
+                "value": "\n".join(lines),
+                "inline": False,
+            }
+        )
+
+    return {
+        "title": f"📉 {scenario_name} — a watched flight got cheaper",
+        "description": (
+            f"{len(drops)} of the individual flights you are following fell since "
+            f"the last time this said anything. These are single tickets, not trips."
+        ),
+        "color": COLOR_GOOD,
+        "fields": fields,
+        "timestamp": datetime.now(UTC).isoformat(),
+        "footer": {"text": "Flight scenario watcher — watched legs"},
     }
 
 
@@ -294,14 +439,27 @@ def post(webhook_url: str, embeds: list[dict]) -> bool:
         return False
 
 
-def notify_watch(scenario, drops: list[dict], webhook_url: str | None = None) -> bool:
-    """Post the watched days that fell, if any. True when something was sent.
+def notify_watch(
+    scenario,
+    drops: list[dict],
+    webhook_url: str | None = None,
+    leg_drops: list[dict] | None = None,
+) -> bool:
+    """Post the watched days and legs that fell, if any.
+
+    True when something was sent.
 
     Separate from `notify_sweep` because a watch has nothing to say most of the
     time, and that is the desired behaviour rather than a failure: at six runs
     a day, a message per run would be forty a week, most of them "still 23,485".
+
+    Days and legs go in one post as two embeds, not two posts. They come from
+    one run and are read in one sitting, and Discord shows them as two labelled
+    cards - which is exactly the distinction that matters, since a ticket price
+    beside a trip total would otherwise read as an impossibly cheap trip.
     """
-    if not drops:
+    leg_drops = leg_drops or []
+    if not drops and not leg_drops:
         return False
     # The same lookup as `notify_sweep`, so a webhook pasted into the Sources
     # tab reaches a local `python -m src.cli watch` as well. In Actions nothing
@@ -317,8 +475,15 @@ def notify_watch(scenario, drops: list[dict], webhook_url: str | None = None) ->
         )
         return False
 
-    embed = build_watch_embed(scenario.name, drops)
-    return post(webhook_url, [embed]) if embed else False
+    embeds = [
+        embed
+        for embed in (
+            build_watch_embed(scenario.name, drops),
+            build_leg_watch_embed(scenario.name, leg_drops),
+        )
+        if embed
+    ]
+    return post(webhook_url, embeds) if embeds else False
 
 
 def notify_sweep(scenario, result, webhook_url: str | None = None) -> bool:
@@ -389,9 +554,13 @@ def notify_sweep(scenario, result, webhook_url: str | None = None) -> bool:
         print("[Discord] no pick improved on its recorded best; staying quiet")
         return False
 
-    previous_best = load_best(state_dir, "cheapest")
     embed = build_price_embed(
-        scenario.name, reportable, previous_best, bag, getattr(result, "coverage", None)
+        scenario.name,
+        reportable,
+        load_best(state_dir, "cheapest"),
+        bag,
+        getattr(result, "coverage", None),
+        load_last(state_dir, "cheapest"),
     )
     sent = post(webhook_url, [embed])
     if sent:

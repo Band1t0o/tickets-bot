@@ -12,6 +12,7 @@ back to the repo.
 from __future__ import annotations
 
 import json
+import shutil
 import threading
 import time
 from collections.abc import Callable
@@ -95,6 +96,12 @@ THROTTLE_STREAK = 5
 # Sized against the measurement that prompted it: the 11 Aug local sweep spent
 # 4.5 hours to finish 245 of 615 searches with 125 timeouts, 93% of its worker
 # time waiting on nothing. With this it reaches the same verdict in ~25 minutes.
+#
+# The lengths are also what the site has been seen to want. On 20 Aug a local
+# run died at 120 answered, and one started **15 minutes later** answered a
+# full 120 more - so a quarter of an hour of genuine quiet is enough to be
+# forgiven. `_Breaker` did not deliver genuine quiet until 21 Aug, which is why
+# these numbers looked useless without being wrong.
 BACKOFF_S = (120.0, 300.0, 900.0)
 
 ProgressFn = Callable[[int, int, str], None]
@@ -306,6 +313,14 @@ class _Breaker:
     none at all in 350 searches - so a *streak* is the signal, and a single
     success anywhere resets it. Only still failing after the longest pause is
     taken as evidence to abandon the run.
+
+    The pause is a **deadline every worker honours**, not a sleep handed to
+    whichever worker happened to record the fifth timeout. That is what it was,
+    and it meant the ladder was never once run as designed: one worker slept
+    while the other kept searching, so the client was never quiet, the site had
+    nothing to forgive, and the two workers spent rungs between them faster
+    than any of the pauses lasted. Measured 21 Aug - three local runs reached
+    the end of the ladder without pelikan.cz ever having had two minutes off.
     """
 
     def __init__(self, backoff_s, on_backoff=None):
@@ -314,32 +329,60 @@ class _Breaker:
         self._lock = threading.Lock()
         self._streak = 0
         self._level = 0
+        self._paused_until = 0.0
         self.tripped = False
 
+    def _left(self) -> float:
+        """Seconds still owed on the open pause. Caller holds the lock."""
+        return max(0.0, self._paused_until - time.monotonic())
+
     def record_success(self) -> None:
+        """The site answered, so there is nothing left to wait out."""
         with self._lock:
             self._streak = 0
             self._level = 0
+            self._paused_until = 0.0
 
-    def record_timeout(self) -> float | None:
-        """Seconds every worker should now pause for, or None to carry on."""
+    def record_timeout(self) -> None:
+        """Count a refusal, and open a pause if this is a streak of them."""
         with self._lock:
+            if self._left():
+                # A search that was already in flight when the pause opened.
+                # It is evidence about the moment before the quiet rather than
+                # about the quiet, and counting it is exactly how two workers
+                # used to spend two rungs of the ladder on one refusal.
+                return
             self._streak += 1
             if self._streak < THROTTLE_STREAK:
-                return None
+                return
             self._streak = 0
             if self._level >= len(self._backoff):
                 self.tripped = True
-                return None
-            wait = self._backoff[self._level]
+                return
+            seconds = self._backoff[self._level]
             self._level += 1
-            return wait
-
-    def wait(self, seconds: float) -> None:
+            self._paused_until = time.monotonic() + seconds
+        # Outside the lock: this writes status.json, which takes another.
         if self._on_backoff:
             self._on_backoff(seconds)
-        if seconds:
-            time.sleep(seconds)
+
+    def hold(self, stop: threading.Event | None = None) -> None:
+        """Wait out whatever is left of the pause, whoever opened it.
+
+        Interruptible, because the longest pause is fifteen minutes. Pressing
+        Stop during one did nothing for a quarter of an hour while the page
+        said "finishing the search in flight" - with no search in flight and
+        none due.
+        """
+        while True:
+            with self._lock:
+                left = self._left()
+            if left <= 0:
+                return
+            if stop is None:
+                time.sleep(left)
+            elif stop.wait(left):
+                return
 
 
 def _chunk(searches: list[LegSearch], workers: int) -> list[list[LegSearch]]:
@@ -366,7 +409,41 @@ def _chunk(searches: list[LegSearch], workers: int) -> list[list[LegSearch]]:
         if start < end:
             chunks.append(searches[start:end])
         start = end
-    return chunks
+    return _stagger(chunks)
+
+
+def _stagger(chunks: list[list[LegSearch]]) -> list[list[LegSearch]]:
+    """Start each worker on a different route, without changing its share.
+
+    The plan is dealt across routes - one date from each in turn, so that a run
+    cut short still holds a grid that chains - which means contiguous chunks of
+    it advance through the routes in step with one another. Whenever the chunk
+    size divides by the route count, two workers then sit on the *same* route at
+    the same instant for the entire run. Measured on the real trip before this:
+    33 of 33 steps in lockstep, which is precisely the pattern the contiguous
+    split above exists to avoid.
+
+    Rotating a chunk changes where a worker starts, never what it searches, so
+    coverage and the shard arithmetic are untouched. A worker with no unused
+    route left - more workers than routes - keeps its chunk as it is: the
+    collision is unavoidable at that point and pretending otherwise would only
+    move it.
+    """
+    taken: set[tuple[str, str]] = set()
+    staggered = []
+    for chunk in chunks:
+        offset = next(
+            (
+                index
+                for index, search in enumerate(chunk)
+                if (search.origin, search.destination) not in taken
+            ),
+            0,
+        )
+        first = chunk[offset]
+        taken.add((first.origin, first.destination))
+        staggered.append(chunk[offset:] + chunk[:offset])
+    return staggered
 
 
 def _now() -> str:
@@ -416,6 +493,10 @@ def _write_scenario(directory: Path, scenario: Scenario) -> None:
     )
 
 
+def _in(seconds: float) -> str:
+    return (datetime.now(UTC) + timedelta(seconds=seconds)).isoformat(timespec="seconds")
+
+
 def run_sweep(
     scenario: Scenario,
     provider: LegProvider | None = None,
@@ -430,6 +511,7 @@ def run_sweep(
     on_backoff: Callable[[float], None] | None = None,
     shard: tuple[int, int] | None = None,
     recycle_after: int = PAGE_RECYCLE_EVERY,
+    resume_from: Path | str | None = None,
 ) -> SweepResult:
     """Run every search `scenario` implies and persist the legs found.
 
@@ -457,6 +539,20 @@ def run_sweep(
     runner is a separate VM with its own address, so three of them at the same
     two workers and four-second delay put exactly the per-address load that has
     measured zero timeouts - while finishing in a third of the wall clock.
+
+    `resume_from` is a directory whose run ended short - refused, stopped, or
+    out of budget. Its answers are inherited and only the rest of the plan is
+    asked for. The site answers about 120 searches from one client, so a probe
+    refused at 80 of 126 cannot afford to buy its remaining 46 by re-asking the
+    80 it already has.
+
+    Deliberately not a shard, though `merge_shards` would stitch the two
+    directories. `_merged_status` sums `total` across shards, so a 126-search run
+    resumed with 46 would report a plan of 172 while `planned` - taken with
+    `max` - stayed 126. The inconsistency would be quiet, and a number that
+    disagrees with itself about how much was searched is the one thing this
+    file exists to prevent. The resumed run inherits the rows instead and is a
+    complete sweep directory on its own.
     """
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}, got {mode!r}")
@@ -473,11 +569,27 @@ def run_sweep(
 
     plans = {"explore": plan_exploration, "watch": plan_watch, "sweep": plan_searches}
     searches = plans[mode](scenario)
+    # Counted before any narrowing, so a shard and a resumed run both report what
+    # they are a part of rather than the part they ran.
     planned = len(searches)
     if shard is not None:
         searches = shard_of(searches, *shard)
+    inherited = Path(resume_from) if resume_from else None
+    if inherited is not None:
+        already = answered_searches(inherited)
+        searches = [
+            search for search in searches
+            if (search.origin, search.destination, search.depart_date.isoformat())
+            not in already
+        ]
     directory = _new_sweep_directory(Path(data_dir) / MODE_ROOTS[mode] / scenario.id)
     _write_scenario(directory, scenario)
+    if inherited is not None:
+        # Copied before the logs open: they open for appending, onto these.
+        for name in ("legs.jsonl", "searches.jsonl"):
+            source = inherited / name
+            if source.exists():
+                shutil.copyfile(source, directory / name)
 
     result = SweepResult(
         scenario_id=scenario.id,
@@ -485,9 +597,39 @@ def run_sweep(
         total=len(searches),
         started_at=_now(),
     )
+    if inherited is not None:
+        # The inherited rows are already on disk; the counters have to agree with
+        # them from the first status write, or a resumed run opens at 0 of the
+        # plan and reads as though the earlier answers were thrown away.
+        earlier = _read_status_file(inherited)
+        result.completed = earlier.get("completed") or 0
+        result.answered = earlier.get("answered") or 0
+        result.total = result.completed + len(searches)
+        result.route_searches = dict(earlier.get("route_searches") or {})
+        result.route_legs = dict(earlier.get("route_legs") or {})
+        result.route_errors = dict(earlier.get("route_errors") or {})
+        result.legs = load_legs(directory)
 
     lock = threading.Lock()
-    breaker = _Breaker(backoff_s, on_backoff)
+    # Transient, unlike everything on `result`: it describes what the run is
+    # doing right now, and is cleared the moment a search answers.
+    backoff = {"seconds": 0.0, "until": ""}
+
+    def note_backoff(seconds: float) -> None:
+        """Write the wait down before sleeping through it.
+
+        Status is otherwise written every fifth search, so a run that stops
+        making searches stops updating its status - the one situation where the
+        page most needs to hear something.
+        """
+        backoff["seconds"] = seconds
+        backoff["until"] = _in(seconds) if seconds else ""
+        with lock:
+            _write_status(directory, status_payload("running"))
+        if on_backoff:
+            on_backoff(seconds)
+
+    breaker = _Breaker(backoff_s, note_backoff)
 
     def status_payload(state: str, current: str = "") -> dict:
         return {
@@ -530,6 +672,17 @@ def run_sweep(
             # made.
             "unanswered": max(0, planned - result.answered),
             "shard": list(shard) if shard is not None else None,
+            # The run this one carried on from, so a directory holding more
+            # answers than it made searches says where the rest came from.
+            "resumed_from": inherited.name if inherited is not None else None,
+            # Why nothing is happening. The breaker waits out a refusal for up
+            # to fifteen minutes, and until this was written down the page had
+            # no way to tell that from a hung run: same green dot, same
+            # countdown, computed from a constant that knows nothing about it.
+            # Both cleared by the next search that answers, so the notice can
+            # never outlive the wait it describes.
+            "backoff_seconds": backoff["seconds"],
+            "backoff_until": backoff["until"],
             # The focus this sweep searched under, so a narrowed run is never
             # charted as though it had priced the whole window.
             "focus": (
@@ -554,8 +707,9 @@ def run_sweep(
     # launched per worker rather than per search.
     chunks = _chunk(searches, workers)
 
-    log = _JsonlLog(directory / "legs.jsonl")
-    asked = _JsonlLog(directory / "searches.jsonl")
+    mode_ = "a" if inherited is not None else "w"
+    log = _JsonlLog(directory / "legs.jsonl", mode_)
+    asked = _JsonlLog(directory / "searches.jsonl", mode_)
 
     def record(search: LegSearch, legs: list[Leg], error: str | None) -> None:
         label = f"{search.origin}→{search.destination} {search.depart_date}"
@@ -570,6 +724,10 @@ def run_sweep(
                 result.route_errors[route] += 1
             else:
                 result.answered += 1
+                # The wait is over, demonstrably. Leaving this set would keep a
+                # "waiting for the site" banner on screen while the run works.
+                backoff["seconds"] = 0.0
+                backoff["until"] = ""
                 result.legs.extend(legs)
                 result.route_legs[route] += len(legs)
                 log.add([leg.to_dict() for leg in legs])
@@ -610,6 +768,10 @@ def run_sweep(
             """
             outstanding: list[LegSearch] = []
             for index, search in enumerate(searches):
+                # Wait out any pause the breaker has opened, whichever worker
+                # opened it. The throttle is on the client, so one worker
+                # sleeping while another searches is not a pause at all.
+                breaker.hold(stop)
                 # Checked between searches rather than during one: a search
                 # already in flight has to finish or time out, which is why the
                 # UI says "stopping" rather than pretending this is instant.
@@ -621,12 +783,10 @@ def run_sweep(
                 try:
                     legs = _search(provider, session.page(), search, scenario.adults)
                 except SearchTimeout as exc:
-                    wait = breaker.record_timeout()
+                    breaker.record_timeout()
                     outstanding.append(search)
                     if last:
                         record(search, [], str(exc))
-                    if wait is not None:
-                        breaker.wait(wait)
                 except Exception as exc:  # one bad search must not kill the sweep
                     # Retried like a timeout. These used to be recorded and
                     # dropped on the first attempt, so a single transient
@@ -676,6 +836,8 @@ def run_sweep(
         state = "stopped"
     else:
         state = "done" if result.is_healthy else "unhealthy"
+    backoff["seconds"] = 0.0
+    backoff["until"] = ""
     _write_status(directory, status_payload(state))
     return result
 
@@ -693,8 +855,11 @@ class _JsonlLog:
     prove the sweep asked everything it planned to.
     """
 
-    def __init__(self, path: Path):
-        self._handle = path.open("w", encoding="utf-8")
+    def __init__(self, path: Path, mode: str = "w"):
+        # "a" when a resumed run has inherited the earlier run's rows. Opening
+        # for writing would empty the file it was just handed - the flights are
+        # copied in before this runs.
+        self._handle = path.open(mode, encoding="utf-8")
 
     def add(self, rows: list[dict]) -> None:
         for row in rows:
@@ -718,6 +883,31 @@ def _stamp_to_iso(name: str) -> str | None:
         )
     except ValueError:
         return None
+
+
+def answered_searches(directory: Path) -> set[tuple[str, str, str]]:
+    """`(origin, destination, depart_date)` this run got an answer for.
+
+    Read from `searches.jsonl`, which records one row per search whatever the
+    outcome. Only rows that answered count: a row with `answered: false` is a
+    timeout, and a timeout is exactly what a later run should ask again. Skipping
+    every recorded row would make a refusal permanent.
+    """
+    path = Path(directory) / "searches.jsonl"
+    if not path.exists():
+        return set()
+    answered = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            # A row half-written when the process died. It was not answered.
+            continue
+        if row.get("answered"):
+            answered.add((row["origin"], row["destination"], row["depart_date"]))
+    return answered
 
 
 def load_legs(directory: Path) -> list[Leg]:
