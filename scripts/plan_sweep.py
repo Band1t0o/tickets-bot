@@ -56,9 +56,16 @@ def choose(
     - **A starved morning.** Following a sweep the site refused with another is
       the most reliable way to make the day's data worse rather than better.
     """
-    trips = [s for s in load_scenarios(directory) if s.enabled]
+    trips = list(load_scenarios(directory))
     if wanted:
+        # Naming a trip *is* the instruction, so `enabled` does not get a vote
+        # here. It used to: the tick was applied first, and dispatching a trip
+        # that was not in the nightly rotation planned nothing, skipped the
+        # sweep and merge jobs, and reported success in twelve seconds. The tick
+        # answers "does the schedule sweep this", which is the branch below.
         trips = [s for s in trips if s.id == wanted]
+    else:
+        trips = [s for s in trips if s.enabled]
     if watching:
         # Deliberately no health gate. A starved morning is a reason not to
         # sweep the window again - 483 searches against a site that is refusing
@@ -74,6 +81,49 @@ def choose(
             if health_gate_command(s.id, MIN_LEGS_PER_SEARCH, data_dir=data_dir) == 0
         ]
     return [s.id for s in trips]
+
+
+def reason_for_nothing(
+    directory: Path,
+    wanted: str,
+    focused: bool = False,
+    data_dir: Path | str = "data",
+    watching: bool = False,
+) -> str:
+    """Why a dispatch that named a trip planned no work, in one sentence.
+
+    A dispatch that plans nothing is a red run now rather than a green one, and
+    the error it prints has to be worth reading. "Nothing planned" would leave
+    exactly the twelve-second mystery this came from, only in red - so the
+    sentence has to separate "no trip is called that" from "that trip is not
+    doing the thing this slot runs".
+
+    Empty string when there is nothing to explain.
+    """
+    if not wanted or choose(directory, wanted, focused, data_dir, watching):
+        return ""
+
+    known = [s.id for s in load_scenarios(directory)]
+    if wanted not in known:
+        listed = ", ".join(sorted(known)) or "none at all"
+        return (
+            f"No trip is called {wanted!r}. The trips on this branch are: {listed}. "
+            "The cloud sweeps the committed branch, so a trip saved only on your "
+            "machine is not one of them."
+        )
+    if watching:
+        return (
+            f"{wanted!r} is not watching anything, so a watch of it would price "
+            "nothing. Pin some days or follow a flight on the Watch tab first."
+        )
+    if focused:
+        return (
+            f"{wanted!r} has no focus dates, or its morning sweep came back too "
+            "starved to follow with another."
+        )
+    # choose() with a named trip applies no other filter, so anything reaching
+    # here means the planner sized the trip at zero searches.
+    return f"{wanted!r} plans no searches at this depth."
 
 
 def jobs(
@@ -130,6 +180,15 @@ def main() -> None:
     directory = Path(args.scenarios)
     chosen = choose(directory, args.only, args.focused, args.data_dir, args.watching)
     print("scenarios=" + json.dumps(chosen))
+    # Only ever non-empty for a dispatch that named a trip and got nothing for
+    # it. The workflow turns this into a failing job, so the run goes red saying
+    # why instead of green saying nothing.
+    print(
+        "reason="
+        + reason_for_nothing(
+            directory, args.only, args.focused, args.data_dir, args.watching
+        )
+    )
     # One entry per runner, each carrying the count it is a share of. Emitted as
     # a single `include` list rather than as two matrix axes because the count
     # now differs per trip: a cross product of trips and shard indices cannot

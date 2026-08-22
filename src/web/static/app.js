@@ -31,7 +31,7 @@ const state = {
    was lost: the page rendered an empty trip picker and empty charts, which is
    exactly what a deleted database looks like, when in fact nothing on disk had
    changed and the answer was `make ui` again. */
-const EXPECTED_CONTRACT = 8;
+const EXPECTED_CONTRACT = 9;
 
 const api = async (path, options) => {
   const response = await fetch(path, options);
@@ -179,6 +179,7 @@ function showTab(name) {
   if (name === 'results') renderResults();
   if (name === 'prices') { renderPrices(); renderFocusControls(); }
   if (name === 'watch') renderWatch();
+  if (name === 'cloud') renderCloudRuns();
   if (name === 'sources') { renderSources(); renderNotifyTarget(); }
 }
 
@@ -934,6 +935,109 @@ async function refreshExploreCost() {
   $('explore-run-note').textContent = state.exploreCost;
 }
 
+/* ----------------------------------------------------------- cloud runs */
+
+/* What the cloud is doing, has done, and is being held to do.
+
+   The app used to say "Dispatched to GitHub Actions" and stop there. On 22 Aug
+   that sentence covered three runs that swept nothing and went green in twelve
+   seconds, and two cancelled while pending without starting a job - five
+   identical messages for three different outcomes, none of them the one that
+   was wanted.
+
+   `known: false` is drawn as a warning rather than an empty list on purpose: no
+   `gh` means this app cannot see Actions, which is not remotely the same as
+   Actions having stopped. */
+async function renderCloudRuns() {
+  const badge = $('cloud-badge');
+  let body;
+  try {
+    body = await api('/api/cloud-runs');
+  } catch (error) {
+    badge.textContent = error.message;
+    badge.className = 'badge badge--error';
+    return;
+  }
+
+  const slots = body.schedule ?? [];
+  $('cloud-schedule').innerHTML = slots.length
+    ? slots.map((slot) =>
+      '<div class="night-list__row">' +
+      `<span class="night-list__name">${localStamp(slot.next)}</span>` +
+      `<span class="night-list__cost">${slot.focused
+        ? 'only the days pinned on the price chart'
+        : 'the whole date window'}</span></div>`).join('')
+    : '<span class="muted">The schedule could not be read from the workflow file.</span>';
+
+  const warning = $('cloud-unknown');
+  warning.hidden = body.known;
+  if (!body.known) {
+    warning.textContent = `${body.reason} What is scheduled above is read from the ` +
+      'workflow file and is still accurate.';
+  }
+
+  const held = body.queued ?? [];
+  $('cloud-queue').innerHTML = held.length
+    ? held.map((entry) =>
+      '<div class="night-list__row">' +
+      `<span class="night-list__name">${escapeHtml(entry.scenario_id)}` +
+      `${entry.depth ? ` · ${escapeHtml(entry.depth)}` : ''}</span>` +
+      `<span class="night-list__cost">${entry.error
+        ? escapeHtml(entry.error)
+        : 'waiting for the cloud to be free'}</span>` +
+      `<button class="night-list__drop" data-drop="${escapeHtml(entry.scenario_id)}">Drop</button>` +
+      '</div>').join('')
+    : '<span class="muted">Nothing waiting. A run asked for now would go straight out.</span>';
+
+  const runs = body.runs ?? [];
+  $('cloud-runs').innerHTML = runs.length
+    ? runs.map(cloudRunRow).join('')
+    : `<span class="muted">${body.known ? 'No runs yet.' : 'Cannot see the runs.'}</span>`;
+
+  badge.className = body.known ? 'badge badge--muted' : 'badge badge--warning';
+  badge.textContent = !body.known
+    ? 'cannot see Actions'
+    : body.busy
+      ? `running now${held.length ? ` · ${held.length} waiting` : ''}`
+      : held.length ? `${held.length} waiting` : 'idle';
+}
+
+/* One run, said in the terms that were missing. "Success" was true of every run
+   that failed to sweep anything, so it is never the whole line. */
+function cloudRunRow(run) {
+  let verdict = run.conclusion || run.status || 'unknown';
+  let tone = '';
+  if (run.live) {
+    verdict = 'running now';
+  } else if (run.swept_nothing) {
+    verdict = 'swept nothing — finished in seconds';
+    tone = ' is-out';
+  } else if (run.cancelled_while_waiting) {
+    verdict = 'cancelled before it started';
+    tone = ' is-out';
+  } else if (run.conclusion === 'success') {
+    verdict = `swept for ${Math.round((run.seconds ?? 0) / 60)} min`;
+  }
+  const link = run.url
+    ? `<a href="${escapeHtml(run.url)}" target="_blank" rel="noopener">${run.id}</a>`
+    : escapeHtml(String(run.id ?? ''));
+  return `<div class="night-list__row${tone}">` +
+    `<span class="night-list__name">${link} · ${escapeHtml(run.event || '')}` +
+    `${run.created_at ? ` · ${localStamp(run.created_at)}` : ''}</span>` +
+    `<span class="night-list__cost">${escapeHtml(verdict)}</span></div>`;
+}
+
+$('cloud-queue').onclick = async (event) => {
+  const button = event.target.closest('button[data-drop]');
+  if (!button) return;
+  try {
+    await api(`/api/cloud-queue/${button.dataset.drop}`, { method: 'DELETE' });
+  } catch (error) {
+    showError(error.message);
+  }
+  await renderCloudRuns();
+};
+
 /* ---------------------------------------------------------- night sweep */
 
 /* What the scheduled cloud sweep will do tonight, and to which trip.
@@ -1315,18 +1419,41 @@ async function askToStop() {
 
 stopButtons((button) => { button.onclick = askToStop; });
 
+/* "Dispatched to GitHub Actions" used to be the last thing this app ever said
+   about a cloud run, and it said it whether the run swept a trip, swept nothing,
+   or was cancelled ten minutes later without starting a job. Three outcomes, one
+   sentence. Now a run is either refused with a reason, held with a reason, or
+   sent - and the Cloud tab carries it from there. */
 $('run-cloud-btn').onclick = async () => {
   clearError();
   // The cloud reads the trip out of the repo, so an unsaved edit is even
   // further from what would be searched than it is locally.
   if (isDirty() && !(await saveTrip())) return;
+  await dispatchCloudRun(false);
+};
+
+async function dispatchCloudRun(force) {
+  const query = `depth=${$('depth').value}${force ? '&force=true' : ''}`;
   try {
-    await api(`/api/scenarios/${state.scenario.id}/run-cloud?depth=${$('depth').value}`, { method: 'POST' });
-    $('status-text').textContent = 'Dispatched to GitHub Actions';
+    const body = await api(`/api/scenarios/${state.scenario.id}/run-cloud?${query}`,
+      { method: 'POST' });
+    $('status-text').textContent = body.queued
+      ? 'Held until the cloud is free — see the Cloud tab'
+      : 'Dispatched to GitHub Actions';
   } catch (error) {
+    // The refusal is about the branch, and it is worth overriding on purpose:
+    // sweeping the committed version is a real thing to want, as long as the
+    // results are read as being about that version.
+    if (!force && /run it anyway/i.test(error.message)) {
+      if (confirm(`${error.message}
+
+Run it anyway?`)) return dispatchCloudRun(true);
+      $('status-text').textContent = 'Cloud run cancelled';
+      return;
+    }
     showError(error.message);
   }
-};
+}
 
 $('depth').onchange = scheduleEstimate;
 for (const id of ['window-start', 'window-end', 'adults', 'currency', 'trip-name', 'enabled',

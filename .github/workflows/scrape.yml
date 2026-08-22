@@ -55,8 +55,23 @@ on:
 permissions:
   contents: write
 
+# One lane per dispatched trip, and one shared lane for the schedule.
+#
+# It was a single `sweep` group, which is not the queue it looks like: GitHub
+# keeps at most *one* pending run per group and cancels the previously pending
+# one when the next queues. Five dispatches inside five minutes on 22 Aug got
+# one run and two cancellations - runs 32577251585 and 32577483180, both with
+# zero jobs, which is what a pending-cancel looks like. The probe was blamed and
+# could not have been responsible; it has its own group.
+#
+# Two trips at once is safe against the site. The throttle is per runner address
+# - that is the whole finding at the top of this file - and a deep sweep already
+# fans out to five runners in parallel, so this is load the sweep already makes.
+#
+# The schedule keeps sharing one lane so the 02:00 slot still cannot overlap the
+# 13:00 one if it overruns.
 concurrency:
-  group: sweep
+  group: sweep-${{ inputs.scenario || 'schedule' }}
   cancel-in-progress: false
 
 jobs:
@@ -66,6 +81,7 @@ jobs:
       scenarios: ${{ steps.pick.outputs.scenarios }}
       jobs: ${{ steps.pick.outputs.jobs }}
       depth: ${{ steps.pick.outputs.depth }}
+      reason: ${{ steps.pick.outputs.reason }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -89,6 +105,25 @@ jobs:
           # would hand a seven-times bigger plan to one runner.
           python scripts/plan_sweep.py --depth "$DEPTH" --shards "${INPUT_SHARDS:-0}" --only "${INPUT_SCENARIO:-}" $FOCUSED >> "$GITHUB_OUTPUT"
           cat "$GITHUB_OUTPUT"
+
+  # A dispatch that named a trip and planned nothing for it is a failure, and
+  # has to look like one. Three runs on 22 Aug asked for `tokyo-round-trip`,
+  # planned nothing because `choose` filtered it on `enabled` before it read the
+  # name, skipped both jobs below, and reported success in twelve seconds each.
+  #
+  # A separate job rather than `exit 1` inside the plan step: a failed `plan`
+  # leaves `needs.plan.outputs.*` empty, and `merge` runs `if: always()` and
+  # would hand `fromJson('')` an empty string. This way `plan` stays green, the
+  # two jobs below skip exactly as they do now, and the *run* is red.
+  dispatched-nothing:
+    needs: plan
+    if: inputs.scenario != '' && needs.plan.outputs.jobs == '[]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Say why this dispatch swept nothing
+        run: |
+          echo "::error::Dispatched '${{ inputs.scenario }}' but planned no searches. ${{ needs.plan.outputs.reason }}"
+          exit 1
 
   sweep:
     needs: plan

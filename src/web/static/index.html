@@ -61,6 +61,7 @@
       <button data-tab="results">Results</button>
       <button data-tab="prices">Prices</button>
       <button data-tab="watch">Watch</button>
+      <button data-tab="cloud">Cloud</button>
       <button data-tab="sources">Sources</button>
     </div>
 
@@ -500,6 +501,60 @@
     </section>
 
     <!-- ----------------------------------------------------------- Sources -->
+    <!-- ------------------------------------------------------------- Cloud -->
+    <!--
+      What the cloud is doing, has done, and is being held to do.
+
+      Its own tab rather than a corner of Search because it is about the
+      workflow rather than about the trip on screen - Night sweep answers that
+      one. Nothing here was answerable from the app before: dispatching shelled
+      `gh workflow run`, said "Dispatched to GitHub Actions", and forgot the run
+      existed. On 22 Aug that one sentence covered three runs that swept nothing
+      and went green in twelve seconds, and two that were cancelled while
+      pending without starting a single job. All five looked like success.
+    -->
+    <section data-panel="cloud" hidden>
+      <div class="panel">
+        <div class="panel__header">
+          <h2>Scheduled runs</h2>
+          <span class="badge badge--muted" id="cloud-badge">—</span>
+        </div>
+        <p class="panel__hint">
+          GitHub Actions sweeps on its own schedule and commits results back to the repo,
+          whether or not this page is open. This is that schedule, what is going now, and
+          what the last runs actually did.
+        </p>
+        <div id="cloud-schedule" class="small"></div>
+        <div id="cloud-unknown" class="badge badge--warning" hidden></div>
+      </div>
+
+      <!--
+        Runs asked for here and not yet sent. Dispatching while a run is already
+        going leaves the new one pending, and GitHub keeps only one pending run
+        per lane - a third dispatch cancels it outright. Holding them here is
+        what stops that, so the list has to be visible or it is just a delay
+        nobody asked for.
+      -->
+      <div class="panel">
+        <div class="panel__header">
+          <h2>Waiting to be sent</h2>
+        </div>
+        <div id="cloud-queue" class="night-list small"></div>
+        <p class="panel__hint small" style="margin:12px 0 0">
+          A run waits here only while the cloud is busy, and is sent as soon as it is free.
+          The queue lives in this app: close it and these are forgotten. Anything already
+          dispatched is in GitHub and unaffected.
+        </p>
+      </div>
+
+      <div class="panel">
+        <div class="panel__header">
+          <h2>Recent runs</h2>
+        </div>
+        <div id="cloud-runs" class="night-list small"></div>
+      </div>
+    </section>
+
     <section data-panel="sources" hidden>
       <!--
         Webhook first, health second, repairs last - which is the order these

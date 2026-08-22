@@ -2059,3 +2059,140 @@ def test_a_trip_enabled_here_but_not_in_the_cloud_says_that_too(client, tmp_path
     )
     api, _ = client
     assert "whether it runs at all" in trip_named(night(api), "jp-ph")["cloud"]["differs"]
+
+
+# ------------------------------------------------------------------- the cloud
+#
+# Dispatching used to be fire-and-forget: `gh workflow run`, `{"dispatched":
+# true}`, and no idea afterwards. On 22 Aug that hid two different failures at
+# once - three runs that swept nothing and went green, and two cancelled while
+# pending - behind one identical message.
+
+
+@pytest.fixture
+def cloud(monkeypatch):
+    """A cloud that is reachable, idle, and records what it was asked to do."""
+    from src.web import cloud_runs
+
+    cloud_runs._queue.clear()
+    sent: list[tuple] = []
+    monkeypatch.setattr(cloud_runs, "dispatch", lambda *a: sent.append(a))
+    monkeypatch.setattr(cloud_runs, "lane_is_busy", lambda *a: False)
+    monkeypatch.setattr(cloud_runs, "list_runs", lambda *a, **k: [])
+    yield sent
+    cloud_runs._queue.clear()
+
+
+def agreeing(monkeypatch, differs=()):
+    """Make the branch copy of the trip agree, or differ in named ways."""
+    import src.web.app as app_module
+
+    monkeypatch.setattr(app_module, "_fetch_cloud_ref", lambda: None)
+    monkeypatch.setattr(
+        app_module,
+        "_cloud_state",
+        lambda *a: {"known": True, "differs": list(differs), "included": True,
+                    "searches": 66},
+    )
+
+
+def test_a_cloud_run_of_a_committed_trip_is_dispatched(client, cloud, monkeypatch):
+    app, _ = client
+    agreeing(monkeypatch)
+    body = app.post("/api/scenarios/jp-ph/run-cloud?depth=deep").json()
+    assert body["dispatched"] is True
+    assert cloud == [("jp-ph", "deep")]
+
+
+def test_a_cloud_run_is_refused_when_the_branch_holds_a_different_trip(client, cloud, monkeypatch):
+    """The cloud sweeps the branch, not the screen. A whole day was spent
+    reading results of a trip nobody was still planning."""
+    app, _ = client
+    agreeing(monkeypatch, differs=["the airports it searches", "the date window"])
+    response = app.post("/api/scenarios/jp-ph/run-cloud")
+    assert response.status_code == 400
+    assert "the airports it searches" in response.json()["detail"]
+    assert cloud == []
+
+
+def test_a_cloud_run_is_refused_when_the_branch_cannot_be_read(client, cloud, monkeypatch):
+    """Cannot say is not the same as agrees, and must not be dispatched as if
+    it were."""
+    app, _ = client
+    import src.web.app as app_module
+
+    monkeypatch.setattr(app_module, "_fetch_cloud_ref", lambda: None)
+    monkeypatch.setattr(
+        app_module, "_cloud_state",
+        lambda *a: {"known": False, "differs": [], "included": None, "searches": None},
+    )
+    assert app.post("/api/scenarios/jp-ph/run-cloud").status_code == 400
+    assert cloud == []
+
+
+def test_running_it_anyway_dispatches_without_consulting_the_branch(client, cloud, monkeypatch):
+    """The escape hatch has to actually escape, or the gate is a wall."""
+    app, _ = client
+    import src.web.app as app_module
+
+    def must_not_run():
+        raise AssertionError("forced run still went to the network")
+
+    monkeypatch.setattr(app_module, "_fetch_cloud_ref", must_not_run)
+    body = app.post("/api/scenarios/jp-ph/run-cloud?force=true").json()
+    assert body["dispatched"] is True
+    assert cloud == [("jp-ph", None)]
+
+
+def test_a_run_asked_for_while_the_lane_is_busy_is_held_not_fired(client, cloud, monkeypatch):
+    """Dispatching into a busy lane leaves a run pending, and the next dispatch
+    cancels it outright. That is how runs 40 and 41 died."""
+    from src.web import cloud_runs
+
+    app, _ = client
+    agreeing(monkeypatch)
+    monkeypatch.setattr(cloud_runs, "lane_is_busy", lambda *a: True)
+
+    body = app.post("/api/scenarios/jp-ph/run-cloud?depth=deep").json()
+    assert body["queued"] is True
+    assert body["dispatched"] is False
+    assert cloud == []
+    assert [e["scenario_id"] for e in cloud_runs.queued()] == ["jp-ph"]
+
+
+def test_a_held_run_can_be_dropped(client, cloud, monkeypatch):
+    from src.web import cloud_runs
+
+    app, _ = client
+    cloud_runs.enqueue("jp-ph")
+    assert app.delete("/api/cloud-queue/jp-ph").status_code == 200
+    assert app.delete("/api/cloud-queue/jp-ph").status_code == 404
+
+
+def test_the_cloud_listing_says_it_cannot_see_rather_than_showing_nothing(client):
+    """An empty list reads as 'nothing has ever run'. Without `gh` the truth is
+    'this app cannot see Actions', and the schedule is running regardless."""
+    app, _ = client
+    body = app.get("/api/cloud-runs").json()
+    assert body["known"] is False
+    assert body["reason"]
+    assert body["runs"] == []
+    # The crons come out of the workflow file, so they are answerable either way.
+    assert body["schedule"]
+
+
+def test_the_cloud_listing_reports_the_runs_and_what_is_held(client, cloud, monkeypatch):
+    from src.web import cloud_runs
+
+    app, _ = client
+    monkeypatch.setattr(
+        cloud_runs, "list_runs",
+        lambda *a, **k: [{"id": 1, "live": False, "swept_nothing": True,
+                          "status": "completed", "conclusion": "success"}],
+    )
+    cloud_runs.enqueue("jp-ph")
+    body = app.get("/api/cloud-runs").json()
+    assert body["known"] is True
+    assert body["runs"][0]["swept_nothing"] is True
+    assert body["busy"] is False
+    assert [e["scenario_id"] for e in body["queued"]] == ["jp-ph"]

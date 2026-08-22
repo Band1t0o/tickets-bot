@@ -56,6 +56,7 @@ from ..sweep.runner import (
 from ..viability import report as viability_report
 from ..webhook_store import clear_webhook, load_webhook, save_webhook
 from ..webhook_store import mask as mask_webhook
+from . import cloud_runs
 
 SCENARIO_DIR = Path(os.getenv("SCENARIO_DIR", "scenarios"))
 DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
@@ -111,7 +112,7 @@ FORCED_DEPTH = re.compile(r"INPUT_DEPTH:-(\w+)")
 # and 400s for things it needs, and renders them as emptiness - which is
 # indistinguishable from "you have no saved trips". `static/app.js` carries the
 # same number and refuses to render until they match.
-API_CONTRACT = 8
+API_CONTRACT = 9
 
 app = FastAPI(title="Flight scenario watcher")
 
@@ -628,19 +629,102 @@ def stop_run(scenario_id: str) -> dict:
     return {"stopping": True, "scenario_id": scenario_id}
 
 
+def _fetch_cloud_ref() -> None:
+    """Bring `origin/main` up to date before judging the trip against it.
+
+    `_git` is deliberately non-network so rendering the page never blocks on a
+    remote, which means the branch it reads is as old as the last fetch. That is
+    fine for a panel and useless for a gate: this checkout was fifteen commits
+    behind when the gate was written, and a refusal - or worse, a pass - decided
+    against a fortnight-old branch is not an answer. Best effort; a failure here
+    leaves `_cloud_state` reporting what it can, which is handled below.
+    """
+    remote = (_git("remote") or "").split()
+    if remote:
+        _git("fetch", remote[0], "--quiet")
+
+
 @app.post("/api/scenarios/{scenario_id}/run-cloud")
-def run_in_cloud(scenario_id: str, depth: str | None = None) -> dict:
-    _scenario_or_404(scenario_id)
-    command = ["gh", "workflow", "run", "scrape.yml", "-f", f"scenario={scenario_id}"]
-    if depth:
-        command += ["-f", f"depth={depth}"]
+def run_in_cloud(
+    scenario_id: str, depth: str | None = None, force: bool = False
+) -> dict:
+    """Sweep this trip in the cloud, or hold it until the lane is free.
+
+    Two things had to change here. It used to fire and forget - `gh workflow
+    run`, `{"dispatched": true}`, and no idea afterwards whether anything ran -
+    and it dispatched whatever the branch happened to hold, which on 22 Aug was
+    a different trip than the one on screen.
+    """
+    scenario = _scenario_or_404(scenario_id)
+
+    if not force:
+        _fetch_cloud_ref()
+        cloud = _cloud_state(scenario, _night_depth())
+        if not cloud["known"]:
+            raise HTTPException(
+                400,
+                "This app cannot read what is on the branch the cloud sweeps, so it "
+                "cannot tell you whether a cloud run would be about this trip. Check "
+                "the trip is committed and pushed, or run it anyway.",
+            )
+        if cloud["differs"]:
+            raise HTTPException(
+                400,
+                "The cloud sweeps the trip committed to the branch, not the one on this "
+                "screen, and the two differ in "
+                + ", ".join(cloud["differs"])
+                + ". Commit and push this trip first, or run it anyway and read the "
+                "results as being about the branch's version.",
+            )
+
     try:
-        subprocess.run(command, check=True, capture_output=True, text=True, timeout=30)
-    except FileNotFoundError as exc:
-        raise HTTPException(500, "The gh CLI is not installed") from exc
-    except subprocess.CalledProcessError as exc:
-        raise HTTPException(500, f"gh failed: {exc.stderr.strip()}") from exc
-    return {"dispatched": True, "scenario_id": scenario_id}
+        # Dispatching into a lane that is already busy leaves a run pending, and
+        # the next dispatch cancels it. Hold it here instead and send it when the
+        # lane clears - two runs were lost that way on 22 Aug, and nothing said
+        # so.
+        if cloud_runs.lane_is_busy():
+            entry = cloud_runs.enqueue(scenario_id, depth)
+            return {"dispatched": False, "queued": True, "scenario_id": scenario_id, **entry}
+        cloud_runs.dispatch(scenario_id, depth)
+    except cloud_runs.CloudError as exc:
+        raise HTTPException(500, str(exc)) from exc
+    return {"dispatched": True, "queued": False, "scenario_id": scenario_id}
+
+
+@app.get("/api/cloud-runs")
+def cloud_run_listing(limit: int = 12) -> dict:
+    """What the cloud is doing, has done, and is being held to do.
+
+    `known: false` is a real answer here, not an error: without `gh` this app
+    cannot see Actions at all, while the schedule carries on regardless. Drawing
+    an empty list instead would read as "nothing has ever run", which is the
+    kind of confident emptiness this whole panel exists to stop.
+    """
+    try:
+        runs = cloud_runs.list_runs(limit)
+    except cloud_runs.CloudError as exc:
+        return {
+            "known": False,
+            "reason": str(exc),
+            "runs": [],
+            "queued": cloud_runs.queued(),
+            "schedule": _night_schedule(),
+        }
+    return {
+        "known": True,
+        "reason": "",
+        "runs": runs,
+        "queued": cloud_runs.queued(),
+        "schedule": _night_schedule(),
+        "busy": any(run["live"] for run in runs),
+    }
+
+
+@app.delete("/api/cloud-queue/{scenario_id}")
+def drop_from_cloud_queue(scenario_id: str) -> dict:
+    if not cloud_runs.drop(_safe_id(scenario_id)):
+        raise HTTPException(404, f"{scenario_id!r} is not waiting to be dispatched")
+    return {"dropped": scenario_id}
 
 
 def _searched_another_trip(directory: Path, live: Scenario) -> bool:

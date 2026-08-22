@@ -817,6 +817,10 @@ label.field > select { font-weight: 400; color: var(--color-formInputText); }
 /* Dimmed rather than dropped, and it still carries its cost: the question a
    left-out trip raises is "what would it cost to put it back in". */
 .night-list__row.is-out .night-list__name { text-decoration: line-through; }
+
+/* The Cloud tab reuses `night-list` for its three lists. Its rows carry a
+   control, which the night sweep's do not. */
+.night-list__drop { padding: 2px 10px; font-size: 0.85em; }
 .night-list__row.is-out { opacity: 0.6; }
 
 #night-cloud { display: block; margin-top: 12px; max-width: 80ch; }

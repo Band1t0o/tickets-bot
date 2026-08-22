@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from datetime import timedelta
 
-from scripts.plan_sweep import choose, jobs
+from scripts.plan_sweep import choose, jobs, reason_for_nothing
 from src.scenario import save_scenario
 from tests.conftest import WINDOW_START, make_scenario
 
@@ -230,3 +230,61 @@ def test_every_job_of_a_trip_agrees_on_the_count(tmp_path):
 
 def test_no_trips_means_no_jobs(tmp_path):
     assert jobs(trips(tmp_path), []) == []
+
+
+# ------------------------------------------------- what a dispatch is allowed to
+#
+# The `enabled` tick answers "does the *schedule* sweep this trip". It was being
+# read as "may this trip be swept at all": `choose` filtered on it before it
+# looked at the trip the dispatch named, so asking for a trip that was not in the
+# nightly rotation planned nothing, the workflow skipped its sweep and merge, and
+# the run went green in twelve seconds having done nothing. Three of those were
+# spent before anyone looked at the plan step's output.
+
+
+def test_a_dispatch_sweeps_the_trip_it_names_even_when_it_is_not_in_the_rotation(tmp_path):
+    """Naming a trip is the instruction. The tick is about the schedule."""
+    directory = trips(tmp_path, make_scenario(id="off", enabled=False))
+    assert choose(directory, wanted="off") == ["off"]
+
+
+def test_the_schedule_still_leaves_an_unticked_trip_alone(tmp_path):
+    """The other half of the same rule, so the tick cannot become decoration."""
+    directory = trips(
+        tmp_path,
+        make_scenario(id="on", enabled=True),
+        make_scenario(id="off", enabled=False),
+    )
+    assert choose(directory) == ["on"]
+
+
+def test_a_dispatch_can_watch_a_trip_that_is_not_in_the_rotation(tmp_path):
+    directory = trips(tmp_path, watching(id="off", enabled=False))
+    assert choose(directory, wanted="off", watching=True, data_dir=tmp_path / "data") == ["off"]
+
+
+# ------------------------------------------------------- saying why it planned
+#
+# A dispatch that plans nothing is now a red run rather than a green one, and the
+# error it prints has to be worth reading: "nothing planned" would leave the same
+# twelve-second mystery, just in red.
+
+
+def test_a_dispatch_that_named_an_unknown_trip_says_so(tmp_path):
+    directory = trips(tmp_path, make_scenario(id="real"))
+    reason = reason_for_nothing(directory, "typo")
+    assert "typo" in reason
+    assert "real" in reason
+
+
+def test_a_dispatch_of_a_trip_with_nothing_to_watch_says_that_instead(tmp_path):
+    """It exists and it was named, so the id is not the problem - the mode is."""
+    directory = trips(tmp_path, make_scenario(id="plain"))
+    reason = reason_for_nothing(directory, "plain", watching=True)
+    assert "plain" in reason
+    assert "watch" in reason.lower()
+
+
+def test_nothing_to_explain_when_the_dispatch_planned_something(tmp_path):
+    directory = trips(tmp_path, make_scenario(id="real"))
+    assert reason_for_nothing(directory, "real") == ""

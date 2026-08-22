@@ -49,6 +49,29 @@ def no_real_webhook(tmp_path_factory, monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def no_real_gh(monkeypatch):
+    """No test may shell out to `gh`, for every test at once.
+
+    Same reasoning as `no_real_webhook` above: closed here rather than at the
+    call sites, because the next test to forget is the one nobody will think to
+    check. Two ways in, and the second is the quiet one - `cloud_runs.enqueue`
+    starts a daemon thread that polls `gh run list` until the lane clears, so a
+    test that merely queues something would poll a real GitHub in the background
+    for as long as the suite ran.
+
+    A test proving cloud behaviour monkeypatches `_gh` itself; those run after
+    this and win.
+    """
+    from src.web import cloud_runs
+
+    def refuse(*args, **kwargs):
+        raise cloud_runs.CloudError("gh is not available in tests")
+
+    monkeypatch.setattr(cloud_runs, "_gh", refuse)
+    monkeypatch.setattr(cloud_runs, "_start_worker", lambda: None)
+
+
 def make_scenario(**overrides) -> Scenario:
     """A two-stop trip: origins -> stop 1 -> stop 2 -> home."""
     defaults = dict(
