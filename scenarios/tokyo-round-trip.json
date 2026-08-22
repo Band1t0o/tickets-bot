@@ -2,39 +2,32 @@
   "id": "tokyo-round-trip",
   "name": "Tokyo round trip",
   "origins": [
-    "VIE",
-    "PRG",
-    "FRA",
-    "BER",
-    "KRK",
-    "KTW",
-    "MUC"
+    "VIE"
   ],
   "stops": [
     {
       "label": "Japan",
       "airports": [
-        "NRT",
         "HND",
-        "KIX"
+        "NRT"
       ],
       "stay_days": [
-        16,
-        21
+        17,
+        25
       ],
       "overland": false,
       "arrive_via": null,
       "depart_via": null
     }
   ],
-  "window_start": "2027-01-05",
-  "window_end": "2027-02-08",
+  "window_start": "2027-01-08",
+  "window_end": "2027-02-05",
   "return_to": null,
   "one_way": false,
   "focus_start": null,
   "focus_end": null,
   "adults": 1,
-  "depth": "quick",
+  "depth": "deep",
   "currency": "CZK",
   "alert_threshold": null,
   "bag_estimate": 1500,
