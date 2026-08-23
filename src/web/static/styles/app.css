@@ -852,6 +852,18 @@ label.field > select { font-weight: 400; color: var(--color-formInputText); }
 }
 .narrow-grid input[type="number"] { width: 70px; }
 
+/* A sentence, not a chip - `.badge` is `nowrap` and this one has to wrap.
+   Tightening a stay is the only edit in this step that cannot be undone by
+   reading the same legs another way, so it is said at length. */
+#narrow-stays-alert {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  max-width: 68ch;
+  background: var(--color-warningBackground);
+  color: var(--color-warningText);
+}
+
 /* Every leg scrolls in one container rather than three.
 
    Three scrollers would each start at their own offset the moment one was

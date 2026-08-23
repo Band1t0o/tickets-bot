@@ -234,9 +234,10 @@
           <span class="badge badge--muted" id="narrow-state">the whole window</span>
         </div>
         <p class="panel__hint">
-          Three constraints, not one. The sweep intersects them, so the searches go where the
-          decision already is — and a combination that none of them can satisfy is refused here
-          rather than swept for an hour and found empty.
+          Not a second sweep and not a filter: this is what the nightly run searches. Three
+          constraints, intersected — so the searches go where the decision already is, and a
+          combination none of them can satisfy is refused here rather than swept for an hour
+          and found empty. Legs already on disk stay readable both ways, under the table below.
         </p>
         <div class="narrow-grid">
           <label>Leave between
@@ -262,6 +263,15 @@
             </span>
           </label>
         </div>
+        <h3 class="muted small" style="margin-top:20px">How long in each place</h3>
+        <p class="panel__hint small">
+          The shape of the trip rather than a narrowing, and the reason the band above stops
+          where it does. Tightening one is the edit here with no undo: those stays stop being
+          searched, and trips already on disk that use them leave the table too. A 9–11 rule
+          here once threw away a real 12-day Japan stay.
+        </p>
+        <div class="narrow-grid" id="narrow-stays"></div>
+        <p class="small" id="narrow-stays-alert" hidden></p>
         <p class="panel__hint small" id="narrow-cost"></p>
         <div class="row" style="margin-top:12px">
           <button class="small primary" id="narrow-save">Save</button>

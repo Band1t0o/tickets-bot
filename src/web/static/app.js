@@ -3646,24 +3646,117 @@ function renderNarrowFields() {
   badge.className = `badge badge--${parts.length ? 'good' : 'muted'}`;
   badge.textContent = parts.length ? parts.join(' · ') : 'the whole window';
 
+  renderNarrowStays();
+  refreshStayDerived();
+  renderWidenOffer();
+}
+
+/* ------------------------------------------------------------- the stays --
+
+   Not part of the narrowing, and deliberately below it under their own
+   heading. The narrowing chooses inside the trip and clears cleanly; a stay
+   range is the trip, and tightening one cannot be undone by reading the same
+   legs another way — `combine._stay_ok` runs whatever `?window=` says, so the
+   itineraries it excludes leave the table as well as the plan. They are here
+   because the band above cannot exceed them and the panel could not say so
+   while they lived a step away behind the gear. */
+
+function narrowStayStops() {
+  // The stops that bound how long you are away: the same slice
+  // `_stay_breakdown` names on the server, so the boxes and the sentence about
+  // them agree. Nothing has to happen after a one-way chain's final leg
+  // departs, so its last stop bounds nothing and a box for it would be a
+  // control with no effect.
+  const s = state.scenario || {};
+  const stops = s.stops || [];
+  return stops.slice(0, Math.max(0, stops.length - (s.one_way ? 1 : 0)));
+}
+
+function renderNarrowStays() {
+  const host = $('narrow-stays');
+  host.innerHTML = '';
+  narrowStayStops().forEach((stop, index) => {
+    const label = document.createElement('label');
+    // A stop's label is typed by whoever made the trip, so it is a text node
+    // rather than markup, like every other name this page prints.
+    label.textContent = stop.label || `Stop ${index + 1}`;
+    const row = document.createElement('span');
+    row.className = 'row';
+    const fields = [0, 1].map((slot) => {
+      const field = document.createElement('input');
+      field.type = 'number';
+      field.min = '1';
+      field.max = '365';
+      field.step = '1';
+      field.dataset.stay = String(index);
+      field.dataset.slot = String(slot);
+      field.value = stop.stay_days[slot];
+      field.onchange = () => { refreshStayDerived(); refreshNarrowCost(); };
+      return field;
+    });
+    const to = document.createElement('span');
+    to.className = 'small muted';
+    to.textContent = 'to';
+    const nights = document.createElement('span');
+    nights.className = 'small muted';
+    nights.textContent = 'nights';
+    row.append(fields[0], to, fields[1], nights);
+    label.append(row);
+    host.append(label);
+  });
+}
+
+function staysFromFields() {
+  // The saved stops carrying whatever is in the boxes. Copied rather than
+  // mutated: `state.scenario` is what a failed save falls back to, and editing
+  // it in place would make a refusal look like it had taken.
+  const stops = ((state.scenario || {}).stops || []).map((stop) => ({
+    ...stop,
+    stay_days: [...stop.stay_days],
+  }));
+  for (const field of $('narrow-stays').querySelectorAll('input[data-stay]')) {
+    const stop = stops[Number(field.dataset.stay)];
+    if (stop && field.value !== '') {
+      stop.stay_days[Number(field.dataset.slot)] = Number(field.value);
+    }
+  }
+  return stops;
+}
+
+function refreshStayDerived() {
+  const stops = staysFromFields();
+  const counted = stops.slice(0, narrowStayStops().length);
+
   // What the stays make reachable at all, next to the box you type the band
   // into — so an impossible number is obvious before it is saved rather than
-  // after the save is refused.
-  //
-  // From the trip on screen, never from the sweep being read. `validate()`
-  // judges the box against the live stays, so a hint taken from a sweep run
-  // under older ones can name a range the save then refuses.
-  const stops = (s.stops || []).slice(0, Math.max(0, (s.stops || []).length - (s.one_way ? 1 : 0)));
+  // after the save is refused. Read off the boxes above rather than off the
+  // saved trip, or it would keep naming the range you had just changed.
   const hint = $('narrow-nights-hint');
-  if (stops.length) {
-    const low = stops.reduce((n, stop) => n + stop.stay_days[0], 0);
-    const high = stops.reduce((n, stop) => n + stop.stay_days[1], 0);
-    hint.textContent = `the stays allow ${low}–${high}`;
-  } else {
-    hint.textContent = '';
-  }
+  hint.textContent = counted.length
+    ? `the stays allow ${counted.reduce((n, stop) => n + stop.stay_days[0], 0)}–` +
+      `${counted.reduce((n, stop) => n + stop.stay_days[1], 0)}`
+    : '';
 
-  renderWidenOffer();
+  // Widening costs searches, and the estimate under this row already says how
+  // many. Tightening costs trips, silently, and nothing else on the page would
+  // mention it: this scenario's own notes record a 9-11 rule here throwing away
+  // a real 12-day Japan stay.
+  const saved = (state.scenario || {}).stops || [];
+  const tightened = counted
+    .map((stop, index) => [stop, saved[index]])
+    .filter(([now, was]) => was && (
+      now.stay_days[0] > was.stay_days[0] || now.stay_days[1] < was.stay_days[1]
+    ))
+    .map(([now, was]) => `${now.label || 'a stop'} ${was.stay_days[0]}–${was.stay_days[1]} → ` +
+      `${now.stay_days[0]}–${now.stay_days[1]}`);
+
+  const alert = $('narrow-stays-alert');
+  alert.hidden = tightened.length === 0;
+  alert.textContent = tightened.length
+    ? `Tighter than what is saved: ${tightened.join('; ')}. Not a narrowing you can untick — ` +
+      'those stays stop being searched, and trips already on disk that use them leave the ' +
+      'table as well.'
+    : '';
 }
 
 function narrowFromFields() {
@@ -3676,6 +3769,11 @@ function narrowFromFields() {
     return_focus_start: value('narrow-back-start'),
     return_focus_end: value('narrow-back-end'),
     total_days: min !== '' && max !== '' ? [Number(min), Number(max)] : null,
+    // Priced and saved with the rest, so the estimate under the boxes is of the
+    // trip in them and one Save writes the whole panel. A stay change written
+    // separately would leave a nights band briefly claiming a span its stays no
+    // longer reach, which `validate` refuses.
+    stops: staysFromFields(),
   };
 }
 
@@ -3691,8 +3789,12 @@ async function refreshNarrowCost() {
       api(`/api/scenarios/${state.scenario.id}/estimate?depth=deep`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        // The same trip with the narrowing off, not the saved one. The
+        // sentence claims the two numbers differ by the narrowing, and a
+        // baseline built from the saved stays would not move when a stay does -
+        // so widening a stay would report as costing nothing at all.
         body: JSON.stringify({
-          ...state.scenario,
+          ...trip,
           focus_start: null, focus_end: null,
           return_focus_start: null, return_focus_end: null, total_days: null,
         }),
@@ -3726,6 +3828,11 @@ async function saveNarrowing(fields) {
       body: JSON.stringify({ ...state.scenario, ...fields }),
     });
     renderNarrowFields();
+    // This panel now writes fields the trip's own form holds a draft of - the
+    // window, when widening, and the stays. `route` is that draft and it is
+    // filled once on load, so without this it keeps the values from before the
+    // save and the next Save over in the setup step quietly puts them back.
+    fillForm(state.scenario);
     message.textContent = narrowSaved()
       ? 'Saved. Tonight’s sweep prices this.'
       : 'Cleared. Back to the whole window.';

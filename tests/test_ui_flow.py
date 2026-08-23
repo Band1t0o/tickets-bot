@@ -2522,6 +2522,94 @@ def test_nothing_offers_to_widen_a_window_that_already_fits(ui):
     assert not errors
 
 
+def stay_box(page, index, slot):
+    return page.locator(f'#narrow-stays input[data-stay="{index}"][data-slot="{slot}"]')
+
+
+def test_the_stays_are_editable_where_they_are_quoted(ui):
+    """The ceiling on the nights band was a step away behind the gear.
+
+    "the stays allow 18-22" is computed from the stop ranges, so a band typed
+    past it does nothing and the panel could not say why - the number that
+    refuses you was not a number you could reach from here.
+    """
+    page, scenarios, errors = ui
+    page.reload(wait_until="networkidle")
+    open_narrow(page)
+
+    assert page.locator("#narrow-stays input[data-stay]").count() == 4
+    assert "18–22" in page.locator("#narrow-nights-hint").inner_text()
+
+    stay_box(page, 0, 1).fill("13")
+    page.locator("#narrow-nights-hint").click()  # blur, to fire onchange
+    page.wait_for_timeout(600)
+
+    # Live off the boxes, not off the saved trip, or it keeps naming the range
+    # you have just changed.
+    assert "18–24" in page.locator("#narrow-nights-hint").inner_text()
+    # Widening is a bigger sweep and nothing else here would say so.
+    assert page.locator("#narrow-stays-alert").is_hidden()
+
+    page.locator("#narrow-save").click()
+    page.wait_for_timeout(900)
+
+    saved = json.loads((scenarios / "jp-ph.json").read_text(encoding="utf-8"))
+    assert saved["stops"][0]["stay_days"] == [9, 13]
+    assert not errors
+
+
+def test_tightening_a_stay_says_what_it_costs(ui):
+    """Widening costs searches, which the estimate reports. Tightening costs
+    trips, silently: `combine._stay_ok` runs whatever `?window=` says, so the
+    itineraries it excludes leave the table as well as the plan, and no tick
+    brings them back. This scenario's own notes record a 9-11 rule here
+    throwing away a real 12-day Japan stay."""
+    page, scenarios, errors = ui
+    page.reload(wait_until="networkidle")
+    open_narrow(page)
+
+    stay_box(page, 0, 0).fill("10")
+    page.locator("#narrow-nights-hint").click()
+    page.wait_for_timeout(600)
+
+    alert = page.locator("#narrow-stays-alert")
+    assert alert.is_visible()
+    assert "Japan 9–11 → 10–11" in alert.inner_text(), alert.inner_text()
+    # A warning, never a block.
+    assert page.locator("#narrow-save").is_enabled()
+    assert not errors
+
+
+def test_a_trip_field_written_here_is_not_undone_by_the_setup_form(ui):
+    """The setup step holds a draft of the trip, filled once on load.
+
+    This panel now writes two of its fields - the window, when widening, and
+    the stays - so a stale draft over there would put them back on its next
+    Save, with nothing on screen to say a save had been reverted.
+    """
+    page, scenarios, errors = ui
+    page.reload(wait_until="networkidle")
+    open_narrow(page)
+
+    page.fill("#narrow-back-start", "2027-02-04")
+    page.fill("#narrow-back-end", "2027-02-12")
+    page.wait_for_timeout(600)
+    page.locator("#narrow-widen").click()
+    page.wait_for_timeout(900)
+
+    page.locator('#tabs button[data-tab="map"]').click()
+    page.wait_for_timeout(400)
+    assert page.locator("#window-end").input_value() == "2027-02-12"
+
+    page.locator("#save-btn").click()
+    page.wait_for_timeout(900)
+
+    saved = json.loads((scenarios / "jp-ph.json").read_text(encoding="utf-8"))
+    assert saved["window_end"] == "2027-02-12"
+    assert saved["return_focus_end"] == "2027-02-12"
+    assert not errors
+
+
 def test_following_a_rule_breaking_pick_still_works(ui):
     """A watch prices the dates it is given; the stay ranges never governed it."""
     page, scenarios, errors = ui
