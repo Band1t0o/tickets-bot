@@ -299,6 +299,18 @@
           <h2>Sweep</h2>
           <select id="sweep-select"></select>
         </div>
+        <!--
+          Runs the cloud has committed to the branch that are not on this
+          machine. The picker above lists directories on disk, and the sweep
+          commits to git: on 22 Aug a deep run of 64 searches and 638 flights
+          finished, committed, and never appeared here. The picker looked
+          exactly as it does when there is genuinely nothing new, which is why
+          this is a count on the screen and not a line in a log.
+        -->
+        <div class="notice notice--warning cloud-sync" id="cloud-sync" hidden>
+          <span id="cloud-sync-text"></span>
+          <button class="small" id="cloud-sync-get">Get them</button>
+        </div>
         <div class="stat-row" id="headline"></div>
         <!-- Only drawn when the sweep behind these prices had holes in it. -->
         <div class="notice notice--warning" id="completeness" hidden></div>
@@ -545,6 +557,22 @@
           The queue lives in this app: close it and these are forgotten. Anything already
           dispatched is in GitHub and unaffected.
         </p>
+      </div>
+
+      <div class="panel">
+        <div class="panel__header">
+          <h2>Results on this machine</h2>
+        </div>
+        <p class="panel__hint">
+          A finished run commits its results to the branch. This app reads them off the
+          disk, so until the checkout is brought forward they exist and are invisible -
+          which is exactly what happened to three runs on 22 Aug.
+        </p>
+        <div class="notice notice--warning cloud-sync" id="cloud-sync-cloud" hidden>
+          <span id="cloud-sync-cloud-text"></span>
+          <button class="small" id="cloud-sync-cloud-get">Get them</button>
+        </div>
+        <div class="small muted" id="cloud-sync-ok" hidden></div>
       </div>
 
       <div class="panel">

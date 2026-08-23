@@ -2196,3 +2196,85 @@ def test_the_cloud_listing_reports_the_runs_and_what_is_held(client, cloud, monk
     assert body["runs"][0]["swept_nothing"] is True
     assert body["busy"] is False
     assert [e["scenario_id"] for e in body["queued"]] == ["jp-ph"]
+
+
+# --------------------------------------------------- results on this machine
+
+
+def test_the_sync_endpoint_says_it_cannot_tell_rather_than_nothing_missing(client):
+    """Without git this cannot see the branch, and must not imply completeness.
+
+    The whole point of the panel is that "no runs missing" and "cannot check"
+    look different. Answering 200 with a zero count for both would rebuild the
+    blind spot it was written to remove.
+    """
+    app, _ = client
+    body = app.get("/api/cloud-sync").json()
+    assert body["known"] is False
+    assert body["reason"]
+    assert body["missing_count"] == 0
+    assert body["can_fast_forward"] is False
+
+
+def test_reading_the_sync_state_never_waits_on_the_network(client, monkeypatch):
+    """Drawing the page must not block on a remote - the rule since `_git`.
+
+    A synchronous fetch here would put a laptop that is briefly offline between
+    the user and the Results tab, on every load.
+    """
+    from src.web import branch_sync
+
+    def must_not_run():
+        raise AssertionError("the read path fetched synchronously")
+
+    monkeypatch.setattr(branch_sync, "fetch", must_not_run)
+    app, _ = client
+    assert app.get("/api/cloud-sync").status_code == 200
+
+
+def test_a_refused_sync_is_409_carrying_the_reason_verbatim(client, monkeypatch):
+    """A checkout with its own commits is not a broken app.
+
+    409, not 500, and git's own sentence rather than a summary of it: when git
+    refuses it names the files, and that is the only part worth reading.
+    """
+    from src.web import branch_sync
+
+    monkeypatch.setattr(
+        branch_sync, "pull",
+        lambda *a: {"synced": False, "reason": "Your local changes to src/web/app.py "
+                                               "would be overwritten", "gained": {}},
+    )
+    response = client[0].post("/api/cloud-sync")
+    assert response.status_code == 409
+    assert "src/web/app.py" in response.json()["detail"]
+
+
+def test_a_sync_that_brought_runs_across_reports_them(client, monkeypatch):
+    from src.web import branch_sync
+
+    monkeypatch.setattr(
+        branch_sync, "pull",
+        lambda *a: {"synced": True, "reason": "", "commits": 7,
+                    "gained": {"jp-ph": ["2026-08-22T20-30-46Z"]}},
+    )
+    body = client[0].post("/api/cloud-sync").json()
+    assert body["synced"] is True
+    assert body["gained"]["jp-ph"] == ["2026-08-22T20-30-46Z"]
+
+
+def test_the_branch_is_asked_about_every_saved_trip_not_only_swept_ones(client, monkeypatch):
+    """A trip whose runs are *all* still on the branch has no directory here.
+
+    Listing the trips to ask about from the sweeps on disk would leave that trip
+    out of exactly the case this exists for.
+    """
+    from src.web import branch_sync
+
+    asked = []
+    monkeypatch.setattr(
+        branch_sync, "state",
+        lambda data_dir, ids: asked.append(ids) or {"known": True, "missing_count": 0},
+    )
+    client[0].get("/api/cloud-sync")
+    assert asked and "jp-ph" in asked[0]

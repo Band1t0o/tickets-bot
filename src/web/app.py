@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import subprocess
 import threading
 from dataclasses import asdict, replace
 from datetime import UTC, date, datetime, timedelta
@@ -56,7 +55,7 @@ from ..sweep.runner import (
 from ..viability import report as viability_report
 from ..webhook_store import clear_webhook, load_webhook, save_webhook
 from ..webhook_store import mask as mask_webhook
-from . import cloud_runs
+from . import branch_sync, cloud_runs
 
 SCENARIO_DIR = Path(os.getenv("SCENARIO_DIR", "scenarios"))
 DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
@@ -83,9 +82,10 @@ SAFE_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # is the cheap guard that needs no planner; this is the one that actually binds.
 WATCH_SEARCH_CAP = 110
 
-# The branch the scheduled sweep runs from. Read from the last fetch rather than
-# over the network, so opening the page never waits on a remote.
-CLOUD_REF = os.getenv("CLOUD_REF", "origin/main")
+# The branch the scheduled sweep runs from, and commits its results to. Defined
+# in `branch_sync` because that module both reads it and fast-forwards onto it;
+# two copies of a ref name is exactly the drift this app keeps being bitten by.
+CLOUD_REF = branch_sync.CLOUD_REF
 
 # The workflow is the authority on its own schedule, so the panel reads it there
 # instead of restating it. `parents[2]` is the repo root: this file is
@@ -112,7 +112,7 @@ FORCED_DEPTH = re.compile(r"INPUT_DEPTH:-(\w+)")
 # and 400s for things it needs, and renders them as emptiness - which is
 # indistinguishable from "you have no saved trips". `static/app.js` carries the
 # same number and refuses to render until they match.
-API_CONTRACT = 9
+API_CONTRACT = 10
 
 app = FastAPI(title="Flight scenario watcher")
 
@@ -246,20 +246,10 @@ def get_scenario(scenario_id: str) -> dict:
 # not the trip on this screen.**
 
 
-def _git(*args: str) -> str | None:
-    """Run a read-only git command, or None if it cannot be answered.
-
-    Never raises. A repo without a remote, a checkout without git, a stale
-    fetch: all of them mean "cannot say", and a panel that cannot say must say
-    that rather than claim the trip matches.
-    """
-    try:
-        done = subprocess.run(
-            ["git", *args], capture_output=True, text=True, timeout=10
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return done.stdout if done.returncode == 0 else None
+# One git boundary for the whole app, in `branch_sync`. It was written twice -
+# once here to compare trips, once there to bring results across - and a second
+# copy of "never raises, cannot-say is an answer" is a second copy to get wrong.
+_git = branch_sync.git
 
 
 def _cloud_scenario(scenario_id: str) -> Scenario | None:
@@ -639,9 +629,7 @@ def _fetch_cloud_ref() -> None:
     against a fortnight-old branch is not an answer. Best effort; a failure here
     leaves `_cloud_state` reporting what it can, which is handled below.
     """
-    remote = (_git("remote") or "").split()
-    if remote:
-        _git("fetch", remote[0], "--quiet")
+    branch_sync.fetch()
 
 
 @app.post("/api/scenarios/{scenario_id}/run-cloud")
@@ -718,6 +706,49 @@ def cloud_run_listing(limit: int = 12) -> dict:
         "schedule": _night_schedule(),
         "busy": any(run["live"] for run in runs),
     }
+
+
+def _known_trips() -> list[str]:
+    """Every trip this app knows about, for the branch to be asked about.
+
+    Read from the scenario files rather than from the sweeps on disk: a trip
+    whose runs are *all* still on the branch has no local directory at all, and
+    listing from disk would leave it out of exactly the case this exists for.
+    """
+    scenarios, _ = read_scenarios(SCENARIO_DIR)
+    return [scenario.id for scenario in scenarios]
+
+
+@app.get("/api/cloud-sync")
+def cloud_sync_state() -> dict:
+    """Which cloud results are on the branch but not on this machine.
+
+    The sweep commits to the branch and this app lists the working tree, and
+    nothing joined the two: on 22 Aug a deep run of 64 searches and 638 flights
+    finished, committed, and never appeared here, behind a picker that looked
+    exactly like a picker with nothing to show. A count that can be wrong is
+    worth having; an emptiness that cannot be questioned is not.
+
+    Reads the last fetch and refreshes it on a background thread when it has
+    gone stale, so drawing the page never waits on a remote - the rule `_git`
+    has followed since it was written.
+    """
+    branch_sync.fetch_in_background()
+    return branch_sync.state(DATA_DIR, _known_trips())
+
+
+@app.post("/api/cloud-sync")
+def cloud_sync_pull() -> dict:
+    """Bring the branch's results onto this machine, by fast-forward only.
+
+    409 rather than 500 when it refuses: a checkout with its own commits is not
+    a broken app, it is a state only the person sitting here can resolve, and
+    the reason is written to be shown to them verbatim.
+    """
+    result = branch_sync.pull(DATA_DIR, _known_trips())
+    if not result["synced"] and result["reason"]:
+        raise HTTPException(409, result["reason"])
+    return result
 
 
 @app.delete("/api/cloud-queue/{scenario_id}")

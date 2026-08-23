@@ -173,6 +173,19 @@ tr.is-outside { opacity: 0.6; }
 }
 .notice--warning button { margin-top: 10px; }
 
+/* The count of cloud runs not on this machine, and the button that fetches
+   them. Inline rather than stacked: it sits directly under the sweep picker it
+   is correcting, and a full-height warning block there would push the prices
+   off the screen every time a night sweep landed. */
+.cloud-sync {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+}
+.cloud-sync button { margin-top: 0; flex: none; }
+
 .notice h2 { margin: 0 0 8px; font-size: 16px; }
 .notice p  { margin: 0 0 10px; max-width: 80ch; }
 .notice code {

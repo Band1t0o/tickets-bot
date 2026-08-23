@@ -72,6 +72,35 @@ def no_real_gh(monkeypatch):
     monkeypatch.setattr(cloud_runs, "_start_worker", lambda: None)
 
 
+@pytest.fixture(autouse=True)
+def no_real_git(monkeypatch):
+    """No test may run git against the real checkout, for every test at once.
+
+    Same reasoning as `no_real_gh` above, and a sharper edge. The suite runs from
+    the repo root, so `branch_sync` would find the actual repository - and unlike
+    `gh`, one of its calls *writes*: `pull` fast-forwards the working tree. A
+    test that merely hit `POST /api/cloud-sync` could move the developer's
+    checkout out from under them mid-session, and a test that hit the GET would
+    fetch from GitHub on every run.
+
+    Refused at `_run`, which is the single place every git call goes through, so
+    a new helper added later is covered without anyone remembering to.
+
+    A test proving branch behaviour builds its own repository in `tmp_path` and
+    monkeypatches `_run` back to the real thing with a `cwd`; those run after
+    this and win.
+    """
+    from src.web import branch_sync
+
+    def refuse(*args, **kwargs):
+        return 127, "", "git is not available in tests"
+
+    monkeypatch.setattr(branch_sync, "_run", refuse)
+    # The background fetch is the quiet one: it is a daemon thread, so a refusal
+    # inside it would be swallowed rather than failing the test that caused it.
+    monkeypatch.setattr(branch_sync, "fetch_in_background", lambda force=False: False)
+
+
 def make_scenario(**overrides) -> Scenario:
     """A two-stop trip: origins -> stop 1 -> stop 2 -> home."""
     defaults = dict(

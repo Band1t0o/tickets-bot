@@ -31,7 +31,7 @@ const state = {
    was lost: the page rendered an empty trip picker and empty charts, which is
    exactly what a deleted database looks like, when in fact nothing on disk had
    changed and the answer was `make ui` again. */
-const EXPECTED_CONTRACT = 9;
+const EXPECTED_CONTRACT = 10;
 
 const api = async (path, options) => {
   const response = await fetch(path, options);
@@ -176,10 +176,10 @@ function showTab(name) {
     section.hidden = section.dataset.panel !== name;
   }
   if (name === 'explore') renderExplore();
-  if (name === 'results') renderResults();
+  if (name === 'results') { renderResults(); renderCloudSync(); }
   if (name === 'prices') { renderPrices(); renderFocusControls(); }
   if (name === 'watch') renderWatch();
-  if (name === 'cloud') renderCloudRuns();
+  if (name === 'cloud') { renderCloudRuns(); renderCloudSync(); }
   if (name === 'sources') { renderSources(); renderNotifyTarget(); }
 }
 
@@ -1027,6 +1027,102 @@ function cloudRunRow(run) {
     `<span class="night-list__cost">${escapeHtml(verdict)}</span></div>`;
 }
 
+/* ------------------------------------------------- results on this machine */
+
+/* Cloud runs that are on the branch and not on this disk.
+
+   The Results picker lists directories; the sweep commits to git. Nothing joined
+   the two, so on 22 Aug a finished deep run - 64 searches, 638 flights, coverage
+   1.0 - sat on the branch while the picker showed the previous day and gave no
+   sign that anything was elsewhere. An empty picker and a picker missing three
+   runs looked identical, which is the same failure the Cloud tab above exists to
+   end: a thing that worked, and no way on screen to tell.
+
+   Shown as a count of *runs*, never of commits. The probe commits every two
+   hours, so "6 commits behind" was three sweeps and three observations, and only
+   one of those numbers is the one being asked about. */
+async function renderCloudSync() {
+  let body;
+  try {
+    body = await api('/api/cloud-sync');
+  } catch (error) {
+    body = { known: false, reason: error.message, missing_count: 0 };
+  }
+  const missing = body.missing_count ?? 0;
+  // `known: false` is drawn, not hidden. "Cannot tell" and "nothing missing"
+  // are different answers and only one of them means the picker is complete.
+  const show = missing > 0 || !body.known;
+  const message = !body.known
+    ? body.reason
+    : `${missing} cloud ${missing === 1 ? 'run is' : 'runs are'} on the branch ` +
+      'but not on this machine' + describeMissing(body.missing) + '.' +
+      (body.can_fast_forward ? '' : ` ${body.blocked_by}`);
+  const actionable = Boolean(body.known && missing > 0 && body.can_fast_forward);
+
+  for (const [box, text, button] of [
+    ['cloud-sync', 'cloud-sync-text', 'cloud-sync-get'],
+    ['cloud-sync-cloud', 'cloud-sync-cloud-text', 'cloud-sync-cloud-get'],
+  ]) {
+    if (!$(box)) continue;
+    $(box).hidden = !show;
+    $(text).textContent = message;
+    $(button).hidden = !actionable;
+  }
+
+  const ok = $('cloud-sync-ok');
+  if (ok) {
+    ok.hidden = show;
+    ok.textContent = 'Every run the branch has is on this machine.';
+  }
+}
+
+/* Which trips the missing runs belong to, when it is not just one.
+
+   "3 runs missing" on a page showing Tokyo, when two of them are the other trip,
+   is the kind of near-miss that gets acted on wrongly. */
+function describeMissing(missing) {
+  const trips = Object.keys(missing ?? {});
+  if (!trips.length) return '';
+  // Not escaped, because this is assigned to textContent rather than innerHTML.
+  // Escaping it there would show the entities themselves.
+  return ` (${trips.map((id) => `${id}: ${missing[id].length}`).join(', ')})`;
+}
+
+async function pullCloudResults(button) {
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = 'Getting…';
+  try {
+    const body = await api('/api/cloud-sync', { method: 'POST' });
+    // The pull can bring a newer src/web/app.py with it, which this running
+    // server has already imported. `contractMatches` is the existing handshake
+    // for exactly that, and its message - restart the server - is the right one.
+    if (!(await contractMatches())) return;
+    await renderCloudSync();
+
+    const gained = Object.values(body.gained ?? {}).reduce((n, v) => n + v.length, 0);
+    // Land on the newest run, but only when one actually arrived: moving the
+    // picker under someone who is reading a specific sweep is its own bug.
+    if (gained) state.stamp = null;
+    await pollStatus();
+    if (gained) renderResults();
+    $('status-text').textContent = gained
+      ? `Brought ${gained} cloud run(s) across — newest selected`
+      : 'Already up to date with the branch';
+  } catch (error) {
+    // Verbatim: when git refuses it names the files, and that sentence is the
+    // whole point of surfacing this rather than summarising it.
+    showError(error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
+  }
+}
+
+for (const id of ['cloud-sync-get', 'cloud-sync-cloud-get']) {
+  if ($(id)) $(id).onclick = (event) => pullCloudResults(event.target);
+}
+
 $('cloud-queue').onclick = async (event) => {
   const button = event.target.closest('button[data-drop]');
   if (!button) return;
@@ -1251,6 +1347,9 @@ $('delete-trip-btn').onclick = async () => {
   try {
     await api(`/api/scenarios/${state.scenario.id}`, { method: 'DELETE' });
     await reloadScenarioList();
+    // Not awaited: it shells out to git and the page must not wait on it, and
+    // nothing already drawn depends on the answer.
+    renderCloudSync();
   } catch (error) {
     showError(error.message);
   }
