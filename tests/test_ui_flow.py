@@ -2473,6 +2473,55 @@ def test_an_impossible_narrowing_is_refused_in_words(ui):
     assert not errors
 
 
+def test_a_return_window_past_the_window_offers_to_widen_it(ui):
+    """The refusal named the fix and not the box that performs it.
+
+    The window is a field of the trip and the trip lives behind the gear, so
+    "widen the window first" meant leaving this step, finding a date field in
+    another one, and coming back to retype what was already typed here.
+    """
+    page, scenarios, errors = ui
+    page.reload(wait_until="networkidle")
+    open_narrow(page)
+
+    page.fill("#narrow-back-start", "2027-02-04")
+    page.fill("#narrow-back-end", "2027-02-12")
+    page.wait_for_timeout(600)
+
+    widen = page.locator("#narrow-widen")
+    assert widen.is_visible()
+    # Named, not "widen it": the new end is what the next sweep spends on.
+    assert "2027-02-12" in widen.inner_text(), widen.inner_text()
+
+    widen.click()
+    page.wait_for_timeout(900)
+
+    # One save, not two - a wider trip carrying no narrowing must never exist,
+    # however briefly, because a sweep firing then would price the whole of it.
+    saved = json.loads((scenarios / "jp-ph.json").read_text(encoding="utf-8"))
+    assert saved["window_end"] == "2027-02-12"
+    assert saved["return_focus_end"] == "2027-02-12"
+    assert saved["return_focus_start"] == "2027-02-04"
+
+    assert "Saved" in page.locator("#narrow-message").inner_text()
+    assert widen.is_hidden()
+    assert not errors
+
+
+def test_nothing_offers_to_widen_a_window_that_already_fits(ui):
+    """A button that cannot change anything is one more thing to rule out."""
+    page, scenarios, errors = ui
+    page.reload(wait_until="networkidle")
+    open_narrow(page)
+
+    page.fill("#narrow-back-start", "2027-01-28")
+    page.fill("#narrow-back-end", "2027-02-02")
+    page.wait_for_timeout(600)
+
+    assert page.locator("#narrow-widen").is_hidden()
+    assert not errors
+
+
 def test_following_a_rule_breaking_pick_still_works(ui):
     """A watch prices the dates it is given; the stay ranges never governed it."""
     page, scenarios, errors = ui

@@ -3588,6 +3588,43 @@ function narrowSaved() {
   return Boolean(s && (s.return_focus_start || s.total_days));
 }
 
+// The window is the outer boundary of everything a sweep may price; the
+// narrowing only ever chooses inside it. A return window reaching past it is
+// therefore refused - dates outside the window are never searched, so the
+// intersection would be empty and the sweep would chain nothing.
+//
+// `widen the window first` is true and says nothing about where. The window is
+// a field of the trip, and since the regrouping the trip lives a step away
+// behind the gear, so the box that refuses you is not the box that fixes it.
+// What the typed dates need is arithmetic, so work it out and offer it here.
+// ISO strings, so `<` and `>` are date order.
+function windowFor(fields) {
+  const s = state.scenario || {};
+  if (!s.window_start) return null;
+  const start = [fields.focus_start, fields.return_focus_start]
+    .filter(Boolean)
+    .reduce((a, b) => (b < a ? b : a), s.window_start);
+  const end = [fields.focus_end, fields.return_focus_end]
+    .filter(Boolean)
+    .reduce((a, b) => (b > a ? b : a), s.window_end);
+  return start === s.window_start && end === s.window_end ? null : { start, end };
+}
+
+function renderWidenOffer() {
+  const button = $('narrow-widen');
+  const needed = windowFor(narrowFromFields());
+  button.hidden = !needed;
+  if (!needed) return;
+  const s = state.scenario;
+  const moved = [];
+  if (needed.start !== s.window_start) moved.push(`back to ${needed.start}`);
+  if (needed.end !== s.window_end) moved.push(`out to ${needed.end}`);
+  // Named rather than "Widen it", because widening is what the next sweep
+  // spends its searches on: the same trip priced a fortnight further out is a
+  // materially bigger run, and the estimate under this row says how much.
+  button.textContent = `Widen the trip ${moved.join(' and ')}`;
+}
+
 /* ------------------------------------------------------- the constraints */
 
 function renderNarrowFields() {
@@ -3625,6 +3662,8 @@ function renderNarrowFields() {
   } else {
     hint.textContent = '';
   }
+
+  renderWidenOffer();
 }
 
 function narrowFromFields() {
@@ -3668,7 +3707,12 @@ async function refreshNarrowCost() {
       `A deep sweep of this is ${count(narrowed.searches)} searches (~${Math.round(narrowed.minutes)} min), ` +
       `against ${count(whole.searches)} searches (~${Math.round(whole.minutes)} min) for the whole window.`;
   } catch (error) {
-    note.textContent = error.message;
+    // Said as a cost, because that is this line's job and the reason it cannot
+    // be given happens to be the reason the save would fail. Without the
+    // prefix the refusal renders in the muted voice of an estimate - a fact
+    // about the sweep rather than about what you just typed - and then repeats
+    // itself word for word in red beside Save.
+    note.textContent = `No estimate — ${error.message}.`;
   }
 }
 
@@ -4135,13 +4179,22 @@ $('narrow-save').onclick = () => saveNarrowing(narrowFromFields());
 $('narrow-clear').onclick = () => saveNarrowing({
   return_focus_start: null, return_focus_end: null, total_days: null,
 });
+$('narrow-widen').onclick = () => {
+  // One save, not two. Widening and then narrowing as separate writes leaves a
+  // trip that is briefly wider with no narrowing on it, and a nightly sweep
+  // firing between the two would price the whole of it.
+  const fields = narrowFromFields();
+  const needed = windowFor(fields);
+  if (!needed) return;
+  saveNarrowing({ ...fields, window_start: needed.start, window_end: needed.end });
+};
 $('cursor-snap').onclick = () => snapCursor();
 $('cursor-watch').onclick = () => watchCursor();
 for (const id of [
   'narrow-out-start', 'narrow-out-end', 'narrow-back-start', 'narrow-back-end',
   'narrow-nights-min', 'narrow-nights-max',
 ]) {
-  $(id).onchange = () => refreshNarrowCost();
+  $(id).onchange = () => { renderWidenOffer(); refreshNarrowCost(); };
 }
 
 init();
