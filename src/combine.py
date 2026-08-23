@@ -125,6 +125,7 @@ def combine_all(
     limit: int | None = MAX_RESULTS,
     starts: set[str] | None = None,
     ends: set[str] | None = None,
+    narrowed: bool = True,
 ) -> CombineResult:
     """Walk every valid itinerary in `legs`, keeping what callers need.
 
@@ -148,6 +149,13 @@ def combine_all(
     A whole-itinerary condition that is really a per-leg one - "every leg
     confirms a checked bag" - belongs in `legs` before the call, where it prunes
     earliest and needs nothing here at all.
+
+    `narrowed` applies the scenario's narrowing - when you leave, when you fly
+    home, how long you are away - on top of the per-stop stays. It defaults on, and can be turned off, because the two
+    questions are both real: "what can I actually book" wants the narrowing, and
+    "what am I giving up by narrowing" wants everything the sweep found. Turning
+    it off never *adds* a search - the legs are already on disk - so a broad
+    sweep swept before the narrowing existed stays fully readable.
     """
     result = CombineResult(legs_in=len(legs))
     # `leg_pools`, not consecutive `airport_pools`: a stop pinned to arrive at
@@ -170,6 +178,22 @@ def combine_all(
         leg_dests[-1] &= ends
     stops = scenario.stops
     bag = float(scenario.bag_estimate)
+
+    # None means unbounded, so every comparison below is a plain one and there
+    # is no second code path for the unnarrowed case to drift out of step with.
+    span_low, span_high = scenario.total_days if (narrowed and scenario.total_days) else (0, 10**6)
+    home_first = scenario.return_focus_start if (narrowed and scenario.return_focus_end) else None
+    home_last = scenario.return_focus_end
+    # The focus belongs here with the other two. It is the same sentence - when
+    # you actually want to go - and applying two thirds of it let "the cheapest
+    # trip that fits" mean a trip leaving two days outside the window that was
+    # typed into the box above it.
+    # Both ends or neither, in each pair. `validate()` enforces that, but
+    # `combine_all` is also handed scenarios built by `replace()`, which does
+    # not re-validate - and half a range here is a TypeError mid-traversal
+    # rather than a bad answer, which is the harder kind to trace back.
+    out_first = scenario.focus_start if (narrowed and scenario.focus_end) else None
+    out_last = scenario.focus_end
 
     # Sorted by the ranking cost - not the headline price - so a branch can stop
     # at the first candidate that is too expensive instead of testing all of
@@ -243,6 +267,15 @@ def combine_all(
         nonlocal nodes
         level = len(chain)
         if level == leg_count:
+            # The nights band and the return window are conditions on the whole
+            # chain, so they are the last thing checked rather than the first.
+            # The upper bound is enforced inside the loop as well, where it can
+            # prune; this is where the lower one first becomes answerable.
+            away = (chain[-1].depart_date - chain[0].depart_date).days
+            if not span_low <= away <= span_high:
+                return
+            if home_first and not home_first <= chain[-1].depart_date <= home_last:
+                return
             keep(Itinerary(legs=list(chain)), date_key)
             return
 
@@ -267,6 +300,13 @@ def combine_all(
                 continue
             if not _stay_ok(previous, leg, span):
                 continue
+            # `continue`, never `break`. `_departures` yields cost-sorted, not
+            # date-sorted, so a leg too late to fit the band says nothing about
+            # the ones behind it - breaking here would drop a cheaper, earlier
+            # departure sitting behind an expensive late one, and nothing
+            # downstream could tell it had happened.
+            if (leg.depart_date - chain[0].depart_date).days > span_high:
+                continue
             chain.append(leg)
             descend(chain, total, currency, date_key)
             chain.pop()
@@ -275,6 +315,11 @@ def combine_all(
         if leg.depart_date is None:
             continue
         if leg.origin not in leg_origins[0] or leg.destination not in leg_dests[0]:
+            continue
+        # Cheapest of all: the branch is never entered rather than pruned at the
+        # end of it, which is the whole advantage of the first leg carrying the
+        # bound the trip is anchored on.
+        if out_first and not out_first <= leg.depart_date <= out_last:
             continue
         date_key = leg.depart_date.isoformat()
         cost = _leg_cost(leg, bag)
@@ -289,14 +334,14 @@ def combine_all(
 
 
 def combine(
-    legs: list[Leg], scenario: Scenario, limit: int | None = MAX_RESULTS
+    legs: list[Leg], scenario: Scenario, limit: int | None = MAX_RESULTS, narrowed: bool = True
 ) -> list[Itinerary]:
     """Every valid itinerary in `legs`, cheapest first, capped at `limit`.
 
     Prefer `combine_all` when the per-date or open-jaw figures are also wanted;
     it produces them from the same traversal.
     """
-    return combine_all(legs, scenario, limit=limit).top
+    return combine_all(legs, scenario, limit=limit, narrowed=narrowed).top
 
 
 def best_same_airport(itineraries: list[Itinerary]) -> Itinerary | None:

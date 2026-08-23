@@ -837,3 +837,75 @@ label.field > select { font-weight: 400; color: var(--color-formInputText); }
 .night-list__row.is-out { opacity: 0.6; }
 
 #night-cloud { display: block; margin-top: 12px; max-width: 80ch; }
+
+/* ------------------------------------------------------------- narrowing --
+
+   The three constraints, and the stacked per-leg charts under them. */
+
+.narrow-grid { display: flex; gap: 24px; flex-wrap: wrap; }
+.narrow-grid > label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.narrow-grid input[type="number"] { width: 70px; }
+
+/* Every leg scrolls in one container rather than three.
+
+   Three scrollers would each start at their own offset the moment one was
+   dragged, and two charts showing different halves of the same axis while
+   claiming a shared one is worse than not sharing it at all. */
+#leg-charts { overflow-x: auto; }
+#leg-charts svg { display: block; }
+
+.leg-chart + .leg-chart { margin-top: 2px; }
+
+/* Indented by PAD.left from chart.js, so a leg's name sits over its own plot
+   area rather than over the price axis beside it. */
+.leg-chart__header {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding-left: 62px;
+  flex-wrap: wrap;
+}
+.leg-chart__route { padding-left: 62px; }
+.leg-chart__route > .small { color: var(--color-pageTextLight); }
+
+/* Sticky, because the total is what the dragging is for. Three stacked charts
+   are taller than a screen, and a figure you have to stop dragging and scroll
+   up to read is a figure you will stop reading. */
+.cursor-readout:not(:empty) {
+  position: sticky;
+  top: 0;
+  z-index: 4;
+  display: flex;
+  align-items: baseline;
+  gap: 18px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  margin-bottom: 10px;
+  background: var(--color-panelBackground);
+  border: 1px solid var(--color-tableBorderStrong);
+  border-radius: 8px;
+  box-shadow: 0 2px 10px var(--color-shadow);
+}
+.cursor-readout__total { font-size: 22px; font-weight: 700; }
+.cursor-readout__total .small { font-weight: 400; }
+.cursor-readout__split { font-size: 14px; color: var(--color-pageTextLight); }
+.cursor-readout__badges { display: flex; gap: 6px; flex-wrap: wrap; }
+.cursor-readout__legs {
+  width: 100%;
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+.cursor-readout__legs > span { white-space: nowrap; }
+
+/* The gear sits at the far end, after a spacer, because setup is not a fourth
+   step of the work — it is the drawer the work is configured from. */
+.tabs .spacer { flex: 1; }
+.tabs__gear { font-size: 16px; line-height: 1; }

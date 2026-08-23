@@ -56,17 +56,15 @@
     </div>
 
     <div class="tabs" id="tabs">
-      <button data-tab="search" class="is-active">Search</button>
-      <button data-tab="explore">Explore</button>
-      <button data-tab="results">Results</button>
-      <button data-tab="prices">Prices</button>
-      <button data-tab="watch">Watch</button>
-      <button data-tab="cloud">Cloud</button>
-      <button data-tab="sources">Sources</button>
+      <button data-tab="map" class="is-active">Map it out</button>
+      <button data-tab="narrow">Narrow it down</button>
+      <button data-tab="follow">Follow it</button>
+      <span class="spacer"></span>
+      <button data-tab="setup" class="tabs__gear" title="Discord, the night sweep, the cloud and the sources">&#9881;</button>
     </div>
 
     <!-- ------------------------------------------------------------ Search -->
-    <section data-panel="search">
+    <section data-panel="search" data-step="map">
       <div class="panel">
         <div class="panel__header"><h2>When</h2></div>
         <div class="form-grid">
@@ -102,37 +100,6 @@
           Return to <span class="muted" id="return-note"></span>
         </h3>
         <div class="chips" id="return-to"></div>
-      </div>
-
-      <div class="panel">
-        <div class="panel__header"><h2>What gets sent to Discord</h2></div>
-        <p class="panel__hint">
-          Each sweep reports the picks you tick below, so a daily ping is a short list
-          rather than the whole deep search.
-        </p>
-        <div class="row">
-          <label class="check small">
-            <input type="checkbox" id="notify-cheapest"> Cheapest overall
-          </label>
-          <label class="check small">
-            <input type="checkbox" id="notify-preferred"> Cheapest from airports you prefer
-          </label>
-          <label class="check small">
-            <input type="checkbox" id="notify-quiet"> Only when it beats the best so far
-          </label>
-        </div>
-
-        <h3 class="muted small" style="margin-top:20px">Airports you'd rather fly from</h3>
-        <p class="panel__hint" style="margin-top:0">
-          Best first. A trip counts as belonging to a tier only when it both leaves from and
-          returns to that tier — flying out of Prague and home into Frankfurt still strands you
-          in Frankfurt. The best tier that has any trip at all wins, and the message says what
-          preferring it cost against the outright cheapest.
-        </p>
-        <div id="preferred-tiers"></div>
-        <div class="row" style="margin-top:12px">
-          <button class="small" id="add-tier-btn">+ Add a lower choice</button>
-        </div>
       </div>
 
       <div class="panel">
@@ -206,39 +173,6 @@
         <div id="save-error" class="panel-error badge badge--error" hidden></div>
       </div>
 
-      <!--
-        What happens overnight, on the tab where the trip is decided.
-
-        This was invisible from the page, and all of it mattered. The scheduled
-        sweep is the only place a full-sized trip has ever been swept whole -
-        483/483 in 19 minutes on 21 Aug, against three throttled local runs the
-        same morning - and the page said nothing about which trips it would run,
-        how many runners they would need, when it fires, or that it sweeps the
-        trip on the branch rather than the trip on this screen. A whole day was
-        spent reading results of a trip nobody was still planning.
-      -->
-      <div class="panel">
-        <div class="panel__header">
-          <h2>Night sweep</h2>
-          <span class="badge badge--muted" id="night-badge">—</span>
-        </div>
-        <p class="panel__hint">
-          GitHub Actions sweeps on a schedule and commits the results back to the repo, so it
-          runs whether or not this page is open. It is also the only place a full-sized trip
-          finishes: your machine is one client, and pelikan.cz answers about 120 searches from
-          one client before it stops answering at all. The cloud splits the plan so that no
-          single runner is handed more than <strong id="night-cap">100</strong>.
-        </p>
-        <label class="check small">
-          <input type="checkbox" id="enabled"> Sweep this trip every night
-        </label>
-        <div id="night-this-trip" class="small" style="margin-top:12px"></div>
-        <div id="night-cloud" class="badge badge--warning" hidden></div>
-
-        <h3 class="muted small" style="margin-top:20px">Everything it will run tonight</h3>
-        <div id="night-all" class="night-list small"></div>
-        <p class="panel__hint small" id="night-when" style="margin:12px 0 0"></p>
-      </div>
     </section>
 
     <!-- ----------------------------------------------------------- Explore -->
@@ -248,7 +182,7 @@
       to search is a step before reading itineraries, not a kind of itinerary -
       and because deciding about six airports should be one pass and one save.
     -->
-    <section data-panel="explore" hidden>
+    <section data-panel="explore" data-step="map" hidden>
       <div class="panel">
         <div class="panel__header">
           <h2>Worth searching?</h2>
@@ -293,7 +227,106 @@
     </section>
 
     <!-- ----------------------------------------------------------- Results -->
-    <section data-panel="results" hidden>
+    <section data-panel="narrow" data-step="narrow" hidden>
+      <div class="panel">
+        <div class="panel__header">
+          <h2>When you actually want to go</h2>
+          <span class="badge badge--muted" id="narrow-state">the whole window</span>
+        </div>
+        <p class="panel__hint">
+          Three constraints, not one. The sweep intersects them, so the searches go where the
+          decision already is — and a combination that none of them can satisfy is refused here
+          rather than swept for an hour and found empty.
+        </p>
+        <div class="narrow-grid">
+          <label>Leave between
+            <span class="row">
+              <input type="date" id="narrow-out-start">
+              <span class="small muted">and</span>
+              <input type="date" id="narrow-out-end">
+            </span>
+          </label>
+          <label>Fly home between
+            <span class="row">
+              <input type="date" id="narrow-back-start">
+              <span class="small muted">and</span>
+              <input type="date" id="narrow-back-end">
+            </span>
+          </label>
+          <label>Nights away
+            <span class="row">
+              <input type="number" id="narrow-nights-min" min="0" max="365" step="1">
+              <span class="small muted">to</span>
+              <input type="number" id="narrow-nights-max" min="0" max="365" step="1">
+              <span class="small muted" id="narrow-nights-hint"></span>
+            </span>
+          </label>
+        </div>
+        <p class="panel__hint small" id="narrow-cost"></p>
+        <div class="row" style="margin-top:12px">
+          <button class="small primary" id="narrow-save">Save</button>
+          <button class="small" id="narrow-clear">Clear it</button>
+          <span class="spacer"></span>
+          <span class="small" id="narrow-message"></span>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel__header">
+          <h2>Every flight, priced on its own</h2>
+          <select id="narrow-sweep" class="small"></select>
+        </div>
+        <p class="panel__hint">
+          One chart per leg, on one shared date axis, so a vertical slice down all three is one
+          trip. <strong>Drag the markers</strong> to build a trip by hand. A leg name expands into
+          its separate airport pairs when the question is which one is dragging it.
+        </p>
+
+        <div class="cursor-readout" id="cursor-readout"></div>
+        <div id="leg-charts" class="empty">Pick a sweep to see its flights.</div>
+
+        <div class="row" style="margin-top:14px">
+          <button class="small" id="cursor-snap">Snap to the cheapest that fits</button>
+          <button class="small primary" id="cursor-watch">Follow this trip</button>
+          <span class="spacer"></span>
+          <span class="small" id="cursor-message"></span>
+        </div>
+        <p class="panel__hint small">
+          <strong>Nothing here is enforced.</strong> The stay ranges exist so a sweep knows what to
+          price, and every total it reports is the cheapest thing that obeyed them. If fifteen days
+          in Japan turns out to be four thousand cheaper, that is worth knowing, and a range you
+          typed a month ago should not be what hides it. Drag wherever you like — the badges say
+          what a pick breaks, and following it works either way.
+        </p>
+      </div>
+    </section>
+
+    <!-- Cheapest total by departure date, and the focus picked on it -->
+    <section data-panel="dates" data-step="narrow" hidden>
+      <div class="panel">
+        <div class="panel__header">
+          <h2>Cheapest total by departure date</h2>
+          <span class="badge badge--muted" id="focus-state">watching the whole window</span>
+        </div>
+        <p class="panel__hint">
+          Which day to leave on. Lowest point is labelled. <strong>Click two points</strong> to
+          mark the days worth watching closely — the afternoon sweep then prices only those,
+          which is a fraction of the searches and finishes in minutes rather than an hour.
+          The morning sweep keeps covering the whole window, so a better date opening up
+          outside your pick is still found.
+        </p>
+        <div class="chart" id="chart-by-date"></div>
+        <div class="row" id="focus-controls" style="margin-top:12px">
+          <span class="small" id="focus-pick">No days picked yet.</span>
+          <span class="spacer"></span>
+          <button class="small primary" id="focus-save" disabled>Watch these dates</button>
+          <button class="small" id="focus-clear">Watch the whole window</button>
+        </div>
+        <p class="panel__hint small" id="by-date-note"></p>
+      </div>
+    </section>
+
+    <section data-panel="results" data-step="narrow" hidden>
       <div class="panel">
         <div class="panel__header">
           <h2>Sweep</h2>
@@ -334,6 +367,9 @@
             <input type="checkbox" id="filter-bags"> Bags included
           </label>
           <span class="spacer"></span>
+          <label class="check small" id="filter-window-wrap" hidden>
+            <input type="checkbox" id="filter-window"> Ignore my narrowing
+          </label>
           <span class="small muted" id="filter-count"></span>
           <button class="small" id="filter-reset" hidden>Reset</button>
         </div>
@@ -354,54 +390,17 @@
       </div>
     </section>
 
-    <!-- ------------------------------------------------------------ Prices -->
-    <section data-panel="prices" hidden>
-      <div class="panel">
-        <div class="panel__header">
-          <h2>Cheapest total by departure date</h2>
-          <span class="badge badge--muted" id="focus-state">watching the whole window</span>
-        </div>
-        <p class="panel__hint">
-          Which day to leave on. Lowest point is labelled. <strong>Click two points</strong> to
-          mark the days worth watching closely — the afternoon sweep then prices only those,
-          which is a fraction of the searches and finishes in minutes rather than an hour.
-          The morning sweep keeps covering the whole window, so a better date opening up
-          outside your pick is still found.
-        </p>
-        <div class="chart" id="chart-by-date"></div>
-        <div class="row" id="focus-controls" style="margin-top:12px">
-          <span class="small" id="focus-pick">No days picked yet.</span>
-          <span class="spacer"></span>
-          <button class="small primary" id="focus-save" disabled>Watch these dates</button>
-          <button class="small" id="focus-clear">Watch the whole window</button>
-        </div>
-        <p class="panel__hint small" id="by-date-note"></p>
-      </div>
+    <!-- ------------------------------------------------------------ Narrow -->
+    <!--
+      The step after the map. A broad sweep says which part of the window is
+      worth anything; by the time it has been read a few times the decision has
+      usually narrowed by things no sweep knows — when leave starts, when work
+      starts again — and what is left is not a date but three constraints at
+      once. Above: state them, and watch the plan shrink. Below: every flight of
+      the trip priced separately, so a combination can be picked by eye rather
+      than only accepted from the ranking.
+    -->
 
-      <div class="panel">
-        <div class="panel__header"><h2>Best total over time</h2></div>
-        <p class="panel__hint">
-          Whether to book now or wait. Only sweeps complete enough to compare are joined
-          and labelled — a sweep that half-failed reports a price that says more about the
-          scraper than about the market.
-        </p>
-        <div class="chart" id="chart-history"></div>
-        <p class="panel__hint small" id="history-note"></p>
-      </div>
-
-      <div class="panel">
-        <div class="panel__header"><h2>Volatility probe</h2></div>
-        <p class="panel__hint">
-          Three fixed routes sampled every two hours, to decide whether daily sweeping is
-          often enough. <strong>Net move</strong> is first observation to last — the figure
-          that says whether a fare is running away from you. <strong>Steps that moved</strong>
-          counts any change at all, including the site rounding by a few crowns; the column
-          beside it counts only moves worth noticing, and the gap between the two is why the
-          steadiest route here used to report the highest volatility.
-        </p>
-        <div id="probe-body" class="empty">No observations yet.</div>
-      </div>
-    </section>
 
     <!-- ------------------------------------------------------------- Watch -->
     <!--
@@ -414,7 +413,223 @@
       than 75, which is the whole difference between a check that can run six
       times a day and one that cannot run at all.
     -->
-    <section data-panel="watch" hidden>
+
+    <!-- ----------------------------------------------------------- Sources -->
+    <!-- ------------------------------------------------------------- Cloud -->
+    <!--
+      What the cloud is doing, has done, and is being held to do.
+
+      Its own tab rather than a corner of Search because it is about the
+      workflow rather than about the trip on screen - Night sweep answers that
+      one. Nothing here was answerable from the app before: dispatching shelled
+      `gh workflow run`, said "Dispatched to GitHub Actions", and forgot the run
+      existed. On 22 Aug that one sentence covered three runs that swept nothing
+      and went green in twelve seconds, and two that were cancelled while
+      pending without starting a single job. All five looked like success.
+    -->
+    <!-- What gets sent to Discord -->
+    <section data-panel="notify" data-step="setup" hidden>
+      <div class="panel">
+        <div class="panel__header"><h2>What gets sent to Discord</h2></div>
+        <p class="panel__hint">
+          Each sweep reports the picks you tick below, so a daily ping is a short list
+          rather than the whole deep search.
+        </p>
+        <div class="row">
+          <label class="check small">
+            <input type="checkbox" id="notify-cheapest"> Cheapest overall
+          </label>
+          <label class="check small">
+            <input type="checkbox" id="notify-preferred"> Cheapest from airports you prefer
+          </label>
+          <label class="check small">
+            <input type="checkbox" id="notify-quiet"> Only when it beats the best so far
+          </label>
+        </div>
+
+        <h3 class="muted small" style="margin-top:20px">Airports you'd rather fly from</h3>
+        <p class="panel__hint" style="margin-top:0">
+          Best first. A trip counts as belonging to a tier only when it both leaves from and
+          returns to that tier — flying out of Prague and home into Frankfurt still strands you
+          in Frankfurt. The best tier that has any trip at all wins, and the message says what
+          preferring it cost against the outright cheapest.
+        </p>
+        <div id="preferred-tiers"></div>
+        <div class="row" style="margin-top:12px">
+          <button class="small" id="add-tier-btn">+ Add a lower choice</button>
+          <span class="spacer"></span>
+          <!--
+            Its own Save, because this panel moved behind the gear and the trip's
+            Save button did not come with it. These are fields of the trip - the
+            scheduled sweep reads them off the scenario file - so they are saved
+            by the same call; what would not survive the move is a panel you can
+            edit and cannot commit.
+          -->
+          <button class="small primary" id="notify-save-btn">Save</button>
+        </div>
+        <div id="notify-save-error" class="panel-error badge badge--error" hidden></div>
+      </div>
+    </section>
+
+    <!-- The night sweep -->
+    <section data-panel="night" data-step="setup" hidden>
+      <!--
+        What happens overnight, on the tab where the trip is decided.
+
+        This was invisible from the page, and all of it mattered. The scheduled
+        sweep is the only place a full-sized trip has ever been swept whole -
+        483/483 in 19 minutes on 21 Aug, against three throttled local runs the
+        same morning - and the page said nothing about which trips it would run,
+        how many runners they would need, when it fires, or that it sweeps the
+        trip on the branch rather than the trip on this screen. A whole day was
+        spent reading results of a trip nobody was still planning.
+      -->
+      <div class="panel">
+        <div class="panel__header">
+          <h2>Night sweep</h2>
+          <span class="badge badge--muted" id="night-badge">—</span>
+        </div>
+        <p class="panel__hint">
+          GitHub Actions sweeps on a schedule and commits the results back to the repo, so it
+          runs whether or not this page is open. It is also the only place a full-sized trip
+          finishes: your machine is one client, and pelikan.cz answers about 120 searches from
+          one client before it stops answering at all. The cloud splits the plan so that no
+          single runner is handed more than <strong id="night-cap">100</strong>.
+        </p>
+        <div class="row">
+          <label class="check small">
+            <input type="checkbox" id="enabled"> Sweep this trip every night
+          </label>
+          <span class="spacer"></span>
+          <!-- Its own Save, for the same reason the Discord panel has one: the
+               tick is a field of the trip, and the trip's Save button stayed on
+               Map it out when this panel moved behind the gear. -->
+          <button class="small primary" id="night-save-btn">Save</button>
+        </div>
+        <div id="night-save-error" class="panel-error badge badge--error" hidden></div>
+        <div id="night-this-trip" class="small" style="margin-top:12px"></div>
+        <div id="night-cloud" class="badge badge--warning" hidden></div>
+
+        <h3 class="muted small" style="margin-top:20px">Everything it will run tonight</h3>
+        <div id="night-all" class="night-list small"></div>
+        <p class="panel__hint small" id="night-when" style="margin:12px 0 0"></p>
+      </div>
+    </section>
+
+    <section data-panel="cloud" data-step="setup" hidden>
+      <div class="panel">
+        <div class="panel__header">
+          <h2>Scheduled runs</h2>
+          <span class="badge badge--muted" id="cloud-badge">—</span>
+        </div>
+        <p class="panel__hint">
+          GitHub Actions sweeps on its own schedule and commits results back to the repo,
+          whether or not this page is open. This is that schedule, what is going now, and
+          what the last runs actually did.
+        </p>
+        <div id="cloud-schedule" class="small"></div>
+        <div id="cloud-unknown" class="badge badge--warning" hidden></div>
+      </div>
+
+      <!--
+        Runs asked for here and not yet sent. Dispatching while a run is already
+        going leaves the new one pending, and GitHub keeps only one pending run
+        per lane - a third dispatch cancels it outright. Holding them here is
+        what stops that, so the list has to be visible or it is just a delay
+        nobody asked for.
+      -->
+      <div class="panel">
+        <div class="panel__header">
+          <h2>Waiting to be sent</h2>
+        </div>
+        <div id="cloud-queue" class="night-list small"></div>
+        <p class="panel__hint small" style="margin:12px 0 0">
+          A run waits here only while the cloud is busy, and is sent as soon as it is free.
+          The queue lives in this app: close it and these are forgotten. Anything already
+          dispatched is in GitHub and unaffected.
+        </p>
+      </div>
+
+      <div class="panel">
+        <div class="panel__header">
+          <h2>Results on this machine</h2>
+        </div>
+        <p class="panel__hint">
+          A finished run commits its results to the branch. This app reads them off the
+          disk, so until the checkout is brought forward they exist and are invisible -
+          which is exactly what happened to three runs on 22 Aug.
+        </p>
+        <div class="notice notice--warning cloud-sync" id="cloud-sync-cloud" hidden>
+          <span id="cloud-sync-cloud-text"></span>
+          <button class="small" id="cloud-sync-cloud-get">Get them</button>
+        </div>
+        <div class="small muted" id="cloud-sync-ok" hidden></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel__header">
+          <h2>Recent runs</h2>
+        </div>
+        <div id="cloud-runs" class="night-list small"></div>
+      </div>
+    </section>
+
+    <section data-panel="sources" data-step="setup" hidden>
+      <!--
+        Webhook first, health second, repairs last - which is the order these
+        are actually wanted in. The tab used to open on a form of four fields
+        and six CSS selectors for one site, which answers a question nobody
+        arrives here asking.
+      -->
+      <div class="panel">
+        <div class="panel__header">
+          <h2>Where results get sent</h2>
+          <span class="badge badge--muted" id="notify-origin">—</span>
+        </div>
+        <p class="panel__hint">
+          The Discord channel each sweep posts its picks to. In Discord:
+          <strong>Edit Channel → Integrations → Webhooks → Copy Webhook URL</strong>.
+        </p>
+        <div class="row">
+          <label class="field field--wide">Webhook URL
+            <input type="password" id="webhook-url" autocomplete="off"
+                   placeholder="https://discord.com/api/webhooks/…">
+          </label>
+        </div>
+        <div class="row" style="margin-top:12px">
+          <button id="webhook-save">Save webhook</button>
+          <button id="webhook-test" class="primary">Send a test message</button>
+          <button class="small" id="webhook-clear">Remove</button>
+        </div>
+        <div id="webhook-result" class="small" style="margin-top:12px"></div>
+        <p class="panel__hint small" style="margin-top:14px">
+          This URL is a password in disguise — anyone holding it can post to the channel —
+          so it is stored in <code id="webhook-path">.secrets/discord.json</code>, outside
+          everything git tracks. It is never sent back to this page; the field above shows
+          it masked. <strong>Cloud sweeps do not read that file.</strong> They read the
+          repository secret, which you set once with
+          <code>gh secret set DISCORD_WEBHOOK_URL</code>. When that variable is present it
+          wins, so a cloud run always posts where the secret says.
+        </p>
+      </div>
+
+      <div class="panel">
+        <div class="panel__header">
+          <h2>Where the prices come from</h2>
+          <button class="small" id="sources-check-all">Check them all</button>
+        </div>
+        <p class="panel__hint">
+          Press <strong>Check now</strong> and each site is asked for one real price. That is
+          the whole question: is it still working. A site that has moved its URL or renamed a
+          CSS class stops the sweep without stopping the code, and when that happens the card
+          opens a <strong>Repair</strong> box with the strings to change — you never need it
+          until then. Deleting <code>data/sources.json</code> always restores the built-in
+          defaults.
+        </p>
+        <div id="sources-body" class="empty">Loading…</div>
+      </div>
+    </section>
+    <section data-panel="watch" data-step="follow" hidden>
       <!--
         Individual flights first, because they are how the decision is usually
         assembled: you saw Vienna to Haneda look good on the 10th and the 12th,
@@ -512,132 +727,33 @@
       </div>
     </section>
 
-    <!-- ----------------------------------------------------------- Sources -->
-    <!-- ------------------------------------------------------------- Cloud -->
-    <!--
-      What the cloud is doing, has done, and is being held to do.
-
-      Its own tab rather than a corner of Search because it is about the
-      workflow rather than about the trip on screen - Night sweep answers that
-      one. Nothing here was answerable from the app before: dispatching shelled
-      `gh workflow run`, said "Dispatched to GitHub Actions", and forgot the run
-      existed. On 22 Aug that one sentence covered three runs that swept nothing
-      and went green in twelve seconds, and two that were cancelled while
-      pending without starting a single job. All five looked like success.
-    -->
-    <section data-panel="cloud" hidden>
+    <!-- Whether to book now or wait, and how fast fares move -->
+    <section data-panel="history" data-step="follow" hidden>
       <div class="panel">
-        <div class="panel__header">
-          <h2>Scheduled runs</h2>
-          <span class="badge badge--muted" id="cloud-badge">—</span>
-        </div>
+        <div class="panel__header"><h2>Best total over time</h2></div>
         <p class="panel__hint">
-          GitHub Actions sweeps on its own schedule and commits results back to the repo,
-          whether or not this page is open. This is that schedule, what is going now, and
-          what the last runs actually did.
+          Whether to book now or wait. Only sweeps complete enough to compare are joined
+          and labelled — a sweep that half-failed reports a price that says more about the
+          scraper than about the market.
         </p>
-        <div id="cloud-schedule" class="small"></div>
-        <div id="cloud-unknown" class="badge badge--warning" hidden></div>
-      </div>
-
-      <!--
-        Runs asked for here and not yet sent. Dispatching while a run is already
-        going leaves the new one pending, and GitHub keeps only one pending run
-        per lane - a third dispatch cancels it outright. Holding them here is
-        what stops that, so the list has to be visible or it is just a delay
-        nobody asked for.
-      -->
-      <div class="panel">
-        <div class="panel__header">
-          <h2>Waiting to be sent</h2>
-        </div>
-        <div id="cloud-queue" class="night-list small"></div>
-        <p class="panel__hint small" style="margin:12px 0 0">
-          A run waits here only while the cloud is busy, and is sent as soon as it is free.
-          The queue lives in this app: close it and these are forgotten. Anything already
-          dispatched is in GitHub and unaffected.
-        </p>
+        <div class="chart" id="chart-history"></div>
+        <p class="panel__hint small" id="history-note"></p>
       </div>
 
       <div class="panel">
-        <div class="panel__header">
-          <h2>Results on this machine</h2>
-        </div>
+        <div class="panel__header"><h2>Volatility probe</h2></div>
         <p class="panel__hint">
-          A finished run commits its results to the branch. This app reads them off the
-          disk, so until the checkout is brought forward they exist and are invisible -
-          which is exactly what happened to three runs on 22 Aug.
+          Three fixed routes sampled every two hours, to decide whether daily sweeping is
+          often enough. <strong>Net move</strong> is first observation to last — the figure
+          that says whether a fare is running away from you. <strong>Steps that moved</strong>
+          counts any change at all, including the site rounding by a few crowns; the column
+          beside it counts only moves worth noticing, and the gap between the two is why the
+          steadiest route here used to report the highest volatility.
         </p>
-        <div class="notice notice--warning cloud-sync" id="cloud-sync-cloud" hidden>
-          <span id="cloud-sync-cloud-text"></span>
-          <button class="small" id="cloud-sync-cloud-get">Get them</button>
-        </div>
-        <div class="small muted" id="cloud-sync-ok" hidden></div>
-      </div>
-
-      <div class="panel">
-        <div class="panel__header">
-          <h2>Recent runs</h2>
-        </div>
-        <div id="cloud-runs" class="night-list small"></div>
+        <div id="probe-body" class="empty">No observations yet.</div>
       </div>
     </section>
 
-    <section data-panel="sources" hidden>
-      <!--
-        Webhook first, health second, repairs last - which is the order these
-        are actually wanted in. The tab used to open on a form of four fields
-        and six CSS selectors for one site, which answers a question nobody
-        arrives here asking.
-      -->
-      <div class="panel">
-        <div class="panel__header">
-          <h2>Where results get sent</h2>
-          <span class="badge badge--muted" id="notify-origin">—</span>
-        </div>
-        <p class="panel__hint">
-          The Discord channel each sweep posts its picks to. In Discord:
-          <strong>Edit Channel → Integrations → Webhooks → Copy Webhook URL</strong>.
-        </p>
-        <div class="row">
-          <label class="field field--wide">Webhook URL
-            <input type="password" id="webhook-url" autocomplete="off"
-                   placeholder="https://discord.com/api/webhooks/…">
-          </label>
-        </div>
-        <div class="row" style="margin-top:12px">
-          <button id="webhook-save">Save webhook</button>
-          <button id="webhook-test" class="primary">Send a test message</button>
-          <button class="small" id="webhook-clear">Remove</button>
-        </div>
-        <div id="webhook-result" class="small" style="margin-top:12px"></div>
-        <p class="panel__hint small" style="margin-top:14px">
-          This URL is a password in disguise — anyone holding it can post to the channel —
-          so it is stored in <code id="webhook-path">.secrets/discord.json</code>, outside
-          everything git tracks. It is never sent back to this page; the field above shows
-          it masked. <strong>Cloud sweeps do not read that file.</strong> They read the
-          repository secret, which you set once with
-          <code>gh secret set DISCORD_WEBHOOK_URL</code>. When that variable is present it
-          wins, so a cloud run always posts where the secret says.
-        </p>
-      </div>
-
-      <div class="panel">
-        <div class="panel__header">
-          <h2>Where the prices come from</h2>
-          <button class="small" id="sources-check-all">Check them all</button>
-        </div>
-        <p class="panel__hint">
-          Press <strong>Check now</strong> and each site is asked for one real price. That is
-          the whole question: is it still working. A site that has moved its URL or renamed a
-          CSS class stops the sweep without stopping the code, and when that happens the card
-          opens a <strong>Repair</strong> box with the strings to change — you never need it
-          until then. Deleting <code>data/sources.json</code> always restores the built-in
-          defaults.
-        </p>
-        <div id="sources-body" class="empty">Loading…</div>
-      </div>
-    </section>
   </main>
 
   <script type="module" src="/app.js"></script>

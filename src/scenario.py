@@ -209,6 +209,34 @@ class Scenario:
     # about when you leave rather than three ranges that can contradict.
     focus_start: date | None = None
     focus_end: date | None = None
+    # The other half of a focus: when you want to fly *home*.
+    #
+    # A focus bounds the first leg and lets the stay ranges derive the rest,
+    # which is the right shape while a trip is still being mapped out. It stops
+    # being the right shape the moment the return has a reason of its own - the
+    # day work starts again, a flat that is let from the 9th - because the only
+    # way to reach that date through the stay ranges is to widen them, and
+    # widening them re-admits every trip that lands a week early.
+    #
+    # A bound on the final leg says it directly instead. The planner intersects
+    # the two rather than choosing between them, so they cannot contradict:
+    # where they leave no room at all, `validate()` says so by name.
+    return_focus_start: date | None = None
+    return_focus_end: date | None = None
+    # Nights the whole trip may last, first leg's departure to final leg's.
+    #
+    # Not derivable from the stay ranges, and that is the point of it. Japan
+    # 10-13 and Philippines 8-13 admits 18 nights and 26 alike; "about 24, and
+    # I do not much mind how it splits" is a single constraint neither range can
+    # express and both together still cannot, and it is usually the one actually
+    # being held. It is also what lets 14+10 be compared against 12+12 instead
+    # of one of them being ruled out before it is ever priced.
+    #
+    # Measured to the final leg's *departure*, because that is the date printed
+    # on a ticket. Deliberately not checked against `min_trip_days`, which sums
+    # every stop and so over-counts a one-way chain by the stay at its last one;
+    # `min_span_days` is the figure this is comparable with.
+    total_days: tuple[int, int] | None = None
     adults: int = 1
     depth: str = "standard"
     currency: str = "CZK"
@@ -355,6 +383,32 @@ class Scenario:
         """
         return sum(stop.stay_days[1] for stop in self.stops[:leg_index])
 
+    def max_stay_after(self, leg_index: int) -> int:
+        """Most days the *final* leg can trail leg `leg_index`.
+
+        The mirror of `max_stay_before`, and what turns "be home between these
+        two dates" into how early each earlier leg could still legitimately be.
+        Slices to `leg_count - 1` for the same reason `remaining_min_stay` does:
+        nothing has to happen after the last leg departs.
+        """
+        return sum(stop.stay_days[1] for stop in self.stops[leg_index : self.leg_count - 1])
+
+    @property
+    def min_span_days(self) -> int:
+        """Fewest nights from the first leg's departure to the final leg's.
+
+        What `total_days` is comparable with. `min_trip_days` is not: it sums
+        every stop, including the last one, which nothing has to wait out
+        because the trip ends there. On a round trip the two agree; on a one-way
+        chain `min_trip_days` is larger by the stay at the final stop, and using
+        it here would reject bands that are perfectly reachable.
+        """
+        return self.remaining_min_stay(0)
+
+    @property
+    def max_span_days(self) -> int:
+        return self.max_stay_after(0)
+
     @property
     def min_trip_days(self) -> int:
         return sum(stop.stay_days[0] for stop in self.stops)
@@ -466,6 +520,7 @@ class Scenario:
                     f"window {self.window_start}..{self.window_end}; widen the window first"
                 )
 
+        self._validate_narrowing()
         self._validate_watches()
         self._validate_leg_watches()
 
@@ -487,6 +542,79 @@ class Scenario:
                 f"window is {available} days but the minimum stays need "
                 f"{self.min_trip_days} ({breakdown}); widen the window or shorten the stays"
             )
+
+    def _validate_narrowing(self) -> None:
+        """The return window, the nights band, and whether anything can meet them.
+
+        A narrowing nothing can satisfy is worse than one that is refused. The
+        sweep runs, spends every search, chains not one itinerary, and reports
+        the same empty result the site gives when it has no seats - so the
+        failure reads as "there are no flights" rather than "you asked for a
+        trip that cannot exist". The arithmetic that would notice is already
+        here, which is why the noticing is here too.
+        """
+        if (self.return_focus_start is None) != (self.return_focus_end is None):
+            raise ValueError(
+                "a return window needs both a first and a last date; "
+                "clear both to fly home any time in the window"
+            )
+        if self.return_focus_start is not None:
+            if self.return_focus_end < self.return_focus_start:
+                raise ValueError(
+                    f"return_focus_end ({self.return_focus_end}) must not precede "
+                    f"return_focus_start ({self.return_focus_start})"
+                )
+            # Same rule as the focus, and for the same reason: outside the
+            # window this is not a narrowing but a different trip, and no sweep
+            # of the window would be comparable with a sweep of it.
+            if (
+                self.return_focus_start < self.window_start
+                or self.return_focus_end > self.window_end
+            ):
+                raise ValueError(
+                    f"the return window {self.return_focus_start}..{self.return_focus_end} "
+                    f"falls outside the window {self.window_start}..{self.window_end}; "
+                    f"widen the window first"
+                )
+
+        span_low, span_high = self.min_span_days, self.max_span_days
+        band = (span_low, span_high)
+
+        if self.total_days is not None:
+            low, high = self.total_days
+            if low < 0:
+                raise ValueError(f"total_days may not be negative, got {low}")
+            if high < low:
+                raise ValueError(f"total_days runs {low}..{high}, which ends before it starts")
+            if high < span_low or low > span_high:
+                raise ValueError(
+                    f"{low}-{high} nights away is unreachable: the stays allow "
+                    f"{span_low}-{span_high} ({self._stay_breakdown()}); "
+                    f"change the nights or the stays"
+                )
+            band = (max(low, span_low), min(high, span_high))
+
+        # Only checkable when both ends are pinned. With one end open the other
+        # is bounded by the window, which is loose enough that the check would
+        # never fire and would only invite belief that it had.
+        if self.focus_start is not None and self.return_focus_start is not None:
+            soonest = (self.return_focus_start - self.focus_end).days
+            latest = (self.return_focus_end - self.focus_start).days
+            if latest < band[0] or soonest > band[1]:
+                raise ValueError(
+                    f"leaving {self.focus_start}..{self.focus_end} and flying home "
+                    f"{self.return_focus_start}..{self.return_focus_end} is {soonest}-{latest} "
+                    f"nights away, but {band[0]}-{band[1]} is what the stays"
+                    + (" and the nights band" if self.total_days is not None else "")
+                    + f" allow ({self._stay_breakdown()}); move one of the two windows"
+                )
+
+    def _stay_breakdown(self) -> str:
+        """The per-stop ranges, named, for an error about the total of them."""
+        return " + ".join(
+            f"{stop.stay_days[0]}-{stop.stay_days[1]} at {stop.describe(i)}"
+            for i, stop in enumerate(self.stops[: self.leg_count - 1])
+        )
 
     def _validate_watches(self) -> None:
         """Every watched candidate must be a trip this scenario could produce.
@@ -522,18 +650,23 @@ class Scenario:
                         f"{later} does not come after {earlier}"
                     )
 
-            # Sliced one short for the same reason `remaining_min_stay` slices:
-            # the last leg arrives where the trip ends and nothing has to happen
-            # after it, so the final stop of a one-way chain has no departing
-            # leg to measure a stay against.
-            for index, stop in enumerate(self.stops[: self.leg_count - 1]):
-                days = (dates[index + 1] - dates[index]).days
-                low, high = stop.stay_days
-                if not low <= days <= high:
-                    raise ValueError(
-                        f"the watch on {watch.key} spends {days} days at "
-                        f"{stop.describe(index)}, outside its {low}-{high} day stay"
-                    )
+            # The stay ranges are deliberately *not* checked here.
+            #
+            # They were, and the reason was sound while it lasted: a watch the
+            # combiner could not chain would spend its searches and report no
+            # price, which looks exactly like the site having nothing. But a
+            # watch pins every leg's date, so its stays are facts rather than a
+            # search space, and `watch._admitting` now widens the ranges to
+            # admit whatever was pinned before pricing it. There is no longer an
+            # unchainable watch for this to catch.
+            #
+            # What it did catch was the useful case. The per-leg charts exist so
+            # that a fifteen-night stay four thousand cheaper than any legal one
+            # can be found by eye; refusing to follow it here would have meant
+            # the tool could show you the saving and not let you track it.
+            # Ordering is still checked above, because a leg that departs before
+            # the one before it has arrived is not a preference but an
+            # impossibility.
 
             if not self.window_start <= dates[0] <= self.window_end:
                 raise ValueError(
@@ -589,6 +722,15 @@ class Scenario:
         data["window_end"] = self.window_end.isoformat()
         data["focus_start"] = self.focus_start.isoformat() if self.focus_start else None
         data["focus_end"] = self.focus_end.isoformat() if self.focus_end else None
+        data["return_focus_start"] = (
+            self.return_focus_start.isoformat() if self.return_focus_start else None
+        )
+        data["return_focus_end"] = (
+            self.return_focus_end.isoformat() if self.return_focus_end else None
+        )
+        # A list, like `stay_days`, so the JSON on disk reads the same way for
+        # both kinds of range rather than one being a pair and one an array.
+        data["total_days"] = list(self.total_days) if self.total_days is not None else None
         data["watches"] = [
             {
                 "depart_dates": [d.isoformat() for d in w.depart_dates],
@@ -627,9 +769,13 @@ class Scenario:
         payload = _migrate(dict(data))
         payload["window_start"] = date.fromisoformat(payload["window_start"])
         payload["window_end"] = date.fromisoformat(payload["window_end"])
-        for key in ("focus_start", "focus_end"):
+        for key in ("focus_start", "focus_end", "return_focus_start", "return_focus_end"):
+            # Absent from every file written before the narrowing existed, which
+            # is all of them; `.get` rather than `[]` for exactly that reason.
             value = payload.get(key)
             payload[key] = date.fromisoformat(value) if value else None
+        total_days = payload.get("total_days")
+        payload["total_days"] = tuple(total_days) if total_days else None
         payload["watches"] = [
             Watch(
                 depart_dates=[date.fromisoformat(d) for d in w["depart_dates"]],

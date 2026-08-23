@@ -698,6 +698,239 @@ def test_results_report_the_currency(client):
     assert api.get(f"/api/sweeps/jp-ph/{stamp}/results").json()["currency"] == "CZK"
 
 
+def narrow(api, **fields) -> dict:
+    """Put a narrowing on the saved trip, the way the page does."""
+    trip = api.get("/api/scenarios/jp-ph").json()
+    trip.update(fields)
+    return api.put("/api/scenarios/jp-ph", json=trip)
+
+
+def test_a_narrowed_reading_hides_trips_outside_the_return_window(client):
+    api, data = client
+    stamp = seed_sweep(data)
+    # The seeded trips all fly home on 30 January.
+    assert narrow(
+        api, return_focus_start="2027-01-20", return_focus_end="2027-01-25"
+    ).status_code == 200
+
+    narrowed = api.get(f"/api/sweeps/jp-ph/{stamp}/results").json()
+    assert narrowed["itineraries"] == []
+    assert narrowed["window"]["applied"] is True
+
+    everything = api.get(f"/api/sweeps/jp-ph/{stamp}/results?window=all").json()
+    assert everything["itineraries"]
+    assert everything["window"]["applied"] is False
+
+
+def test_a_narrowed_reading_hides_trips_outside_the_nights_band(client):
+    api, data = client
+    stamp = seed_sweep(data)
+    # The seeded trips are 20 nights: 10 in Japan, 10 in the Philippines.
+    narrow(api, total_days=[18, 19])
+    assert api.get(f"/api/sweeps/jp-ph/{stamp}/results").json()["itineraries"] == []
+    assert api.get(f"/api/sweeps/jp-ph/{stamp}/results?window=all").json()["itineraries"]
+
+    narrow(api, total_days=[20, 22])
+    assert api.get(f"/api/sweeps/jp-ph/{stamp}/results").json()["itineraries"]
+
+
+def test_the_departure_window_narrows_a_reading_too(client):
+    """All three parts of the narrowing, or none of them.
+
+    The focus is read from the live trip like the other two, even though the
+    sweep's own snapshot records what it searched under — `is_comparable` reads
+    that from `status.json`, so nothing that needed the snapshot's copy lost it.
+    """
+    api, data = client
+    stamp = seed_sweep(data)  # every seeded trip leaves on 10 January
+    narrow(api, focus_start="2027-01-05", focus_end="2027-01-08")
+    assert api.get(f"/api/sweeps/jp-ph/{stamp}/results").json()["itineraries"] == []
+    assert api.get(f"/api/sweeps/jp-ph/{stamp}/results?window=all").json()["itineraries"]
+
+    narrow(api, focus_start="2027-01-09", focus_end="2027-01-12")
+    body = api.get(f"/api/sweeps/jp-ph/{stamp}/results").json()
+    assert body["itineraries"]
+    assert body["window"]["focus"] == ["2027-01-09", "2027-01-12"]
+
+
+def test_widening_a_narrowing_is_not_served_from_the_cache(client):
+    """Editing a trip does not touch its sweeps, and the memo is keyed on both.
+
+    Keyed on the legs file alone - which is what it was - the second reading
+    below returned the first one's result forever. On screen that is a trip you
+    have just widened still showing nothing, which reads as the sweep having
+    found nothing rather than as a stale answer.
+    """
+    api, data = client
+    stamp = seed_sweep(data)
+    narrow(api, total_days=[18, 19])
+    assert api.get(f"/api/sweeps/jp-ph/{stamp}/results").json()["itineraries"] == []
+
+    narrow(api, total_days=[18, 22])
+    assert api.get(f"/api/sweeps/jp-ph/{stamp}/results").json()["itineraries"]
+
+
+def test_the_narrowing_applies_to_a_sweep_that_predates_it(client):
+    """The sweeps worth narrowing are the ones swept before it existed.
+
+    `_sweep_scenario` takes shape from the run's own snapshot, so a narrowing
+    read from there would only ever apply to sweeps that no longer needed it.
+    """
+    api, data = client
+    stamp = seed_sweep(data)
+    # A snapshot with no narrowing on it, as every committed sweep has.
+    (data / "sweeps" / "jp-ph" / stamp / "scenario.json").write_text(
+        json.dumps(api.get("/api/scenarios/jp-ph").json()), encoding="utf-8"
+    )
+    narrow(api, total_days=[18, 19])
+    assert api.get(f"/api/sweeps/jp-ph/{stamp}/results").json()["itineraries"] == []
+
+
+def test_an_unsatisfiable_narrowing_is_refused_with_a_reason(client):
+    api, _ = client
+    response = narrow(api, total_days=[40, 50])
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert "40-50 nights away is unreachable" in detail
+    assert "9-11 at Japan" in detail
+
+
+def test_a_return_window_outside_the_trip_window_is_refused(client):
+    api, _ = client
+    response = narrow(
+        api, return_focus_start="2027-02-10", return_focus_end="2027-02-14"
+    )
+    assert response.status_code == 400
+    assert "widen the window first" in response.json()["detail"]
+
+
+def test_the_by_date_chart_and_the_table_narrow_together(client):
+    """Two panels on one screen must not report two different populations."""
+    api, data = client
+    stamp = seed_sweep(data)
+    narrow(api, total_days=[18, 19])
+    assert api.get(f"/api/sweeps/jp-ph/{stamp}/by-date").json() == []
+    assert api.get(f"/api/sweeps/jp-ph/{stamp}/by-date?window=all").json()
+
+
+def test_watch_candidates_narrow_too(client):
+    api, data = client
+    stamp = seed_sweep(data)
+    narrow(api, total_days=[18, 19])
+    body = api.get(f"/api/sweeps/jp-ph/{stamp}/candidates").json()
+    assert body["candidates"] == []
+    assert body["window"]["applied"] is True
+    assert api.get(f"/api/sweeps/jp-ph/{stamp}/candidates?window=all").json()["candidates"]
+
+
+# -------------------------------------------------------------------- by-leg
+
+
+def seed_searches(data_dir, rows, stamp="2026-08-06T02-00-00Z"):
+    """What the run asked, whatever it got back."""
+    directory = data_dir / "sweeps" / "jp-ph" / stamp
+    with (directory / "searches.jsonl").open("w") as handle:
+        for origin, destination, when, answered in rows:
+            handle.write(
+                json.dumps(
+                    {
+                        "origin": origin,
+                        "destination": destination,
+                        "depart_date": when,
+                        "answered": answered,
+                    }
+                )
+                + "\n"
+            )
+
+
+def test_by_leg_has_one_series_per_leg_of_the_trip(client):
+    api, data = client
+    stamp = seed_sweep(data)
+    body = api.get(f"/api/sweeps/jp-ph/{stamp}/by-leg").json()
+    assert [leg["label"] for leg in body["legs"]] == [
+        "PRG/VIE → NRT",
+        "NRT → MNL",
+        "MNL → PRG/VIE",
+    ]
+    assert body["stay_days"] == [[9, 11], [9, 11]]
+
+
+def test_by_leg_names_the_airport_pair_that_won_each_date(client):
+    """The pool line is a cheapest-of, so it has to say cheapest of what."""
+    api, data = client
+    stamp = seed_sweep(data)
+    home = api.get(f"/api/sweeps/jp-ph/{stamp}/by-leg").json()["legs"][2]
+    point = next(p for p in home["points"] if p["depart_date"] == "2027-01-30")
+    # Vienna at 11,000 beats Prague at 14,000 on the same day.
+    assert (point["origin"], point["destination"]) == ("MNL", "VIE")
+    assert point["price"] == 11000
+
+
+def test_by_leg_ranks_on_the_bag_inclusive_fare(client):
+    """The same rule the itinerary ranking uses, or the two disagree on screen."""
+    api, data = client
+    stamp = seed_sweep(
+        data,
+        legs=[
+            Leg("T", "PRG", "NRT", date(2027, 1, 10), "QR", None, 1, "CZK", 12000.0, "u",
+                checked_bag=True),
+            Leg("T", "VIE", "NRT", date(2027, 1, 10), "W6", None, 1, "CZK", 11000.0, "u",
+                checked_bag=False),
+        ],
+    )
+    out = api.get(f"/api/sweeps/jp-ph/{stamp}/by-leg").json()["legs"][0]
+    point = next(p for p in out["points"] if p["depart_date"] == "2027-01-10")
+    # 11,000 + a 1,500 bag loses to 12,000 with one included.
+    assert point["origin"] == "PRG"
+    assert point["with_bags"] == 12000
+
+
+def test_by_leg_distinguishes_nothing_sold_from_never_asked(client):
+    """Two opposite facts that would otherwise draw as the same empty gap.
+
+    A date the site answered with no fares is the site having nothing. A date
+    absent from `searches.jsonl` was never asked, which is a hole in the sweep.
+    The first must appear in the series; the second must not.
+    """
+    api, data = client
+    stamp = seed_sweep(data)
+    seed_searches(
+        data,
+        [
+            ("PRG", "NRT", "2027-01-10", True),   # answered, and sold something
+            ("PRG", "NRT", "2027-01-17", True),   # answered, sold nothing
+            # 2027-01-24 deliberately absent: never asked.
+        ],
+    )
+    points = {p["depart_date"]: p for p in api.get(
+        f"/api/sweeps/jp-ph/{stamp}/by-leg"
+    ).json()["legs"][0]["points"]}
+    assert points["2027-01-10"]["price"] == 12000
+    assert points["2027-01-17"]["price"] is None
+    assert points["2027-01-17"]["searched"] is True
+    assert "2027-01-24" not in points
+
+
+def test_by_leg_keeps_a_route_that_returned_nothing_at_all(client):
+    """Derived from the trip's pools, not from the legs that came back.
+
+    An airport that sold nothing is a finding. Building the route list from
+    `legs.jsonl` would delete exactly the routes worth knowing about.
+    """
+    api, data = client
+    stamp = seed_sweep(data)
+    routes = api.get(f"/api/sweeps/jp-ph/{stamp}/by-leg").json()["legs"][0]["routes"]
+    assert [r["route"] for r in routes] == ["PRG→NRT", "VIE→NRT"]
+    vienna = next(r for r in routes if r["route"] == "VIE→NRT")
+    assert vienna["points"] == []
+
+
+def test_by_leg_404s_for_a_sweep_that_is_not_there(client):
+    api, _ = client
+    assert api.get("/api/sweeps/jp-ph/2026-01-01T00-00-00Z/by-leg").status_code == 404
+
+
 def test_by_date_series_has_one_entry_per_departure_date(client):
     api, data = client
     stamp = seed_sweep(data)
@@ -1416,14 +1649,24 @@ def test_adding_a_day_reports_what_watching_it_will_cost(client):
     assert body["minutes"] > 0
 
 
-def test_a_day_that_could_never_chain_is_refused_with_a_reason(client):
+def test_a_hand_picked_day_outside_the_stays_may_still_be_followed(client):
+    """Four days in Japan against a 9-11 stay: accepted, and priced.
+
+    See `test_a_watch_may_break_the_stay_windows`. What is still refused is a
+    chain that runs backwards, which is an impossibility rather than a taste.
+    """
     api, _ = client
-    response = api.post(
+    assert api.post(
         "/api/watch/jp-ph",
         json={"depart_dates": ["2027-01-10", "2027-01-14", "2027-01-24"]},
+    ).status_code == 201
+
+    backwards = api.post(
+        "/api/watch/jp-ph",
+        json={"depart_dates": ["2027-01-20", "2027-01-14", "2027-01-24"]},
     )
-    assert response.status_code == 400
-    assert "Japan" in response.json()["detail"]
+    assert backwards.status_code == 400
+    assert "order" in backwards.json()["detail"]
 
 
 def test_watching_more_than_the_site_will_answer_is_refused(client, monkeypatch):

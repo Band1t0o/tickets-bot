@@ -31,7 +31,7 @@ const state = {
    was lost: the page rendered an empty trip picker and empty charts, which is
    exactly what a deleted database looks like, when in fact nothing on disk had
    changed and the answer was `make ui` again. */
-const EXPECTED_CONTRACT = 10;
+const EXPECTED_CONTRACT = 11;
 
 const api = async (path, options) => {
   const response = await fetch(path, options);
@@ -59,9 +59,9 @@ const block = (title, detail, { retry = null } = {}) => {
 const unblock = () => {
   $('blocker').hidden = true;
   $('tabs').hidden = false;
-  const active = document.querySelector('#tabs button.is-active')?.dataset.tab ?? 'search';
+  const active = document.querySelector('#tabs button.is-active')?.dataset.tab ?? 'map';
   for (const section of document.querySelectorAll('section[data-panel]')) {
-    section.hidden = section.dataset.panel !== active;
+    section.hidden = section.dataset.step !== active;
   }
 };
 
@@ -170,17 +170,66 @@ $('theme-toggle').onclick = () => {
 
 /* ------------------------------------------------------------------- tabs */
 
+/* Three steps and a gear, over the same eleven panels.
+
+   The tabs used to be one per panel, which grew to seven and then read as a
+   list of screens rather than as the order the work is actually done in. Two of
+   them - Prices and Watch - both drew a price history, and nothing on either
+   said which question it was answering. They are split by question now: the
+   by-date chart says *which days*, so it sits with the narrowing; the history
+   chart and the probe say *whether to book now*, so they sit with what you are
+   following.
+
+   Sections carry `data-step` and several share one, so a step is a group of
+   panels rather than a renamed panel. `data-panel` stays as each one's own
+   name, because that is what every renderer, test and error box already
+   addresses them by. */
+const STEP_OF = {
+  search: 'map', explore: 'map',
+  narrow: 'narrow', dates: 'narrow', results: 'narrow',
+  watch: 'follow', history: 'follow',
+  notify: 'setup', night: 'setup', cloud: 'setup', sources: 'setup',
+};
+
+// Where a name that is not a step should take you. `showTab` is called with a
+// panel name from a few places - a finished sweep opens Results, a save error
+// opens Search - and those care about the panel, not about the grouping.
+const stepFor = (name) => STEP_OF[name] ?? name;
+
 function showTab(name) {
-  for (const b of $('tabs').children) b.classList.toggle('is-active', b.dataset.tab === name);
-  for (const section of document.querySelectorAll('section[data-panel]')) {
-    section.hidden = section.dataset.panel !== name;
+  const step = stepFor(name);
+  for (const b of $('tabs').querySelectorAll('button[data-tab]')) {
+    b.classList.toggle('is-active', b.dataset.tab === step);
   }
-  if (name === 'explore') renderExplore();
-  if (name === 'results') { renderResults(); renderCloudSync(); }
-  if (name === 'prices') { renderPrices(); renderFocusControls(); }
-  if (name === 'watch') renderWatch();
-  if (name === 'cloud') { renderCloudRuns(); renderCloudSync(); }
-  if (name === 'sources') { renderSources(); renderNotifyTarget(); }
+  for (const section of document.querySelectorAll('section[data-panel]')) {
+    section.hidden = section.dataset.step !== step;
+  }
+  if (step === 'map') renderExplore();
+  if (step === 'narrow') {
+    // The charts choose the run for the whole step, so they settle before the
+    // panels that read `state.stamp`. Fired off in parallel, the table below
+    // could render the run the charts were about to move off.
+    renderNarrow().then(() => {
+      renderByDate();
+      renderFocusControls();
+      renderResults();
+      renderCloudSync();
+    });
+  }
+  if (step === 'follow') { renderWatch(); renderHistory(); }
+  if (step === 'setup') {
+    renderNightSweep();
+    renderCloudRuns();
+    renderCloudSync();
+    renderSources();
+    renderNotifyTarget();
+  }
+  // A panel named rather than a step: scroll to it, since its step may hold
+  // several and the one asked for is not always the first.
+  if (name !== step) {
+    document.querySelector(`section[data-panel="${name}"]`)
+      ?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+  }
 }
 
 $('tabs').onclick = (event) => {
@@ -1276,7 +1325,15 @@ const clearError = () => {
 
 const showError = (message, tone = 'error') => {
   clearError();
-  const panel = document.querySelector('section[data-panel]:not([hidden])');
+  // Where you pressed, not merely what is on screen.
+  //
+  // This used to take the first visible section, which was the only visible
+  // one. A step now shows several at once, so the first is the top of the page
+  // and a complaint about the button you just pressed could appear a screen
+  // above it - a quieter version of the bug this replaced, where the message
+  // went to a hidden panel and the button looked like it had done nothing.
+  const acted = document.activeElement?.closest('section[data-panel]:not([hidden])');
+  const panel = acted ?? document.querySelector('section[data-panel]:not([hidden])');
   const box = panel?.querySelector('.panel-error') ?? $('save-error');
   box.textContent = message;
   box.className = `panel-error badge badge--${tone}`;
@@ -1329,8 +1386,17 @@ async function saveTrip() {
     // different trip, so the flags in the sweep picker are stale the instant a
     // save lands. Re-read them rather than waiting for the next poll.
     await pollStatus();
-    $('save-btn').textContent = 'Saved';
-    setTimeout(() => ($('save-btn').textContent = 'Save trip'), 1500);
+    // Both save buttons, because the same call backs them and only one of
+    // them is on screen: the trip's is on Map it out, the notification panel's
+    // is behind the gear, and flashing the hidden one confirms nothing.
+    for (const [id, label] of [
+      ['save-btn', 'Save trip'], ['notify-save-btn', 'Save'], ['night-save-btn', 'Save'],
+    ]) {
+      const button = $(id);
+      if (!button) continue;
+      button.textContent = 'Saved';
+      setTimeout(() => { button.textContent = label; }, 1500);
+    }
     return true;
   } catch (error) {
     showError(error.message);
@@ -1718,7 +1784,13 @@ function populateSweepSelect() {
 $('sweep-select').onchange = (event) => {
   state.stamp = event.target.value;
   renderResults();
-  renderPrices();
+  renderByDate();
+  // Follow into the charts only when they can draw it. A probe picked here is
+  // a deliberate choice - the panel says so in words - and dragging the charts
+  // onto it would either blank them or, worse, have `renderNarrow` pull this
+  // selection straight back and undo the click.
+  const chosen = state.sweeps.find((s) => s.stamp === state.stamp);
+  if (chosen && chosen.has_legs && chosen.mode !== 'explore') renderNarrow();
 };
 
 /* ---------------------------------------------------------------- results */
@@ -2146,13 +2218,18 @@ function renderMismatch(body, probe) {
 /* A filter belongs to the trip it was set on. Carrying "from FRA" onto a trip
    that never flies from Frankfurt shows an empty table with a control the reader
    did not set, which reads as a trip with no results. */
-const clearFilters = () => { state.filters = { from: '', to: '', bags: false }; };
+const clearFilters = () => {
+  state.filters = { from: '', to: '', bags: false, allWindow: false };
+};
 
 const filterQuery = () => {
   const params = new URLSearchParams();
   if (state.filters.from) params.set('from_airport', state.filters.from);
   if (state.filters.to) params.set('to_airport', state.filters.to);
   if (state.filters.bags) params.set('bags', 'true');
+  // Only ever sent when asked for. `narrow` is the server's default, so a page
+  // that never sends this behaves exactly as it did before the toggle existed.
+  if (state.filters.allWindow) params.set('window', 'all');
   const query = params.toString();
   return query ? `?${query}` : '';
 };
@@ -2189,7 +2266,14 @@ function renderFilters(body) {
   }
 
   $('filter-bags').checked = state.filters.bags;
-  $('filter-reset').hidden = !body.narrowed;
+  $('filter-window').checked = state.filters.allWindow;
+  // Hidden when there is no narrowing to ignore: a tick that cannot change
+  // anything is a control the reader has to rule out before trusting the table.
+  const narrowing = body.window ?? {};
+  $('filter-window-wrap').hidden = !(
+    narrowing.applied || state.filters.allWindow
+  ) && !(narrowing.focus || narrowing.return_focus || narrowing.total_days);
+  $('filter-reset').hidden = !body.narrowed && !state.filters.allWindow;
 
   // Never "34 of 812". Pruning makes the unfiltered traversal a different set
   // rather than a larger one, so the two counts do not form a fraction.
@@ -2198,6 +2282,21 @@ function renderFilters(body) {
 
   const note = $('filter-note');
   const notes = [];
+  if (state.filters.allWindow) {
+    const said = [];
+    if (narrowing.focus) said.push(`leaving ${narrowing.focus[0]} to ${narrowing.focus[1]}`);
+    if (narrowing.return_focus) {
+      said.push(`home ${narrowing.return_focus[0]} to ${narrowing.return_focus[1]}`);
+    }
+    if (narrowing.total_days) {
+      said.push(`${narrowing.total_days[0]}–${narrowing.total_days[1]} nights away`);
+    }
+    notes.push(
+      'Showing every trip this sweep can build, including ones you said you did not want' +
+      (said.length ? ` (${escapeHtml(said.join(', '))})` : '') +
+      '. Nothing is being searched differently — this is the same legs read another way.',
+    );
+  }
   if (state.filters.bags) {
     // Said every time the tick is on, because the distinction decides whether
     // an absent trip is bad news or merely unmeasured: nothing in a real sweep
@@ -2226,8 +2325,15 @@ for (const [id, apply] of [
   ['filter-from', (el) => { state.filters.from = el.value; }],
   ['filter-to', (el) => { state.filters.to = el.value; }],
   ['filter-bags', (el) => { state.filters.bags = el.checked; }],
+  ['filter-window', (el) => { state.filters.allWindow = el.checked; }],
 ]) {
-  $(id).onchange = (event) => { apply(event.target); renderResults(); };
+  $(id).onchange = (event) => {
+    apply(event.target);
+    renderResults();
+    // The chart above the table reads the same population or the two disagree
+    // about what a departure date costs.
+    if (id === 'filter-window') renderByDate();
+  };
 }
 
 $('filter-reset').onclick = () => {
@@ -2504,23 +2610,30 @@ const byDateNote = (byDate) => {
     '</span>';
 };
 
-async function renderPrices() {
-  if (!state.stamp) return;
+/* The two charts are drawn separately because they now live in different
+   steps, and a chart drawn into a hidden section measures its container at zero
+   width. Splitting them also stopped each one paying for the other's fetch:
+   opening the narrowing no longer asks for the probe. */
 
-  // Independent endpoints, fetched together. Awaiting them one after another
-  // made the Prices tab about three round trips slower than it needed to be.
-  // `allSettled` so one failing panel does not blank the other two.
-  const [byDateResult, historyResult, probeResult] = await Promise.allSettled([
-    api(`/api/sweeps/${state.scenario.id}/${state.stamp}/by-date`),
-    api(`/api/history/${state.scenario.id}`),
-    api('/api/probe'),
-  ]);
+async function renderPrices() {
+  // Kept for the theme toggle, which has to redraw whatever is on screen —
+  // charts read their colours from the design tokens at draw time.
+  await Promise.all([renderByDate(), renderHistory()]);
+}
+
+async function renderByDate() {
+  if (!state.stamp) return;
+  const byDateResult = (await Promise.allSettled([
+    api(
+      `/api/sweeps/${state.scenario.id}/${state.stamp}/by-date` +
+      (state.filters.allWindow ? '?window=all' : ''),
+    ),
+  ]))[0];
 
   // The chart used to hardcode " CZK" regardless of what the legs were priced
   // in. The scenario says what the currency is.
   const suffix = ` ${state.scenario.currency ?? 'CZK'}`;
   const byDate = byDateResult.status === 'fulfilled' ? byDateResult.value : [];
-  const history = historyResult.status === 'fulfilled' ? historyResult.value : [];
 
   const byDateHost = $('chart-by-date');
   const width = Math.max(420, byDateHost.clientWidth - 4);
@@ -2539,6 +2652,19 @@ async function renderPrices() {
         : 'No itineraries in this sweep yet.' },
   ));
   $('by-date-note').innerHTML = byDateNote(byDate);
+}
+
+async function renderHistory() {
+  if (!state.stamp) return;
+  // Independent endpoints, fetched together. `allSettled` so one failing panel
+  // does not blank the other.
+  const [historyResult, probeResult] = await Promise.allSettled([
+    api(`/api/history/${state.scenario.id}`),
+    api('/api/probe'),
+  ]);
+  const suffix = ` ${state.scenario.currency ?? 'CZK'}`;
+  const history = historyResult.status === 'fulfilled' ? historyResult.value : [];
+  const width = Math.max(420, $('chart-history').clientWidth - 4);
 
   $('chart-history').innerHTML = '';
   // Every sweep is drawn, including the ones too incomplete to trust: the gaps
@@ -3428,6 +3554,594 @@ async function init() {
     $('status-strip').className = 'status-strip is-error';
     $('status-text').textContent = `Could not start — ${error.message}`;
   }
+}
+
+/* ------------------------------------------------------------- narrowing --
+
+   Two halves of one step, and they answer different questions.
+
+   Above: the constraints. A focus already said when you leave; this adds when
+   you fly home and how long you are away, and the planner intersects all three
+   so the searches go where the decision already is. On the Japan trip that is
+   198 searches down to 44.
+
+   Below: every leg priced on its own. Every other chart in this app is about
+   the total, which is the right shape for choosing a departure date and the
+   wrong one for choosing a trip — a total cannot show that the flight out is
+   flat all January while the one home has a single cheap Thursday. The markers
+   are draggable and nothing stops them landing somewhere the stay ranges
+   forbid, because a range typed a month ago is not evidence and a price is.
+*/
+
+const narrow = {
+  stamp: null,
+  data: null,
+  domain: [],
+  cursor: [],       // one date index per leg, into `domain`
+  expanded: new Set(),
+};
+
+const NIGHTS = (from, to) => Math.round((asDate(to) - asDate(from)) / 86400000);
+
+function narrowSaved() {
+  const s = state.scenario;
+  return Boolean(s && (s.return_focus_start || s.total_days));
+}
+
+/* ------------------------------------------------------- the constraints */
+
+function renderNarrowFields() {
+  const s = state.scenario || {};
+  $('narrow-out-start').value = s.focus_start || '';
+  $('narrow-out-end').value = s.focus_end || '';
+  $('narrow-back-start').value = s.return_focus_start || '';
+  $('narrow-back-end').value = s.return_focus_end || '';
+  $('narrow-nights-min').value = s.total_days ? s.total_days[0] : '';
+  $('narrow-nights-max').value = s.total_days ? s.total_days[1] : '';
+
+  const badge = $('narrow-state');
+  const parts = [];
+  if (s.focus_start) parts.push(`out ${s.focus_start.slice(5)}–${s.focus_end.slice(5)}`);
+  if (s.return_focus_start) {
+    parts.push(`home ${s.return_focus_start.slice(5)}–${s.return_focus_end.slice(5)}`);
+  }
+  if (s.total_days) parts.push(`${s.total_days[0]}–${s.total_days[1]} nights`);
+  badge.className = `badge badge--${parts.length ? 'good' : 'muted'}`;
+  badge.textContent = parts.length ? parts.join(' · ') : 'the whole window';
+
+  // What the stays make reachable at all, next to the box you type the band
+  // into — so an impossible number is obvious before it is saved rather than
+  // after the save is refused.
+  //
+  // From the trip on screen, never from the sweep being read. `validate()`
+  // judges the box against the live stays, so a hint taken from a sweep run
+  // under older ones can name a range the save then refuses.
+  const stops = (s.stops || []).slice(0, Math.max(0, (s.stops || []).length - (s.one_way ? 1 : 0)));
+  const hint = $('narrow-nights-hint');
+  if (stops.length) {
+    const low = stops.reduce((n, stop) => n + stop.stay_days[0], 0);
+    const high = stops.reduce((n, stop) => n + stop.stay_days[1], 0);
+    hint.textContent = `the stays allow ${low}–${high}`;
+  } else {
+    hint.textContent = '';
+  }
+}
+
+function narrowFromFields() {
+  const value = (id) => $(id).value || null;
+  const min = $('narrow-nights-min').value;
+  const max = $('narrow-nights-max').value;
+  return {
+    focus_start: value('narrow-out-start'),
+    focus_end: value('narrow-out-end'),
+    return_focus_start: value('narrow-back-start'),
+    return_focus_end: value('narrow-back-end'),
+    total_days: min !== '' && max !== '' ? [Number(min), Number(max)] : null,
+  };
+}
+
+async function refreshNarrowCost() {
+  // Priced against the trip on screen rather than the one on disk, so the
+  // figure moves as the dates are typed. Deep on both sides: comparing a
+  // narrowed quick plan against a broad deep one would flatter the narrowing
+  // by the depth rather than by the narrowing.
+  const note = $('narrow-cost');
+  const trip = { ...state.scenario, ...narrowFromFields() };
+  try {
+    const [whole, narrowed] = await Promise.all([
+      api(`/api/scenarios/${state.scenario.id}/estimate?depth=deep`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...state.scenario,
+          focus_start: null, focus_end: null,
+          return_focus_start: null, return_focus_end: null, total_days: null,
+        }),
+      }),
+      api(`/api/scenarios/${state.scenario.id}/estimate?depth=deep`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(trip),
+      }),
+    ]);
+    note.textContent =
+      `A deep sweep of this is ${count(narrowed.searches)} searches (~${Math.round(narrowed.minutes)} min), ` +
+      `against ${count(whole.searches)} searches (~${Math.round(whole.minutes)} min) for the whole window.`;
+  } catch (error) {
+    note.textContent = error.message;
+  }
+}
+
+async function saveNarrowing(fields) {
+  const message = $('narrow-message');
+  message.className = 'small';
+  try {
+    state.scenario = await api(`/api/scenarios/${state.scenario.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...state.scenario, ...fields }),
+    });
+    renderNarrowFields();
+    message.textContent = narrowSaved()
+      ? 'Saved. Tonight’s sweep prices this.'
+      : 'Cleared. Back to the whole window.';
+    // Everything in this step reads the narrowing, and all of it is on screen
+    // at once now. Refreshing only the charts left the table under them listing
+    // trips the narrowing had just excluded - two panels, one screen, two
+    // different answers to what this sweep contains.
+    await Promise.all([
+      refreshNarrowCost(),
+      loadLegCharts(),
+      renderByDate(),
+      renderResults(),
+    ]);
+  } catch (error) {
+    // The server refuses a narrowing nothing can satisfy and says which stays
+    // make it impossible. That sentence is the useful one, so it is shown
+    // verbatim rather than rewritten into something vaguer.
+    message.className = 'small badge badge--error';
+    message.textContent = error.message;
+  }
+}
+
+/* --------------------------------------------------------- the leg charts */
+
+async function renderNarrow() {
+  renderNarrowFields();
+  const picker = $('narrow-sweep');
+  // Probes and runs whose legs never reached disk cannot answer this panel:
+  // a probe prices three dates a leg to compare airports, which draws a chart
+  // that looks like a price curve and is not one.
+  const sweeps = state.sweeps.filter((s) => s.has_legs && s.mode !== 'explore');
+  picker.innerHTML = sweeps
+    .map((s) => `<option value="${escapeHtml(s.stamp)}">${escapeHtml(sweepLabel(s))}</option>`)
+    .join('');
+  if (!sweeps.length) {
+    $('leg-charts').className = 'empty';
+    $('leg-charts').textContent = 'No sweep with flights on disk yet. Run one from Search.';
+    $('cursor-readout').innerHTML = '';
+    return;
+  }
+  // One sweep for the whole step. This picker and the table's used to be
+  // separate, so the charts could be showing 22 August while the itineraries
+  // under them were 23 August's probe - two panels on one screen describing two
+  // different runs, with nothing to say so. Follow the step's selection when it
+  // can be drawn, and pull the step to this one when it cannot.
+  if (state.stamp && sweeps.some((s) => s.stamp === state.stamp)) {
+    narrow.stamp = state.stamp;
+  } else {
+    // The step opened on a run these charts cannot draw - most often the
+    // newest, which is a two-hourly probe. Move the whole step onto the newest
+    // run that can be drawn rather than leaving the charts and the table below
+    // them on different days.
+    if (!narrow.stamp || !sweeps.some((s) => s.stamp === narrow.stamp)) {
+      narrow.stamp = sweeps[0].stamp;
+    }
+    state.stamp = narrow.stamp;
+    const table = $('sweep-select');
+    if ([...table.options].some((o) => o.value === state.stamp)) table.value = state.stamp;
+  }
+  picker.value = narrow.stamp;
+  await Promise.all([refreshNarrowCost(), loadLegCharts()]);
+}
+
+async function loadLegCharts() {
+  if (!narrow.stamp) return;
+  const host = $('leg-charts');
+  try {
+    narrow.data = await api(
+      `/api/sweeps/${state.scenario.id}/${narrow.stamp}/by-leg`,
+    );
+  } catch (error) {
+    host.className = 'empty';
+    host.textContent = error.message;
+    return;
+  }
+
+  // One axis for every leg: the union of every date any leg was asked about,
+  // in order. Each chart is then handed the same domain, which is what makes a
+  // vertical slice down the stack one trip rather than three unrelated days.
+  const dates = new Set();
+  for (const leg of narrow.data.legs) for (const p of leg.points) dates.add(p.depart_date);
+  const domain = [...dates].sort();
+  // A trip picked by hand survives leaving the step and coming back. It is
+  // several deliberate drags, and re-snapping it away on the way past would
+  // make the panel unusable next to any other one. Only a genuinely different
+  // axis - another sweep, or the same trip re-swept over other dates - is
+  // grounds for throwing the cursor away, because indices into the old domain
+  // would then point at the wrong days.
+  const same =
+    narrow.domain.length === domain.length
+    && narrow.domain.every((label, i) => label === domain[i])
+    && narrow.cursor.length === narrow.data.legs.length;
+  narrow.domain = domain;
+  if (!same) narrow.expanded.clear();
+  renderNarrowFields();
+
+  if (!same) await snapCursor({ quiet: true });
+  drawLegCharts();
+}
+
+function drawLegCharts() {
+  const host = $('leg-charts');
+  host.className = '';
+  host.innerHTML = '';
+  if (!narrow.data || !narrow.domain.length) {
+    host.className = 'empty';
+    host.textContent = 'This sweep found no flights.';
+    return;
+  }
+
+  // Every chart the same width, or the columns stop lining up and the whole
+  // point of stacking them is lost. Filling the panel rather than a fixed 520:
+  // three narrow charts floating in a wide panel waste exactly the horizontal
+  // room a date axis needs most.
+  const width = Math.max(
+    host.clientWidth - 4 || 520,
+    narrow.domain.length * 26 + 80,
+  );
+  const suffix = ` ${narrow.data.currency}`;
+
+  narrow.data.legs.forEach((leg, index) => {
+    const block = document.createElement('div');
+    block.className = 'leg-chart';
+
+    const header = document.createElement('div');
+    header.className = 'leg-chart__header';
+    const toggle = document.createElement('button');
+    toggle.className = 'small';
+    toggle.textContent = narrow.expanded.has(index)
+      ? `${leg.label} — hide routes`
+      : `${leg.label}${leg.routes.length > 1 ? ` — ${count(leg.routes.length)} routes` : ''}`;
+    toggle.disabled = leg.routes.length < 2;
+    toggle.onclick = () => {
+      if (narrow.expanded.has(index)) narrow.expanded.delete(index);
+      else narrow.expanded.add(index);
+      drawLegCharts();
+    };
+    header.appendChild(toggle);
+
+    const picked = document.createElement('span');
+    picked.className = 'small muted';
+    const at = narrow.domain[narrow.cursor[index]];
+    const point = at && leg.points.find((p) => p.depart_date === at);
+    picked.textContent = point && point.price !== null
+      ? `${at} · ${point.origin}→${point.destination} · ${money(point.price, narrow.data.currency)}`
+      : at ? `${at} · nothing found` : '';
+    header.appendChild(picked);
+    block.appendChild(header);
+
+    const series = leg.points.map((p) => ({
+      label: p.depart_date,
+      value: p.price,
+      searched: p.searched,
+      note: p.price === null ? null
+        : `${p.origin}→${p.destination} · ${p.airline || 'unknown airline'} · ` +
+          `${p.stops === 0 ? 'direct' : `${count(p.stops)} stops`}`,
+    }));
+
+    block.appendChild(lineChart(series, {
+      domain: narrow.domain,
+      width,
+      height: 190,
+      valueSuffix: suffix,
+      ariaLabel: `${leg.label} by departure date`,
+      marker: { index: narrow.cursor[index] },
+      onMarkerMove: (i) => { narrow.cursor[index] = i; renderCursor(); },
+      onMarkerRelease: () => drawLegCharts(),
+      emptyText: 'Nothing priced on this leg.',
+    }));
+
+    if (narrow.expanded.has(index)) {
+      // Six colours exist and were validated in both themes. A seventh route
+      // would reuse one and two lines would be indistinguishable, so the extra
+      // ones are named rather than drawn in a colour that lies.
+      const shown = leg.routes.slice(0, 6);
+      shown.forEach((route, r) => {
+        const row = document.createElement('div');
+        row.className = 'leg-chart__route';
+        const name = document.createElement('span');
+        name.className = 'small';
+        name.textContent = route.route;
+        row.appendChild(name);
+        row.appendChild(lineChart(
+          route.points.map((p) => ({
+            label: p.depart_date, value: p.price, searched: p.searched,
+          })),
+          {
+            domain: narrow.domain, width, height: 120, valueSuffix: suffix,
+            color: `var(--color-chart${r + 1})`,
+            ariaLabel: `${route.route} by departure date`,
+            emptyText: `${route.route} — nothing sold on any date searched.`,
+          },
+        ));
+        block.appendChild(row);
+      });
+      if (leg.routes.length > shown.length) {
+        const rest = document.createElement('p');
+        rest.className = 'panel__hint small';
+        rest.textContent =
+          `${count(leg.routes.length - shown.length)} other routes not drawn: six is as many ` +
+          'lines as this palette can tell apart.';
+        block.appendChild(rest);
+      }
+    }
+
+    host.appendChild(block);
+  });
+
+  renderCursor();
+}
+
+/* ----------------------------------------------------------- the readout */
+
+function cursorTrip() {
+  /* What the markers currently say, priced, split and checked.
+
+     Checked rather than enforced. Every rule it can break is reported by name
+     and none of them stops anything, which is the whole reason the markers
+     move independently. */
+  const legs = narrow.data.legs.map((leg, i) => {
+    const at = narrow.domain[narrow.cursor[i]];
+    const point = leg.points.find((p) => p.depart_date === at) || null;
+    return { label: leg.label, date: at, point };
+  });
+
+  const priced = legs.every((l) => l.point && l.point.price !== null);
+  const total = priced
+    ? legs.reduce((sum, l) => sum + l.point.with_bags, 0)
+    : null;
+
+  const stays = [];
+  for (let i = 1; i < legs.length; i += 1) {
+    stays.push(NIGHTS(legs[i - 1].date, legs[i].date));
+  }
+  const away = legs.length > 1 ? NIGHTS(legs[0].date, legs[legs.length - 1].date) : 0;
+
+  // Two different kinds of wrong, and conflating them would make the panel
+  // useless. A stay outside its range is a rule *you* set and may want to
+  // break — the whole reason the markers move freely. A leg that departs before
+  // the one before it has arrived is not a preference at all; no sweep, no
+  // watch and no airline can price it, and offering to follow it would only
+  // produce a refusal from the server one click later.
+  const impossible = [];
+  for (let i = 1; i < legs.length; i += 1) {
+    if (legs[i].date && legs[i - 1].date && legs[i].date <= legs[i - 1].date) {
+      impossible.push(`${legs[i].date} is not after ${legs[i - 1].date}`);
+    }
+  }
+
+  const breaks = [];
+  const labels = narrow.data.stop_labels || [];
+  narrow.data.stay_days.forEach((range, i) => {
+    if (i >= stays.length) return;
+    if (stays[i] < range[0] || stays[i] > range[1]) {
+      breaks.push(`${stays[i]} nights at ${labels[i] || `stop ${i + 1}`}, not ${range[0]}–${range[1]}`);
+    }
+  });
+  const band = narrow.data.window && narrow.data.window.total_days;
+  if (band && (away < band[0] || away > band[1])) {
+    breaks.push(`${away} nights away, not ${band[0]}–${band[1]}`);
+  }
+  // All three parts of the narrowing, in the order they are read on the panel
+  // above. Checking two of them and not the departure window is how "fits every
+  // rule you set" came to sit under a trip leaving two days outside it.
+  const out = narrow.data.window && narrow.data.window.focus;
+  const first = legs[0].date;
+  if (out && first && (first < out[0] || first > out[1])) {
+    breaks.unshift(`leaving ${first}, not ${out[0]}–${out[1]}`);
+  }
+  const home = narrow.data.window && narrow.data.window.return_focus;
+  const last = legs[legs.length - 1].date;
+  if (home && (last < home[0] || last > home[1])) {
+    breaks.push(`flying home ${last}, not ${home[0]}–${home[1]}`);
+  }
+
+  return { legs, priced, total, stays, away, breaks, impossible };
+}
+
+function renderCursor() {
+  const host = $('cursor-readout');
+  if (!narrow.data || !narrow.domain.length || !narrow.cursor.length) {
+    host.innerHTML = '';
+    return;
+  }
+  const trip = cursorTrip();
+  const currency = narrow.data.currency;
+
+  const split = trip.stays.length
+    ? trip.stays.join(' + ') + ` = ${count(trip.away)} nights away`
+    : `${count(trip.away)} nights away`;
+
+  const badges = trip.impossible.length
+    ? trip.impossible
+        .map((b) => `<span class="badge badge--error">cannot exist: ${escapeHtml(b)}</span>`)
+        .join(' ')
+    : trip.breaks.length
+      ? trip.breaks.map((b) => `<span class="badge badge--warning">${escapeHtml(b)}</span>`).join(' ')
+      : '<span class="badge badge--good">fits every rule you set</span>';
+
+  // The only thing on this panel that is ever disabled, and only for the one
+  // case nothing downstream could price anyway.
+  const follow = $('cursor-watch');
+  follow.disabled = trip.impossible.length > 0;
+  follow.title = trip.impossible.length
+    ? 'These legs are out of order — no sweep or watch could price this.'
+    : '';
+
+  host.innerHTML = `
+    <div class="cursor-readout__total">
+      ${trip.priced ? escapeHtml(money(trip.total, currency)) : '—'}
+      <span class="small muted">incl. bags</span>
+    </div>
+    <div class="cursor-readout__split">${escapeHtml(split)}</div>
+    <div class="cursor-readout__badges">${badges}</div>
+    <div class="cursor-readout__legs">${trip.legs.map((l) => `
+      <span>${escapeHtml(l.date || '—')}
+        <span class="muted">${l.point && l.point.price !== null
+          ? escapeHtml(`${l.point.origin}→${l.point.destination} ${money(l.point.price, currency)}`)
+          : 'nothing found'}</span>
+      </span>`).join('')}</div>
+  `;
+  if (!trip.priced) {
+    const warn = document.createElement('p');
+    warn.className = 'small muted';
+    warn.textContent =
+      'One of these dates had no flight in this sweep, so there is no total to show. ' +
+      'The trip may still exist — it was simply never priced on that day.';
+    host.appendChild(warn);
+  }
+}
+
+/* Snap every marker to the cheapest trip that satisfies the narrowing.
+
+   Taken from `/results?window=narrow` rather than worked out here, so the
+   button lands on exactly the itinerary the table calls cheapest. Two pieces
+   of code answering "which is cheapest" is two answers, and the one on the
+   chart would be the one nobody could check. */
+async function snapCursor({ quiet = false } = {}) {
+  const message = $('cursor-message');
+
+  const place = (itinerary) => {
+    narrow.cursor = itinerary.legs.map((leg) => {
+      const at = narrow.domain.indexOf(leg.depart_date);
+      return at >= 0 ? at : 0;
+    });
+  };
+
+  /* Last resort: each leg's own cheapest day, forced into order.
+
+     Cheapest-per-leg on its own is not a trip. The legs are priced
+     independently, so the cheapest day for the flight to Manila is regularly
+     before the cheapest day for the flight to Tokyo - and the panel would then
+     open on "cannot exist", with Follow disabled, before the reader had touched
+     a thing. Marching the dates forward gives a cursor that is merely
+     uninteresting rather than impossible. */
+  const spread = () => {
+    let floor = -1;
+    narrow.cursor = narrow.data.legs.map((leg) => {
+      const priced = leg.points.filter((p) => p.price !== null);
+      let at = 0;
+      if (priced.length) {
+        const best = priced.reduce((a, b) => (b.with_bags < a.with_bags ? b : a));
+        at = Math.max(0, narrow.domain.indexOf(best.depart_date));
+      }
+      if (at <= floor) at = Math.min(floor + 1, narrow.domain.length - 1);
+      floor = at;
+      return at;
+    });
+  };
+
+  const ask = async (window) => {
+    const body = await api(
+      `/api/sweeps/${state.scenario.id}/${narrow.stamp}/results?window=${window}&limit=1`,
+    );
+    return [body.itineraries && body.itineraries[0], body.currency];
+  };
+
+  try {
+    const [best, currency] = await ask('narrow');
+    if (best) {
+      place(best);
+      if (!quiet) {
+        message.className = 'small';
+        message.textContent = `Snapped to ${money(best.total_with_bags, currency)} incl. bags.`;
+      }
+    } else {
+      // Nothing here fits. Show the cheapest trip this sweep *can* build rather
+      // than no trip at all: that it exists and sits outside the narrowing is
+      // the useful thing to see, and it is a real trip to start dragging from.
+      const [nearest, nearestCurrency] = await ask('all');
+      if (nearest) place(nearest);
+      else spread();
+      if (!quiet) {
+        message.className = 'small badge badge--warning';
+        message.textContent = nearest
+          ? `No trip in this sweep fits your narrowing. This is its cheapest, at ` +
+            `${money(nearest.total_with_bags, nearestCurrency)} — the badges say what it breaks.`
+          : 'This sweep built no complete trip at all.';
+      }
+    }
+  } catch (error) {
+    spread();
+    if (!quiet) {
+      message.className = 'small badge badge--error';
+      message.textContent = error.message;
+    }
+  }
+  if (!quiet) drawLegCharts();
+}
+
+/* Follow the picked trip: a Watch, pinned to these exact leg dates.
+
+   Legal whether or not it breaks the stay ranges. A watch prices the dates it
+   is given; the ranges only ever governed which chains a sweep would build. */
+async function watchCursor() {
+  const message = $('cursor-message');
+  const trip = cursorTrip();
+  try {
+    await api(`/api/watch/${state.scenario.id}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        depart_dates: trip.legs.map((l) => l.date),
+        added_price: trip.priced ? trip.total : null,
+        currency: narrow.data.currency,
+      }),
+    });
+    message.className = 'small badge badge--good';
+    message.textContent = trip.breaks.length
+      ? 'Following it. It breaks a rule you set, and it will be priced every four hours all the same.'
+      : 'Following it. Priced every four hours from now.';
+  } catch (error) {
+    message.className = 'small badge badge--error';
+    message.textContent = error.message;
+  }
+}
+
+$('notify-save-btn').onclick = saveTrip;
+$('night-save-btn').onclick = saveTrip;
+
+$('narrow-sweep').onchange = async (event) => {
+  narrow.stamp = event.target.value;
+  // The table and the by-date chart in this step move with it, or the step is
+  // back to describing two runs at once.
+  state.stamp = narrow.stamp;
+  const picker = $('sweep-select');
+  if ([...picker.options].some((o) => o.value === state.stamp)) picker.value = state.stamp;
+  await Promise.all([loadLegCharts(), renderByDate(), renderResults()]);
+};
+$('narrow-save').onclick = () => saveNarrowing(narrowFromFields());
+$('narrow-clear').onclick = () => saveNarrowing({
+  return_focus_start: null, return_focus_end: null, total_days: null,
+});
+$('cursor-snap').onclick = () => snapCursor();
+$('cursor-watch').onclick = () => watchCursor();
+for (const id of [
+  'narrow-out-start', 'narrow-out-end', 'narrow-back-start', 'narrow-back-end',
+  'narrow-nights-min', 'narrow-nights-max',
+]) {
+  $(id).onchange = () => refreshNarrowCost();
 }
 
 init();

@@ -21,6 +21,7 @@ posts anything. `src/cli.py` runs the search, this records what it found, and
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -72,6 +73,50 @@ def _comparable(status: dict) -> bool:
     return coverage is None or coverage >= 1.0
 
 
+def _admitting(scenario: Scenario, watch) -> Scenario:
+    """`scenario`, relaxed enough to price the trip this watch actually pinned.
+
+    Two relaxations, and both exist because a watch names its dates outright
+    while the stay ranges and the narrowing are statements about which trips a
+    *sweep* should look for.
+
+    The stays are widened to the union of what the trip declares and what this
+    candidate implies. Widened rather than replaced, so a candidate pinned to
+    ten nights inside a 9-11 range can still be beaten by an eleven-night chain
+    the way it always could - the docstring above promises that `found_dates`
+    may differ from what was pinned, and narrowing to the pinned stay exactly
+    would quietly retire the promise.
+
+    Without this a hand-picked trip could be followed and never priced. The
+    charts exist so that a fifteen-night stay four thousand cheaper than any
+    legal one can be seen and then followed; a watch that refused to chain it
+    would report "nothing found" every four hours, which reads as the site
+    having no seats rather than as the tool declining to look.
+
+    The narrowing is dropped for the same reason in stronger form: it is about
+    which dates are worth *searching*, and this candidate's dates are already
+    chosen. Leaving it on would silently blank every watch that sits outside
+    the current window the moment the window moved.
+    """
+    stops = []
+    for index, stop in enumerate(scenario.stops):
+        # Sliced like `remaining_min_stay`: nothing has to happen after the
+        # final leg departs, so the last stop of a chain has no stay to widen.
+        if index >= scenario.leg_count - 1 or index + 1 >= len(watch.depart_dates):
+            stops.append(stop)
+            continue
+        days = (watch.depart_dates[index + 1] - watch.depart_dates[index]).days
+        low, high = stop.stay_days
+        stops.append(replace(stop, stay_days=(min(low, days), max(high, days))))
+    return replace(
+        scenario,
+        stops=stops,
+        return_focus_start=None,
+        return_focus_end=None,
+        total_days=None,
+    )
+
+
 def record_observations(
     legs: list[Leg],
     scenario: Scenario,
@@ -85,17 +130,22 @@ def record_observations(
     airport pair is that Frankfurt may have undercut Vienna overnight, or that
     arriving Haneda and leaving Kansai now beats both. `found_dates` and `route`
     therefore record what actually won, which can differ from what was pinned.
+
+    Rebuilt once per candidate rather than once for all of them, because each
+    is chained against a scenario widened to admit its own pinned stays - see
+    `_admitting`. One shared traversal would let one candidate's widening decide
+    another candidate's price.
     """
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
 
-    combined = combine_all(legs, scenario, limit=None)
     bag = float(scenario.bag_estimate)
     comparable = _comparable(status)
     ts = _now()
 
     rows: list[dict] = []
     for watch in scenario.watches:
+        combined = combine_all(legs, _admitting(scenario, watch), limit=None, narrowed=False)
         best = combined.best_by_date.get(watch.key)
         rows.append(
             {

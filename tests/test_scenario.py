@@ -478,12 +478,19 @@ def test_a_watch_may_not_run_backwards():
         trip.validate()
 
 
-def test_a_watch_must_respect_the_stay_windows():
-    # 4 days in Japan, against a [9, 11] stay: this trip was never possible, so
-    # watching it would price a chain the combiner can never close.
+def test_a_watch_may_break_the_stay_windows():
+    """Hand-picked dates are facts, not a search space.
+
+    This used to be refused, on the grounds that the combiner could never close
+    such a chain and the watch would report nothing every four hours. It can
+    now: `watch._admitting` widens the stays to whatever a candidate pinned
+    before pricing it. Refusing was the more expensive mistake - the per-leg
+    charts exist so a four-day Japan stay that happens to be far cheaper can be
+    found by eye, and a tool that shows you a saving and will not follow it is
+    worse than one that never showed you.
+    """
     trip = make_scenario(watches=[_watch(dates=("2027-01-10", "2027-01-14", "2027-01-24"))])
-    with pytest.raises(ValueError, match="Japan"):
-        trip.validate()
+    trip.validate()
 
 
 def test_a_watch_must_start_inside_the_window():

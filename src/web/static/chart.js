@@ -55,20 +55,43 @@ function svgEl(name, attrs = {}) {
 }
 
 /**
- * points: [{ label: '2027-01-12', value: 27000, note?, muted? }]
- * opts:   { height, valueSuffix, xLabel }
+ * points: [{ label: '2027-01-12', value: 27000, note?, muted?, searched? }]
+ * opts:   { height, valueSuffix, xLabel, domain, band, onPick, marker, onMarkerMove }
  *
  * `muted` marks a point whose value is not trustworthy enough to compare with
  * the others — a sweep that was starved or never covered the whole trip. It is
  * drawn hollow, joined by a dashed segment, and excluded from the cheapest
  * label. Hiding such points entirely would be worse: the gap in the record is
  * itself worth seeing.
+ *
+ * `opts.domain` forces the x categories, in order, whatever `points` contains.
+ * That is what lets several charts be stacked and read down a vertical slice:
+ * without it each one scales to its own dates, the columns stop lining up, and
+ * a slice through three charts names three different days while looking like it
+ * names one.
+ *
+ * A `null` value is a gap, and there are two kinds of gap that must not draw the
+ * same. `searched: true` with no value is the site having answered and sold
+ * nothing — a fact about the route, drawn as a tick on the floor of the plot.
+ * Everything else is a date this series was never asked about — a hole in the
+ * sweep, drawn as nothing at all, because an absence of information should look
+ * like one rather than like a measurement.
  */
 export function lineChart(points, opts = {}) {
   const wrap = document.createElement('div');
   wrap.className = 'chart-wrap';
 
-  if (!points || points.length === 0) {
+  // Laid onto the shared domain before anything measures or counts them, so
+  // every figure below — width, spacing, the indices handed to callbacks — is
+  // in the domain's terms and the caller never has to translate between two.
+  if (opts.domain && opts.domain.length) {
+    const byLabel = new Map((points || []).map((p) => [p.label, p]));
+    points = opts.domain.map((label) => byLabel.get(label) || { label, value: null });
+  }
+
+  const hasValue = (p) => p && p.value !== null && p.value !== undefined;
+
+  if (!points || points.length === 0 || !points.some(hasValue)) {
     const empty = document.createElement('div');
     empty.className = 'empty';
     empty.textContent = opts.emptyText || 'No data yet.';
@@ -83,7 +106,7 @@ export function lineChart(points, opts = {}) {
   const plotW = width - PAD.left - PAD.right;
   const plotH = height - PAD.top - PAD.bottom;
 
-  const values = points.map((p) => p.value);
+  const values = points.filter(hasValue).map((p) => p.value);
   const rawMin = Math.min(...values);
   const rawMax = Math.max(...values);
   // A price chart that starts at zero wastes most of its height on empty space
@@ -150,14 +173,30 @@ export function lineChart(points, opts = {}) {
     svg.appendChild(label);
   });
 
+  // Asked, and nothing was for sale. A tick on the floor of the plot rather
+  // than a marker on the line: it has no price, so it must not sit at a height
+  // that could be read as one.
+  points.forEach((p, i) => {
+    if (hasValue(p) || !p.searched) return;
+    svg.appendChild(svgEl('line', {
+      x1: x(i), x2: x(i), y1: PAD.top + plotH - 5, y2: PAD.top + plotH + 1,
+      stroke: 'var(--color-chartAxis)', 'stroke-width': 2, opacity: 0.5,
+    }));
+  });
+
   // Series line, drawn a segment at a time so a segment touching an untrusted
   // point can be dashed. One continuous solid line would assert a trend across
   // measurements that cannot support one.
+  //
+  // A gap breaks the line rather than being bridged across it. Joining the two
+  // sides would draw a price for every date in between, which is the one thing
+  // a date the sweep never priced must not appear to have.
   for (let i = 1; i < points.length; i += 1) {
+    if (!hasValue(points[i - 1]) || !hasValue(points[i])) continue;
     const uncertain = points[i - 1].muted || points[i].muted;
     svg.appendChild(svgEl('path', {
       d: `M${x(i - 1)},${y(points[i - 1].value)} L${x(i)},${y(points[i].value)}`,
-      fill: 'none', stroke: 'var(--color-chart1)',
+      fill: 'none', stroke: opts.color || 'var(--color-chart1)',
       'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round',
       ...(uncertain ? { 'stroke-dasharray': '4 4', opacity: 0.45 } : {}),
     }));
@@ -166,10 +205,11 @@ export function lineChart(points, opts = {}) {
   // Markers, with a surface ring so overlapping points stay separable. Hollow
   // where the value is not comparable.
   points.forEach((p, i) => {
+    if (!hasValue(p)) return;
     svg.appendChild(svgEl('circle', {
       cx: x(i), cy: y(p.value), r: 4,
-      fill: p.muted ? 'var(--color-panelBackground)' : 'var(--color-chart1)',
-      stroke: p.muted ? 'var(--color-chart1)' : 'var(--color-panelBackground)',
+      fill: p.muted ? 'var(--color-panelBackground)' : (opts.color || 'var(--color-chart1)'),
+      stroke: p.muted ? (opts.color || 'var(--color-chart1)') : 'var(--color-panelBackground)',
       'stroke-width': 2,
       ...(p.muted ? { opacity: 0.6 } : {}),
     }));
@@ -180,14 +220,14 @@ export function lineChart(points, opts = {}) {
   // that their number cannot be believed, and calling one "the best" is the
   // present bug in miniature. With nothing trustworthy to label, label nothing;
   // the caption under the chart says why.
-  const trusted = points.map((p, i) => [p, i]).filter(([p]) => !p.muted);
+  const trusted = points.map((p, i) => [p, i]).filter(([p]) => !p.muted && hasValue(p));
   if (trusted.length) {
     const [bestPoint, cheapestIndex] = trusted.reduce(
       (a, b) => (b[0].value < a[0].value ? b : a),
     );
     svg.appendChild(svgEl('circle', {
       cx: x(cheapestIndex), cy: y(bestPoint.value), r: 6,
-      fill: 'none', stroke: 'var(--color-chart1)', 'stroke-width': 2,
+      fill: 'none', stroke: opts.color || 'var(--color-chart1)', 'stroke-width': 2,
     }));
     const best = svgEl('text', {
       x: x(cheapestIndex),
@@ -215,8 +255,8 @@ export function lineChart(points, opts = {}) {
   svg.appendChild(crosshair);
 
   // Nearest point to a mouse event, so the hit target is far bigger than the
-  // 4px marker. Shared by hover and click: two copies of this would let the
-  // tooltip name one date while a click picked its neighbour.
+  // 4px marker. Shared by hover, click and drag: three copies of this would let
+  // the tooltip name one date while a click picked its neighbour.
   const nearestTo = (event) => {
     const box = svg.getBoundingClientRect();
     const scale = width / box.width;
@@ -229,6 +269,65 @@ export function lineChart(points, opts = {}) {
     });
     return { nearest, scale };
   };
+
+  // The trip cursor: one date on this leg, dragged by hand.
+  //
+  // Deliberately independent of the other charts' markers. Moving one so that
+  // the trip it implies is no longer legal is the entire point — the stay
+  // ranges exist so a sweep knows what to price, and a range written a month
+  // ago should not be able to hide a stay that turned out to be four thousand
+  // cheaper. The page says what a combination breaks; nothing here refuses to
+  // draw it.
+  let markerAt = null;
+  if (opts.marker && Number.isInteger(opts.marker.index)) {
+    markerAt = Math.max(0, Math.min(points.length - 1, opts.marker.index));
+    const markerLine = svgEl('line', {
+      y1: PAD.top - 4, y2: PAD.top + plotH + 4,
+      stroke: 'var(--color-chart3)', 'stroke-width': 2,
+    });
+    const markerDot = svgEl('circle', {
+      r: 5, fill: 'var(--color-chart3)',
+      stroke: 'var(--color-panelBackground)', 'stroke-width': 2,
+    });
+    svg.appendChild(markerLine);
+    svg.appendChild(markerDot);
+
+    const place = (index) => {
+      markerAt = index;
+      const point = points[index];
+      markerLine.setAttribute('x1', x(index));
+      markerLine.setAttribute('x2', x(index));
+      markerDot.setAttribute('cx', x(index));
+      // Parked on the floor when the date has no price, so the cursor never
+      // sits at a height that would read as a fare it does not have.
+      markerDot.setAttribute('cy', hasValue(point) ? y(point.value) : PAD.top + plotH);
+      markerDot.setAttribute('visibility', hasValue(point) ? 'visible' : 'hidden');
+    };
+    place(markerAt);
+
+    let dragging = false;
+    const moveTo = (event) => {
+      const { nearest } = nearestTo(event);
+      if (nearest === markerAt) return;
+      place(nearest);
+      if (opts.onMarkerMove) opts.onMarkerMove(nearest, points[nearest].label);
+    };
+    svg.style.cursor = 'ew-resize';
+    svg.addEventListener('pointerdown', (event) => {
+      dragging = true;
+      svg.setPointerCapture(event.pointerId);
+      moveTo(event);
+    });
+    svg.addEventListener('pointermove', (event) => { if (dragging) moveTo(event); });
+    const stop = (event) => {
+      if (!dragging) return;
+      dragging = false;
+      try { svg.releasePointerCapture(event.pointerId); } catch { /* already gone */ }
+      if (opts.onMarkerRelease) opts.onMarkerRelease(markerAt, points[markerAt].label);
+    };
+    svg.addEventListener('pointerup', stop);
+    svg.addEventListener('pointercancel', stop);
+  }
 
   if (opts.onPick) {
     svg.style.cursor = 'pointer';
@@ -245,10 +344,15 @@ export function lineChart(points, opts = {}) {
     crosshair.setAttribute('x2', x(nearest));
     crosshair.setAttribute('visibility', 'visible');
     tooltip.hidden = false;
-    tooltip.innerHTML = `<strong>${point.label}</strong><br>${point.value.toLocaleString()}${opts.valueSuffix || ''}` +
+    // A gap has to say which kind it is. "Nothing found" and "not searched" are
+    // opposite readings of the same blank column.
+    const reading = hasValue(point)
+      ? `${point.value.toLocaleString()}${opts.valueSuffix || ''}`
+      : (point.searched ? 'nothing found' : 'not searched');
+    tooltip.innerHTML = `<strong>${point.label}</strong><br>${reading}` +
       (point.note ? `<br><span class="muted">${point.note}</span>` : '');
     tooltip.style.left = `${(x(nearest) / scale) + 12}px`;
-    tooltip.style.top = `${(y(point.value) / scale) - 8}px`;
+    tooltip.style.top = `${((hasValue(point) ? y(point.value) : PAD.top + plotH) / scale) - 8}px`;
   });
 
   svg.addEventListener('mouseleave', () => {

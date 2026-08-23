@@ -120,6 +120,22 @@ def _leg_window(scenario: Scenario, leg_index: int) -> tuple[date, date]:
     neither could complete a trip, so the probe judged three airports on one
     reading instead of three.
 
+    Four things can narrow a leg, and this is the one place they meet:
+
+      window        the horizon above, always
+      focus         when you leave, propagated forward through the stay ranges
+      return focus  when you fly home, propagated *backward* through them
+      total_days    how long you are away, which bounds the two against each other
+
+    They are intersected, never chosen between. That is what stops them
+    contradicting: a leg's window can be narrowed to nothing by a combination
+    that makes no sense, and `Scenario.validate` refuses those by name before a
+    sweep is ever planned. Propagating backward needs `max_stay_after` for the
+    early bound and `remaining_min_stay` for the late one - the longest and
+    shortest a leg can be from the final one - and getting those two the wrong
+    way round widens the plan silently instead of narrowing it, which is why
+    they are named rather than inlined.
+
     `max(start, end)` keeps a degenerate window - one shorter than the stays it
     declares - planning its first date rather than nothing at all. A window that
     tight is rejected by `validate()`, but the planners are also called directly.
@@ -127,11 +143,54 @@ def _leg_window(scenario: Scenario, leg_index: int) -> tuple[date, date]:
     horizon = scenario.window_end + timedelta(days=RETURN_SLACK_DAYS)
     start = _focus_start(scenario) + timedelta(days=scenario.earliest_departure(leg_index))
     end = horizon - timedelta(days=scenario.remaining_min_stay(leg_index))
+
     if scenario.focus_end is not None:
         # What a focused first leg can still reach, taking the longest stays.
         # Tighter than the horizon inside a focus and looser outside it, so the
         # binding bound is always the smaller of the two.
         end = min(end, scenario.focus_end + timedelta(days=scenario.max_stay_before(leg_index)))
+
+    if scenario.return_focus_start is not None:
+        # Backward from the day you fly home. The final leg is clamped to the
+        # return window itself; both expressions collapse to exactly that for
+        # it, because `max_stay_after` and `remaining_min_stay` are each zero
+        # there - nothing has to happen after the last leg departs.
+        start = max(
+            start,
+            scenario.return_focus_start - timedelta(days=scenario.max_stay_after(leg_index)),
+        )
+        end = min(
+            end,
+            scenario.return_focus_end - timedelta(days=scenario.remaining_min_stay(leg_index)),
+        )
+
+    if scenario.total_days is not None:
+        low, high = scenario.total_days
+        # A nights band is a statement about the first and last legs together,
+        # so it only bounds a middle leg through whichever end is pinned. With a
+        # focus set it says how late this leg can be and still leave room to get
+        # home inside the band; with a return window set, how early.
+        if scenario.focus_end is not None:
+            end = min(
+                end,
+                scenario.focus_end
+                + timedelta(days=high - scenario.remaining_min_stay(leg_index)),
+            )
+        if scenario.return_focus_start is not None:
+            start = max(
+                start,
+                scenario.return_focus_start
+                - timedelta(days=high - scenario.earliest_departure(leg_index)),
+            )
+        # The floor holds against the window too, not only against a focus: a
+        # leg cannot be earlier than the soonest the first leg could go plus
+        # whatever the band still requires after it.
+        start = max(
+            start,
+            _focus_start(scenario)
+            + timedelta(days=max(0, low - scenario.max_stay_after(leg_index))),
+        )
+
     return start, max(start, end)
 
 

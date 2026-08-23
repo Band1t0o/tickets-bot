@@ -575,3 +575,57 @@ def test_a_leg_and_a_trip_cannot_overwrite_each_others_recorded_best(tmp_path):
     assert "legwatch:PRG-NRT@2027-01-10" in recorded
     assert recorded["watch:2027-01-10"]["best_total"] == 30000
     assert recorded["legwatch:PRG-NRT@2027-01-10"]["best_total"] == 12000
+
+# --------------------------------------------------- hand-picked candidates
+#
+# The per-leg charts let a trip be assembled by dragging, including one the stay
+# ranges forbid. Saving such a watch is only half of it: if the run then refused
+# to chain it, the series would read "nothing found" every four hours, which
+# looks exactly like the site having no seats. These are the other half.
+
+HAND_PICKED = [date(2027, 1, 10), date(2027, 1, 14), date(2027, 1, 24)]
+
+
+def test_a_watch_outside_the_stay_ranges_is_still_priced(tmp_path):
+    """4 nights in Japan against a 9-11 stay: chained anyway, and totalled."""
+    from src.watch import record_observations
+
+    rows = record_observations(
+        legs_for(HAND_PICKED), trip(HAND_PICKED), status(), tmp_path
+    )
+    assert rows[0]["total"] == 30000
+    assert rows[0]["found_dates"] == [d.isoformat() for d in HAND_PICKED]
+
+
+def test_widening_for_one_candidate_does_not_reprice_another(tmp_path):
+    """Each candidate is chained against its own widened trip, not a shared one.
+
+    One traversal widened by every watch at once would let this candidate's
+    four-night Japan stay become available to the legal one, and the legal one
+    would start reporting a trip its owner never picked.
+    """
+    from src.watch import record_observations
+
+    legs = legs_for(CANDIDATE) + legs_for(HAND_PICKED, prices=(1000.0, 1000.0, 1000.0))
+    rows = record_observations(legs, trip(CANDIDATE, HAND_PICKED), status(), tmp_path)
+    by_key = {row["depart_date"]: row for row in rows}
+
+    # Both pinned 10 January, so both could reach the cheap legs if the stays
+    # allowed. Only the candidate that pinned those dates may have them.
+    assert by_key["2027-01-10"]["total"] == 3000
+    assert by_key["2027-01-10"]["found_dates"] == [d.isoformat() for d in HAND_PICKED]
+
+
+def test_a_watch_is_priced_even_when_it_falls_outside_the_narrowing(tmp_path):
+    """The narrowing decides what to search, never whether a pick may be priced.
+
+    Without this, moving the return window would silently blank every watch
+    already being followed outside it - a series that stops for a reason nothing
+    on screen mentions.
+    """
+    from src.watch import record_observations
+
+    narrowed = trip(CANDIDATE, total_days=(30, 40), return_focus_start=date(2027, 2, 5),
+                    return_focus_end=date(2027, 2, 8))
+    rows = record_observations(legs_for(CANDIDATE), narrowed, status(), tmp_path)
+    assert rows[0]["total"] == 30000
