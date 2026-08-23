@@ -2620,6 +2620,35 @@ def test_saving_a_tighter_stay_moves_nothing_already_on_disk(ui):
     assert not errors
 
 
+def test_every_picker_says_when_a_run_was_of_another_trip(ui):
+    """It used to be one picker out of three, and not the one that matters.
+
+    The flag was passed in by each caller, and only the Explore picker passed
+    it - so the Results and Narrow pickers, where a run is chosen to be
+    believed, were exactly where a run of another trip looked ordinary. It is
+    part of the label itself now, so a picker cannot forget it.
+    """
+    page, scenarios, errors = ui
+    data = scenarios.parent / "data"
+    seed_a_week_of_dates(data)
+    # The run was of 9-11 nights in Japan; the trip since moved to 12-14.
+    seed_searched_trip(scenarios, "2026-08-19T02-00-00Z")
+    trip = json.loads((scenarios / "jp-ph.json").read_text(encoding="utf-8"))
+    trip["stops"][0]["stay_days"] = [12, 14]
+    (scenarios / "jp-ph.json").write_text(json.dumps(trip), encoding="utf-8")
+    page.reload(wait_until="networkidle")
+    open_narrow(page)
+
+    for picker in ("#sweep-select", "#narrow-sweep"):
+        label = page.locator(f'{picker} option[value="2026-08-19T02-00-00Z"]').inner_text()
+        assert "different stays" in label, f"{picker}: {label}"
+
+    # And the empty field the narrow picker used to render for a kind it never
+    # passed.
+    assert " ·  · " not in page.locator("#narrow-sweep option").first.inner_text()
+    assert not errors
+
+
 def test_a_trip_field_written_here_is_not_undone_by_the_setup_form(ui):
     """The setup step holds a draft of the trip, filled once on load.
 

@@ -31,7 +31,7 @@ const state = {
    was lost: the page rendered an empty trip picker and empty charts, which is
    exactly what a deleted database looks like, when in fact nothing on disk had
    changed and the answer was `make ui` again. */
-const EXPECTED_CONTRACT = 11;
+const EXPECTED_CONTRACT = 12;
 
 const api = async (path, options) => {
   const response = await fetch(path, options);
@@ -1749,12 +1749,23 @@ const sweepLabel = (sweep, kind, warnings = []) => {
   // `|| sweep.stamp` rather than nothing: an unparseable stamp is still the only
   // handle you have on that row, and a picker of dateless rows is unusable.
   const parts = [
+    // Defaulted, because one caller passes no kind at all. `join` renders
+    // `undefined` as nothing, so the label came out with an empty field
+    // between two separators.
     localStamp(sweep.stamp) || sweep.stamp,
-    kind,
+    kind || 'sweep',
     `${count(sweep.total)} searches`,
     `${count(sweep.legs_found)} flights`,
   ];
-  const flagged = warnings.filter(Boolean);
+  // Folded in here rather than passed by each caller. It used to be passed,
+  // and only one of the three pickers passed it - so the Results picker, where
+  // a run is chosen to be believed, was the one place a run of another trip
+  // looked ordinary. A flag every label carries cannot be the one a picker
+  // forgets.
+  const flagged = [
+    ...(sweep.differs || []).map((what) => `different ${what}`),
+    ...warnings,
+  ].filter(Boolean);
   return parts.join(' · ') + (flagged.length ? ` · ⚠ ${flagged.join(' · ')}` : '');
 };
 
@@ -1993,9 +2004,6 @@ function populateExploreSelect() {
     option.textContent = sweepLabel(sweep, kind, [
       sweep.state === 'throttled' ? 'site refused' : '',
       sweep.state === 'stopped' ? 'stopped early' : '',
-      // Before it is opened, not after: a run of other airports reads exactly
-      // like a run of yours once its verdicts are on screen.
-      sweep.searched_another_trip ? 'different trip' : '',
     ]);
     select.appendChild(option);
   }

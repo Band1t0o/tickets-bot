@@ -113,7 +113,7 @@ FORCED_DEPTH = re.compile(r"INPUT_DEPTH:-(\w+)")
 # and 400s for things it needs, and renders them as emptiness - which is
 # indistinguishable from "you have no saved trips". `static/app.js` carries the
 # same number and refuses to render until they match.
-API_CONTRACT = 11
+API_CONTRACT = 12
 
 app = FastAPI(title="Flight scenario watcher")
 
@@ -570,7 +570,13 @@ def resume_run(scenario_id: str, stamp: str) -> dict:
     # trip as it stands now. If those disagree it would claim to have searched
     # airports it never asked about - the reading that had two probes reporting
     # a trip nobody swept.
-    if _searched_another_trip(directory, scenario):
+    # Airports only, though `_differs_from_live` now names three things. A
+    # resumed run re-asks searches its own plan never got an answer for, so
+    # different stays or a different window make it a run of an older plan -
+    # which is what a sweep on disk always is. Different airports make it
+    # incoherent: the report would name routes nothing in the file ever asked
+    # about.
+    if "airports" in _differs_from_live(directory, scenario):
         raise HTTPException(
             400,
             "That run searched a different set of airports than this trip has now, so "
@@ -759,13 +765,36 @@ def drop_from_cloud_queue(scenario_id: str) -> dict:
     return {"dropped": scenario_id}
 
 
-def _searched_another_trip(directory: Path, live: Scenario) -> bool:
-    """Whether this run swept a different set of airports than the trip now.
+def _differs_from_live(directory: Path, live: Scenario) -> list[str]:
+    """What this run searched that the trip no longer says, named.
 
     In the listing because the picker is where a run gets chosen, and a run of
     the wrong trip has to be recognisable before it is opened and believed.
+
+    Airports used to be the whole of it, which left the two edits that drift
+    fastest invisible. `japan-philippines` has twelve sweeps on disk spanning
+    three stay settings and two windows, and the picker labelled them
+    identically - so a run priced under 8-13 nights in Japan read exactly like
+    a run of today's 10-13, and a table of trips the current trip would never
+    search again read as a table of trips you could still book.
+
+    Named rather than a boolean for the same reason the cloud queue names its
+    own list: "different trip" tells you not to trust the row without telling
+    you which part of it to distrust. The vocabulary is deliberately the short
+    form of that list - an `<option>` is not the place for a sentence.
     """
-    return _sweep_scenario(directory, live).airport_pools != live.airport_pools
+    searched = _sweep_scenario(directory, live)
+    differs = []
+    if searched.airport_pools != live.airport_pools:
+        differs.append("airports")
+    if [s.stay_days for s in searched.stops] != [s.stay_days for s in live.stops]:
+        differs.append("stays")
+    if (searched.window_start, searched.window_end) != (
+        live.window_start,
+        live.window_end,
+    ):
+        differs.append("window")
+    return differs
 
 
 @app.get("/api/sweeps/{scenario_id}")
@@ -790,7 +819,7 @@ def list_sweeps(scenario_id: str) -> dict:
             {
                 "stamp": d.name,
                 "has_legs": _has_legs(d),
-                "searched_another_trip": _searched_another_trip(d, live),
+                "differs": _differs_from_live(d, live),
                 **_read_status(d),
                 # Whether carrying this one on would actually ask for anything.
                 # Computed here rather than in the page so the button and the

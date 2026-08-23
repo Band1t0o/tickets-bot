@@ -278,8 +278,11 @@ Two changes, because either alone still leaves a way to be misled:
 - **Every sweep records its trip.** `scenario.json` is written into the sweep directory before the
   first search, and Explore, Results and Prices all read a run against *that* — so an old sweep keeps
   showing its flights after you change airports, and the Explore tab says
-  `BER, KRK, KTW, MUC never searched in this run` instead of leaving them out. Runs whose airports
-  differ from the current trip are marked `· different trip` in the picker, before they are opened.
+  `BER, KRK, KTW, MUC never searched in this run` instead of leaving them out. Runs searched under
+  something the trip no longer says are marked in every picker before they are opened, naming which
+  part differs: `· ⚠ different airports · different stays`. Airports, stay ranges and the window are
+  each checked, because all three drift and a run of one trip read as a run of another is how a
+  headline price ends up thousands out.
   Bag estimate, preferred origins and the alert threshold are still read from the current trip:
   those are how a result is read, not what was searched.
 

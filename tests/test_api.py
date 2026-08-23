@@ -499,23 +499,64 @@ def test_the_price_chart_of_an_older_sweep_survives_an_edit_to_the_trip(client):
     assert api.get(f"/api/sweeps/jp-ph/{stamp}/by-date").json()
 
 
-def test_the_sweep_listing_flags_runs_that_searched_another_trip(client):
+def _differs(api, stamp) -> list[str]:
+    listed = {s["stamp"]: s for s in api.get("/api/sweeps/jp-ph").json()["sweeps"]}
+    return listed[stamp]["differs"]
+
+
+def test_the_sweep_listing_names_what_a_run_searched_that_the_trip_no_longer_says(client):
     """The picker is where a run is chosen, so it has to say which runs are
     about the trip you are looking at before one is opened and believed."""
     api, data = client
     stamp = seed_explore(data)
     snapshot(data, stamp, searched_trip())
     move_the_trip_to(api, origins=["KRK"], return_to=None)
-    listed = {s["stamp"]: s for s in api.get("/api/sweeps/jp-ph").json()["sweeps"]}
-    assert listed[stamp]["searched_another_trip"] is True
+    assert _differs(api, stamp) == ["airports"]
+
+
+def test_the_listing_flags_a_run_priced_under_other_stays(client):
+    """The edit that drifts fastest and used not to be checked at all.
+
+    `japan-philippines` has twelve sweeps on disk spanning three stay settings,
+    every one of them labelled as though it described the trip as it stands.
+    """
+    api, data = client
+    stamp = seed_explore(data)
+    snapshot(data, stamp, searched_trip())
+    trip = api.get("/api/scenarios/jp-ph").json()
+    trip["stops"][0]["stay_days"] = [10, 11]
+    assert api.put("/api/scenarios/jp-ph", json=trip).status_code == 200
+    assert _differs(api, stamp) == ["stays"]
+
+
+def test_the_listing_flags_a_run_of_another_window(client):
+    api, data = client
+    stamp = seed_explore(data)
+    snapshot(data, stamp, searched_trip())
+    move_the_trip_to(api, window_end="2027-02-20")
+    assert _differs(api, stamp) == ["window"]
+
+
+def test_every_difference_is_named_not_only_the_first(client):
+    """Named rather than a boolean so the row says which part to distrust;
+    naming one of three would put the boolean back under a longer name."""
+    api, data = client
+    stamp = seed_explore(data)
+    snapshot(data, stamp, searched_trip())
+    trip = api.get("/api/scenarios/jp-ph").json()
+    trip["origins"] = ["KRK"]
+    trip["return_to"] = None
+    trip["stops"][0]["stay_days"] = [10, 11]
+    trip["window_end"] = "2027-02-20"
+    assert api.put("/api/scenarios/jp-ph", json=trip).status_code == 200
+    assert _differs(api, stamp) == ["airports", "stays", "window"]
 
 
 def test_a_sweep_of_the_current_trip_is_not_flagged_in_the_listing(client):
     api, data = client
     stamp = seed_explore(data)
     snapshot(data, stamp, searched_trip())
-    listed = {s["stamp"]: s for s in api.get("/api/sweeps/jp-ph").json()["sweeps"]}
-    assert listed[stamp]["searched_another_trip"] is False
+    assert _differs(api, stamp) == []
 
 
 def test_a_sweep_from_before_snapshots_existed_is_read_against_the_live_trip(client):
