@@ -280,9 +280,9 @@ Two changes, because either alone still leaves a way to be misled:
   showing its flights after you change airports, and the Explore tab says
   `BER, KRK, KTW, MUC never searched in this run` instead of leaving them out. Runs searched under
   something the trip no longer says are marked in every picker before they are opened, naming which
-  part differs: `· ⚠ different airports · different stays`. Airports, stay ranges and the window are
-  each checked, because all three drift and a run of one trip read as a run of another is how a
-  headline price ends up thousands out.
+  part differs: `· ⚠ different airports · different stays`, or `· ⚠ a different trip` when all of it
+  does. Airports, stay ranges and the window are each checked, because all three drift and a run of
+  one trip read as a run of another is how a headline price ends up thousands out.
   Bag estimate, preferred origins and the alert threshold are still read from the current trip:
   those are how a result is read, not what was searched.
 

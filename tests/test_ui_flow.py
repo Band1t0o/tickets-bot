@@ -652,7 +652,9 @@ def test_a_probe_of_a_different_trip_says_so_instead_of_listing_its_airports(ui)
     notice = page.locator("#explore-mismatch")
     assert notice.is_visible()
     assert "BCN" in notice.inner_text(), notice.inner_text()
-    assert "different trip" in page.locator("#explore-select").inner_text()
+    # Named, not merely flagged: "different trip" said not to trust the row
+    # without saying which part of it to distrust.
+    assert "different airports" in page.locator("#explore-select").inner_text()
     assert not errors
 
 
@@ -2620,6 +2622,62 @@ def test_saving_a_tighter_stay_moves_nothing_already_on_disk(ui):
     assert not errors
 
 
+def _run_under_other_stays(scenarios, low, high):
+    """Seed a week of dates, snapshot the trip that priced them, then move the
+    live stays - the state every one of these sweeps is actually read in."""
+    data = scenarios.parent / "data"
+    seed_a_week_of_dates(data)
+    seed_searched_trip(scenarios, "2026-08-19T02-00-00Z")
+    trip = json.loads((scenarios / "jp-ph.json").read_text(encoding="utf-8"))
+    trip["stops"][0]["stay_days"] = [low, high]
+    (scenarios / "jp-ph.json").write_text(json.dumps(trip), encoding="utf-8")
+
+
+def test_the_cursor_judges_a_pick_against_the_trip_you_want_now(ui):
+    """Three of the four rules the readout checks come off the live trip; the
+    stay ranges came off the run's snapshot. So a 10-night Japan stay on a
+    sweep priced under 9-11 read as fitting every rule you set, weeks after
+    the trip had moved to 12-14."""
+    page, scenarios, errors = ui
+    _run_under_other_stays(scenarios, 12, 14)
+    page.reload(wait_until="networkidle")
+    open_narrow(page)
+
+    readout = page.locator("#cursor-readout").inner_text()
+    # The seeded legs are 10 nights apart, which the run's own 9-11 allowed.
+    assert "10 nights at Japan, not 12–14" in readout, readout
+    assert not errors
+
+
+def test_the_step_says_what_the_sweep_on_screen_was_priced_under(ui):
+    """Otherwise a table of 10-night stays sits under a box reading 12 with
+    nothing connecting them, and the honest answer - that the run was made
+    under other stays and cannot show you anything else - is nowhere."""
+    page, scenarios, errors = ui
+    _run_under_other_stays(scenarios, 12, 14)
+    page.reload(wait_until="networkidle")
+    open_narrow(page)
+
+    line = page.locator("#narrow-stays-sweep")
+    assert line.is_visible()
+    said = line.inner_text()
+    assert "Japan 9–11" in said, said
+    assert "next sweep" in said, said
+    assert not errors
+
+
+def test_nothing_is_said_when_the_sweep_used_the_stays_you_have(ui):
+    page, scenarios, errors = ui
+    data = scenarios.parent / "data"
+    seed_a_week_of_dates(data)
+    seed_searched_trip(scenarios, "2026-08-19T02-00-00Z")
+    page.reload(wait_until="networkidle")
+    open_narrow(page)
+
+    assert page.locator("#narrow-stays-sweep").is_hidden()
+    assert not errors
+
+
 def test_every_picker_says_when_a_run_was_of_another_trip(ui):
     """It used to be one picker out of three, and not the one that matters.
 
@@ -2646,6 +2704,33 @@ def test_every_picker_says_when_a_run_was_of_another_trip(ui):
     # And the empty field the narrow picker used to render for a kind it never
     # passed.
     assert " ·  · " not in page.locator("#narrow-sweep option").first.inner_text()
+    assert not errors
+
+
+def test_a_run_that_differs_in_every_way_is_called_a_different_trip(ui):
+    """Naming each part is only worth it while some of them still match.
+
+    On real data most rows differ in all three - japan-philippines has fifteen
+    such sweeps - and three flags apiece down a picker is a wall to skim past
+    rather than a warning. So it degrades to the old wording exactly where the
+    old wording was right.
+    """
+    page, scenarios, errors = ui
+    data = scenarios.parent / "data"
+    seed_a_week_of_dates(data)
+    seed_searched_trip(scenarios, "2026-08-19T02-00-00Z")
+    trip = json.loads((scenarios / "jp-ph.json").read_text(encoding="utf-8"))
+    trip["origins"] = ["BCN"]
+    trip["return_to"] = None
+    trip["stops"][0]["stay_days"] = [12, 14]
+    trip["window_end"] = "2027-02-20"
+    (scenarios / "jp-ph.json").write_text(json.dumps(trip), encoding="utf-8")
+    page.reload(wait_until="networkidle")
+    open_narrow(page)
+
+    label = page.locator('#sweep-select option[value="2026-08-19T02-00-00Z"]').inner_text()
+    assert "a different trip" in label, label
+    assert "different stays" not in label, label
     assert not errors
 
 

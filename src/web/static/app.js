@@ -1762,8 +1762,16 @@ const sweepLabel = (sweep, kind, warnings = []) => {
   // a run is chosen to be believed, was the one place a run of another trip
   // looked ordinary. A flag every label carries cannot be the one a picker
   // forgets.
+  //
+  // Collapsed back to the old wording when everything differs, which on real
+  // data is most rows: japan-philippines has fifteen sweeps flagging all three
+  // at once, and `⚠ different airports · different stays · different window`
+  // three times down a picker is a wall to skim past rather than a warning.
+  // Three is everything `_differs_from_live` checks; a fourth check belongs in
+  // this count too.
+  const differs = sweep.differs || [];
   const flagged = [
-    ...(sweep.differs || []).map((what) => `different ${what}`),
+    ...(differs.length >= 3 ? ['a different trip'] : differs.map((w) => `different ${w}`)),
     ...warnings,
   ].filter(Boolean);
   return parts.join(' · ') + (flagged.length ? ` · ⚠ ${flagged.join(' · ')}` : '');
@@ -3763,6 +3771,26 @@ function refreshStayDerived() {
     .map(([now, was]) => `${now.label || 'a stop'} ${was.stay_days[0]}–${was.stay_days[1]} → ` +
       `${now.stay_days[0]}–${now.stay_days[1]}`);
 
+  // What the run on screen was priced under, when the boxes above no longer
+  // say the same. Not a warning and not a filter - `_sweep_scenario` reads a
+  // run through its own snapshot, so those are simply the stays this table and
+  // these charts are able to describe. Without the line, a table of 9-night
+  // Japan stays sits under a box reading 10 with nothing to connect them.
+  const line = $('narrow-stays-sweep');
+  const ran = (narrow.data || {}).stay_days;
+  const names = ((narrow.data || {}).stop_labels) || [];
+  const drifted = ran && counted.some((stop, index) => ran[index]
+    && (ran[index][0] !== stop.stay_days[0] || ran[index][1] !== stop.stay_days[1]));
+  line.hidden = !drifted;
+  line.textContent = drifted
+    ? 'The sweep on screen was priced under ' +
+      counted.map((stop, index) =>
+        `${stop.label || names[index] || `stop ${index + 1}`} ${ran[index][0]}–${ran[index][1]}`,
+      ).join(' · ') +
+      ' — that is what its charts and table can show you. Changing the boxes above ' +
+      'moves neither; it decides what the next sweep prices.'
+    : '';
+
   const alert = $('narrow-stays-alert');
   alert.hidden = tightened.length === 0;
   alert.textContent = tightened.length
@@ -3940,6 +3968,9 @@ async function loadLegCharts() {
     && narrow.cursor.length === narrow.data.legs.length;
   narrow.domain = domain;
   if (!same) narrow.expanded.clear();
+  // The stay boxes render before this resolves, so the line about what this
+  // run was priced under has nothing to compare against on the first pass.
+  refreshStayDerived();
   renderNarrowFields();
 
   if (!same) await snapCursor({ quiet: true });
@@ -4095,12 +4126,21 @@ function cursorTrip() {
     }
   }
 
+  // From the live trip, not from `narrow.data`. `by-leg` reports the stays the
+  // *run* was made under, because that is what it priced - but the other three
+  // rules checked here come off the live trip through `_narrowing_of`, and a
+  // readout mixing the two says "fits every rule you set" about a stay length
+  // the trip stopped allowing weeks ago. This is you choosing a trip to book,
+  // so it is measured against what you want now.
   const breaks = [];
-  const labels = narrow.data.stop_labels || [];
-  narrow.data.stay_days.forEach((range, i) => {
+  const stops = (state.scenario || {}).stops || [];
+  const fallback = narrow.data.stop_labels || [];
+  stops.forEach((stop, i) => {
     if (i >= stays.length) return;
-    if (stays[i] < range[0] || stays[i] > range[1]) {
-      breaks.push(`${stays[i]} nights at ${labels[i] || `stop ${i + 1}`}, not ${range[0]}–${range[1]}`);
+    const [low, high] = stop.stay_days;
+    if (stays[i] < low || stays[i] > high) {
+      breaks.push(`${stays[i]} nights at ${stop.label || fallback[i] || `stop ${i + 1}`}, ` +
+        `not ${low}–${high}`);
     }
   });
   const band = narrow.data.window && narrow.data.window.total_days;
