@@ -266,12 +266,13 @@
         <h3 class="muted small" style="margin-top:20px">How long in each place</h3>
         <p class="panel__hint small">
           The shape of the trip rather than a narrowing, and the reason the band above stops
-          where it does. Tightening one is the edit here with no undo: those stays stop being
-          searched, and trips already on disk that use them leave the table too. A 9–11 rule
-          here once threw away a real 12-day Japan stay.
+          where it does. These decide what the <em>next</em> sweep prices — every sweep already
+          on disk keeps the stays it was run under, so nothing below moves when you change them.
+          Tightening is still the one to think twice about: those nights stop being asked about,
+          so a cheaper stay outside the new range is never found again. A 9–11 rule here once
+          meant a real 12-day Japan stay was never priced.
         </p>
         <div class="narrow-grid" id="narrow-stays"></div>
-        <p class="small" id="narrow-stays-alert" hidden></p>
         <p class="panel__hint small" id="narrow-cost"></p>
         <div class="row" style="margin-top:12px">
           <button class="small primary" id="narrow-save">Save</button>
@@ -280,6 +281,12 @@
           <span class="spacer"></span>
           <span class="small" id="narrow-message"></span>
         </div>
+        <!-- Below the buttons rather than above them, though it describes the
+             boxes above. It appears on `change`, which fires when a stay box
+             loses focus - so placed higher it grew the panel between a click
+             being aimed at Save and the click landing, and the press missed
+             the button entirely. Found by a browser test doing exactly that. -->
+        <p class="small" id="narrow-stays-alert" hidden></p>
       </div>
 
       <div class="panel">

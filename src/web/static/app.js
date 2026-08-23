@@ -3738,9 +3738,14 @@ function refreshStayDerived() {
     : '';
 
   // Widening costs searches, and the estimate under this row already says how
-  // many. Tightening costs trips, silently, and nothing else on the page would
+  // many. Tightening costs future prices, and nothing else on the page would
   // mention it: this scenario's own notes record a 9-11 rule here throwing away
   // a real 12-day Japan stay.
+  //
+  // Future, and only future. `_sweep_scenario` reads a run's shape - airports,
+  // stops, stays, window - off the snapshot that run wrote, so nothing already
+  // collected is filtered by a range typed afterwards. An earlier version of
+  // this warning said otherwise, which was worth saying and false.
   const saved = (state.scenario || {}).stops || [];
   const tightened = counted
     .map((stop, index) => [stop, saved[index]])
@@ -3753,9 +3758,9 @@ function refreshStayDerived() {
   const alert = $('narrow-stays-alert');
   alert.hidden = tightened.length === 0;
   alert.textContent = tightened.length
-    ? `Tighter than what is saved: ${tightened.join('; ')}. Not a narrowing you can untick — ` +
-      'those stays stop being searched, and trips already on disk that use them leave the ' +
-      'table as well.'
+    ? `Tighter than what is saved: ${tightened.join('; ')}. Nothing below moves — every sweep ` +
+      'on disk keeps the stays it ran under. From the next sweep on, those nights stop being ' +
+      'priced at all.'
     : '';
 }
 

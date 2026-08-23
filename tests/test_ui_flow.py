@@ -2560,10 +2560,14 @@ def test_the_stays_are_editable_where_they_are_quoted(ui):
 
 def test_tightening_a_stay_says_what_it_costs(ui):
     """Widening costs searches, which the estimate reports. Tightening costs
-    trips, silently: `combine._stay_ok` runs whatever `?window=` says, so the
-    itineraries it excludes leave the table as well as the plan, and no tick
-    brings them back. This scenario's own notes record a 9-11 rule here
-    throwing away a real 12-day Japan stay."""
+    future prices - those nights stop being asked about - and nothing else on
+    the page would mention it. This scenario's own notes record a 9-11 rule
+    here throwing away a real 12-day Japan stay.
+
+    It costs nothing already collected, and the sentence has to say so: an
+    earlier version claimed the opposite, which reads as a threat to data the
+    app cannot in fact touch.
+    """
     page, scenarios, errors = ui
     page.reload(wait_until="networkidle")
     open_narrow(page)
@@ -2574,9 +2578,45 @@ def test_tightening_a_stay_says_what_it_costs(ui):
 
     alert = page.locator("#narrow-stays-alert")
     assert alert.is_visible()
-    assert "Japan 9–11 → 10–11" in alert.inner_text(), alert.inner_text()
+    said = alert.inner_text()
+    assert "Japan 9–11 → 10–11" in said, said
+    assert "next sweep" in said, said
     # A warning, never a block.
     assert page.locator("#narrow-save").is_enabled()
+    assert not errors
+
+
+def test_saving_a_tighter_stay_moves_nothing_already_on_disk(ui):
+    """The claim the warning used to make, checked rather than asserted.
+
+    `_sweep_scenario` reads a run's shape - airports, stops, stays, window -
+    off the snapshot that run wrote, so a range typed afterwards cannot filter
+    what it found. Both seeded stays are 10 nights and this saves 11-11: were
+    the live stays applied to the reading, the table would empty.
+    """
+    page, scenarios, errors = ui
+    data = scenarios.parent / "data"
+    seed_a_week_of_dates(data)
+    seed_searched_trip(scenarios, "2026-08-19T02-00-00Z")
+    page.reload(wait_until="networkidle")
+    open_narrow(page)
+
+    before = page.locator("#results-table tbody tr").count()
+    assert before > 0
+
+    stay_box(page, 0, 0).fill("11")
+    # Blur first, as a person tabbing away would. This is what fires the
+    # tightening warning, and while that warning sat above the buttons it grew
+    # the panel between a click being aimed at Save and the click landing - the
+    # press missed, and the test read an unsaved file. It is below them now.
+    page.locator("#narrow-nights-hint").click()
+    page.wait_for_timeout(600)
+    page.locator("#narrow-save").click()
+    page.wait_for_timeout(1200)
+
+    saved = json.loads((scenarios / "jp-ph.json").read_text(encoding="utf-8"))
+    assert saved["stops"][0]["stay_days"] == [11, 11]
+    assert page.locator("#results-table tbody tr").count() == before
     assert not errors
 
 
