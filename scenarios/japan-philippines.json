@@ -13,11 +13,11 @@
         "KIX"
       ],
       "stay_days": [
-        9,
-        13
+        12,
+        14
       ],
       "overland": true,
-      "arrive_via": "HND",
+      "arrive_via": null,
       "depart_via": "KIX"
     },
     {
@@ -26,8 +26,8 @@
         "MNL"
       ],
       "stay_days": [
-        8,
-        13
+        11,
+        14
       ],
       "overland": false,
       "arrive_via": null,
@@ -35,11 +35,17 @@
     }
   ],
   "window_start": "2027-01-08",
-  "window_end": "2027-02-05",
+  "window_end": "2027-02-12",
   "return_to": null,
   "one_way": false,
-  "focus_start": null,
-  "focus_end": null,
+  "focus_start": "2027-01-08",
+  "focus_end": "2027-01-12",
+  "return_focus_start": "2027-02-01",
+  "return_focus_end": "2027-02-12",
+  "total_days": [
+    24,
+    28
+  ],
   "adults": 1,
   "depth": "deep",
   "currency": "CZK",
@@ -66,8 +72,36 @@
     "cheapest",
     "preferred"
   ],
-  "watches": [],
-  "leg_watches": [],
+  "watches": [
+    {
+      "depart_dates": [
+        "2027-01-12",
+        "2027-01-25",
+        "2027-02-06"
+      ],
+      "added_at": "2026-08-23T20:01:54+00:00",
+      "added_price": 26544,
+      "currency": "CZK"
+    }
+  ],
+  "leg_watches": [
+    {
+      "origin": "VIE",
+      "destination": "HND",
+      "depart_date": "2027-01-16",
+      "added_at": "2026-08-23T08:45:47+00:00",
+      "added_price": 10400,
+      "currency": "CZK"
+    },
+    {
+      "origin": "VIE",
+      "destination": "HND",
+      "depart_date": "2027-01-12",
+      "added_at": "2026-08-23T08:46:19+00:00",
+      "added_price": 10400,
+      "currency": "CZK"
+    }
+  ],
   "probe_both_orders": false,
   "notify_quiet": false
 }
