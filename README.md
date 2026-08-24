@@ -662,7 +662,7 @@ Three steps and a gear, in the order the work is actually done:
 |---|---|---|
 | **Map it out** | Search, Explore | what trip is this, and which airports are worth pricing |
 | **Narrow it down** | the narrowing (with the cheapest-by-day chart inside it), every leg priced separately, the itinerary table | *which days, and which trip* |
-| **Final sweeps** | what a narrowed sweep would search and what it costs, the runs it has made, their ranking | *is the trip I chose getting cheaper* |
+| **Final sweeps** | what a narrowed sweep would search and what it costs, every leg of a narrowed run priced separately, their ranking | *is the trip I chose getting cheaper* |
 | **Follow it** | flights and trips you are following, best total over time, the volatility probe | *is it moving, should I book now* |
 | ⚙ **Setup** | Discord, night sweep, Cloud, Sources | none of the above |
 
@@ -677,10 +677,12 @@ that is what every renderer, test and error box already addresses them by, and `
 either — asked for a panel it opens that panel's step and scrolls to it, which is what a finished
 sweep opening Results and a save error opening Search both need.
 
-**Narrow it down** and **Final sweeps** draw the same ranking from one set of renderers, pointed at
-different runs. Each is a `resultsView` naming the ids it owns, the run it has selected and the modes
-its picker may offer; the ids differ only by a `final-` prefix, so a panel added to one and forgotten
-in the other shows up as a missing element rather than as the two quietly sharing a control.
+**Narrow it down** and **Final sweeps** draw the same ranking *and the same leg charts* from one set
+of renderers, pointed at different runs. Each is a `resultsView` and a `legView` naming the ids it
+owns, the run it has selected and the modes its picker may offer; the ids differ only by a `final-`
+prefix, so a panel added to one and forgotten in the other shows up as a missing element rather than
+as the two quietly sharing a control. The cursors are deliberately separate: a drag on one moving the
+other would be the broad/final toggle these two steps exist instead of.
 
 **Every step that lists runs owns its selection** — `state.stamp`, `state.finalStamp`,
 `state.watchStamp`, and the probe's `state.exploreStamp`. One shared stamp is how the watch picker
@@ -727,6 +729,20 @@ combinations that obey the stay ranges.
 So **Narrow it down** draws one chart per leg, stacked on one shared date axis, with a draggable
 marker on each. A vertical slice down the stack is one trip; the readout above says what it costs,
 what split it implies, and how many nights it is.
+
+**Final sweeps draws them too, over its own runs.** The two steps ask different questions of the same
+picture: which week, against which exact flights at today's price. For a while only the first had
+charts, on the argument that picking needs the whole window on the axis — true for picking a
+narrowing, and false for picking a flight. It left the app's freshest per-leg prices as the only ones
+with no chart, since a final sweep runs twice a day and the broad sweep once a night, and it pointed
+**Follow this trip** at the stalest data in the app.
+
+A narrowed run's legs barely overlap — measured on `japan-philippines`, five departures, seven
+middles and nine returns, a 21-column axis of three tight clusters against the broad run's ~33
+columns of everything against everything. Denser and easier to read, not degenerate. Nothing about
+the readout is special-cased for it: everything a final sweep priced already obeys the narrowing, so
+no badge can fire on its own, but a marker dragged past a stay range still trips one — which is
+exactly the case worth naming.
 
 **Nothing is enforced.** Drag a marker into a fifteen-night Japan stay against a 10-13 range and an
 amber badge names the rule; the price is still totalled, and **Follow this trip** still works. The

@@ -91,22 +91,57 @@ table.data th.num,
 }
 
 .panel__hint {
-  margin: -6px 0 14px;
+  margin: 8px 0 14px;
   color: var(--color-pageTextLight);
   font-size: 13px;
 }
 
-/* The -6px above tucks a hint up under `.panel__header`, whose own 14px bottom
-   margin it is cancelling. Anywhere else that tuck is an overlap: a hint under
-   an `h3` sat on the heading's baseline, and two hints in a row closed up into
-   one paragraph. Only visible with the explanations showing, which is why it
-   went unnoticed while they were the thing nobody could turn off. */
-h3 + .panel__hint,
-.row + .panel__hint,
-.panel__hint + .panel__hint,
-.chart + .panel__hint {
-  margin-top: 8px;
+/* Under the panel's own title, a hint tucks up by 6px to cancel the header's
+   bottom margin. That tuck used to be the default and every other position an
+   exception to it - four adjacency rules undoing it, plus inline margins on the
+   paragraphs those four missed. Stated the other way round it is one rule, and
+   a hint anywhere else simply sits 8px below whatever it follows. */
+.panel__header + .panel__hint { margin-top: -6px; }
+
+/* ------------------------------------------------------------------ spacing --
+
+   One scale for the gaps between a panel's parts, expressed as adjacency rather
+   than typed onto each element. It used to be thirty-one inline margins across
+   twelve values - 0, 6, 8, 10, 12, 14, 16, 18, 20, 22 - chosen a panel at a
+   time, which is why no two sub-sections on the page began at the same distance
+   from the heading above them. `tests/test_web_contract.py` keeps them out. */
+.panel > * + .row,
+.panel > * + .disclosure,
+.panel > * + .stat-row,
+.panel > * + .table-scroll { margin-top: 16px; }
+
+/* A row inside a disclosure is enclosed rather than the panel's own, and needs
+   air on both sides of it. */
+.disclosure > .row { margin: 12px 0; }
+
+/* A line a renderer writes under the controls it describes: what tonight costs
+   this trip, what a saved webhook answered, which routes a run left unpriced.
+   Empty most of the time, so it carries no bottom margin - a gap under nothing
+   reads as a panel that failed to draw something. */
+.panel__line { margin-top: 12px; }
+.panel__line:empty { margin-top: 0; }
+
+/* A sub-heading inside a panel. One treatment, shared with the exploration
+   report's sections below, because a panel divided into parts should look
+   divided the same way on every step. */
+.subhead,
+.panel__section > h3 {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-pageTextLight);
+  margin: 20px 0 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--color-tableBorder);
 }
+
+.panel > .subhead:first-child,
+.panel__section > h3 { margin-top: 0; }
 
 /* ------------------------------------------------ explanations on demand --
 
@@ -192,17 +227,14 @@ tr.is-outside { opacity: 0.6; }
    nested panels: they are one reading, not four cards. */
 .panel__section { margin-bottom: 22px; }
 .panel__section:last-child { margin-bottom: 0; }
-.panel__section > h3 {
-  font-size: 13px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--color-pageTextLight);
-  margin: 0 0 8px;
-  padding-bottom: 6px;
-  border-bottom: 1px solid var(--color-tableBorder);
-}
 
 .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+/* A `label.field` is a two-line column - a 12px label stacked over its control -
+   so centring it against single-line buttons put their bottom edges about seven
+   pixels apart. Every run row and every filter row on every tab sat like that.
+   Aligning on the bottom edge instead is what makes a row read as one line. */
+.row:has(label.field) { align-items: flex-end; }
 .spacer { flex: 1; }
 .stack { display: flex; flex-direction: column; gap: 12px; }
 .muted { color: var(--color-pageTextLight); }
@@ -370,8 +402,8 @@ button:disabled { opacity: 0.5; cursor: default; }
    are disabled until a new trip is saved, so they have to look it. */
 button.primary:disabled {
   background: transparent;
-  color: var(--color-textMuted);
-  border: 1px solid var(--color-border);
+  color: var(--color-pageTextLight);
+  border: 1px solid var(--color-tableBorder);
 }
 
 button.primary {
@@ -634,31 +666,31 @@ label.field > select { font-weight: 400; color: var(--color-formInputText); }
   align-items: center;
   gap: 6px;
   padding: 4px 6px 4px 10px;
-  border: 1px solid var(--color-border);
+  border: 1px solid var(--color-tableBorder);
   border-radius: 999px;
-  background: var(--color-surfaceRaised, var(--color-surface));
+  background: var(--color-tableRowAlternate);
   font-size: 13px;
   line-height: 1.4;
   white-space: nowrap;
 }
 
 .chip__code { font-weight: 600; }
-.chip__city { color: var(--color-textMuted); }
+.chip__city { color: var(--color-pageTextLight); }
 
 .chip--dead {
-  border-color: var(--color-warning, #b7791f);
+  border-color: var(--color-warningText);
 }
 
 .chip__remove {
   border: 0;
   background: transparent;
-  color: var(--color-textMuted);
+  color: var(--color-pageTextLight);
   cursor: pointer;
   padding: 0 2px;
   font-size: 15px;
   line-height: 1;
 }
-.chip__remove:hover { color: var(--color-danger, #e12d39); }
+.chip__remove:hover { color: var(--color-errorText); }
 
 /* ------------------------------------------------------------- typeahead -- */
 
@@ -667,7 +699,7 @@ label.field > select { font-weight: 400; color: var(--color-formInputText); }
 .typeahead input {
   min-width: 190px;
   padding: 5px 9px;
-  border: 1px dashed var(--color-border);
+  border: 1px dashed var(--color-tableBorder);
   border-radius: 999px;
   background: transparent;
   color: inherit;
@@ -684,9 +716,9 @@ label.field > select { font-weight: 400; color: var(--color-formInputText); }
   max-height: 260px;
   overflow-y: auto;
   padding: 4px;
-  border: 1px solid var(--color-border);
+  border: 1px solid var(--color-tableBorder);
   border-radius: 8px;
-  background: var(--color-surface);
+  background: var(--color-panelBackground);
   box-shadow: 0 8px 24px rgb(0 0 0 / 18%);
 }
 .typeahead__menu[hidden] { display: none; }
@@ -705,7 +737,7 @@ label.field > select { font-weight: 400; color: var(--color-formInputText); }
   cursor: pointer;
 }
 .typeahead__item:hover,
-.typeahead__item.is-active { background: var(--color-surfaceRaised, rgb(127 127 127 / 14%)); }
+.typeahead__item.is-active { background: var(--color-tableRowAlternate); }
 .typeahead__item .muted { margin-left: 6px; }
 
 /* "No airport matches X", "20 of 83 in Japan", "Search failed - ...". A query
@@ -715,12 +747,12 @@ label.field > select { font-weight: 400; color: var(--color-formInputText); }
   padding: 6px 8px;
   font-size: 12px;
 }
-.typeahead__note.is-error { color: var(--color-danger, #e12d39); }
+.typeahead__note.is-error { color: var(--color-errorText); }
 
 /* Text left in the box adds nothing but looks like a chip about to appear. */
 .typeahead input.is-unresolved {
   border-style: solid;
-  border-color: var(--color-danger, #e12d39);
+  border-color: var(--color-errorText);
 }
 
 /* Airports already in use, offered as one-click adds. */
@@ -757,7 +789,7 @@ label.field > select { font-weight: 400; color: var(--color-formInputText); }
 .stop {
   margin-top: 14px;
   padding: 12px;
-  border: 1px solid var(--color-border);
+  border: 1px solid var(--color-tableBorder);
   border-radius: 10px;
 }
 
@@ -775,7 +807,7 @@ label.field > select { font-weight: 400; color: var(--color-formInputText); }
   width: 22px;
   height: 22px;
   border-radius: 50%;
-  background: var(--color-surfaceRaised, rgb(127 127 127 / 14%));
+  background: var(--color-tableRowAlternate);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
 }
@@ -790,7 +822,7 @@ label.field > select { font-weight: 400; color: var(--color-formInputText); }
   font: inherit;
   font-weight: 600;
 }
-.stop__label:hover, .stop__label:focus { border-color: var(--color-border); }
+.stop__label:hover, .stop__label:focus { border-color: var(--color-tableBorder); }
 
 .stop__overland { margin-top: 10px; }
 .stop__overland input:disabled + span { opacity: 0.5; }
@@ -862,10 +894,6 @@ label.field > select { font-weight: 400; color: var(--color-formInputText); }
   gap: 12px;
   margin: 0 0 12px;
   padding: 10px 12px;
-  /* tableBorder, not --color-border: the latter is referenced in six places in
-     this file and defined in none of them, so it silently resolves to
-     currentColor. Left alone rather than fixed here - it changes how the stop
-     cards look, which is not this change's business. */
   border: 1px solid var(--color-tableBorder);
   border-radius: 10px;
   background: var(--color-pageBackground);

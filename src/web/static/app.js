@@ -313,7 +313,7 @@ mountHintToggles();
 const STEP_OF = {
   search: 'map', explore: 'map',
   narrow: 'narrow', results: 'narrow',
-  'final-plan': 'final', 'final-results': 'final',
+  'final-plan': 'final', 'final-charts': 'final', 'final-results': 'final',
   watch: 'follow', history: 'follow',
   notify: 'setup', night: 'setup', cloud: 'setup', sources: 'setup',
 };
@@ -342,7 +342,12 @@ function showTab(name) {
       renderCloudSync();
     });
   }
-  if (step === 'final') { renderFinal(); }
+  if (step === 'final') {
+    // Same order as the narrowing step above, for the same reason: the charts
+    // choose the run for the whole step, so the ranking under them must not
+    // render against a stamp they are about to move off.
+    renderFinal().then(renderCloudSync);
+  }
   if (step === 'follow') { renderWatch(); renderHistory(); }
   if (step === 'setup') {
     renderNightSweep();
@@ -1243,6 +1248,7 @@ async function renderCloudSync() {
   for (const [box, text, button, take] of [
     ['cloud-sync', 'cloud-sync-text', 'cloud-sync-get', 'cloud-sync-take'],
     ['cloud-sync-cloud', 'cloud-sync-cloud-text', 'cloud-sync-cloud-get', 'cloud-sync-cloud-take'],
+    ['final-cloud-sync', 'final-cloud-sync-text', 'final-cloud-sync-get', 'final-cloud-sync-take'],
   ]) {
     if (!$(box)) continue;
     $(box).hidden = !show;
@@ -1305,10 +1311,10 @@ async function pullCloudResults(button, path = '/api/cloud-sync') {
   }
 }
 
-for (const id of ['cloud-sync-get', 'cloud-sync-cloud-get']) {
+for (const id of ['cloud-sync-get', 'cloud-sync-cloud-get', 'final-cloud-sync-get']) {
   if ($(id)) $(id).onclick = (event) => pullCloudResults(event.target);
 }
-for (const id of ['cloud-sync-take', 'cloud-sync-cloud-take']) {
+for (const id of ['cloud-sync-take', 'cloud-sync-cloud-take', 'final-cloud-sync-take']) {
   if ($(id)) $(id).onclick = (event) => pullCloudResults(event.target, '/api/cloud-sync/take');
 }
 
@@ -1974,6 +1980,10 @@ function populateSweepSelect(view = BROAD_VIEW) {
     ]);
     select.appendChild(option);
   }
+  // An empty picker is a blank box beside a heading, which reads as a control
+  // that lost its contents rather than as a step with no runs yet. The empty
+  // state under the table already says which of those it is.
+  select.hidden = !offered.length;
   // Selected against what this picker actually offers. Defaulting to
   // `state.sweeps[0]` would pick a run the list does not contain the moment the
   // newest run is of the other kind, and the picker would show a blank row.
@@ -2385,7 +2395,7 @@ function renderOrderVerdict(body) {
   }).join('');
 
   host.innerHTML =
-    '<h3 class="muted small" style="margin-top:0">Which way round</h3>' +
+    '<h3 class="subhead">Which way round</h3>' +
     `<table class="data"><tbody>${rows}</tbody></table>` +
     '<p class="panel__hint panel__hint--live small">Cheapest leg seen on each hop, added up — a floor to ' +
     'compare the two orders by, not a trip you could book. Both were sampled on the same ' +
@@ -2544,14 +2554,14 @@ function renderMismatch(body, probe) {
    The ids differ only by the prefix, so a panel added to one view and forgotten
    in the other shows up as a missing element rather than as the two views
    quietly sharing a control. */
-function resultsView({ prefix, stampKey, filtersKey, modes, charts }) {
+function resultsView({ prefix, stampKey, filtersKey, modes }) {
   return {
     prefix,
     modes,
-    // Whether a row may offer "Put on the charts". Only the broad view can:
-    // the leg charts draw whichever broad sweep is selected, so lifting a final
-    // sweep's trip onto them would place markers on another run's prices.
-    charts,
+    // The leg charts this view's rows lift onto, assigned once both halves
+    // exist. Every view has a set now; while the final step had none, a row of
+    // its ranking was a dead end.
+    legs: null,
     $: (id) => $(prefix + id),
     get stamp() { return state[stampKey]; },
     set stamp(value) { state[stampKey] = value; },
@@ -2567,11 +2577,11 @@ function resultsView({ prefix, stampKey, filtersKey, modes, charts }) {
 // line that looks like a price curve and is not one.
 const BROAD_VIEW = resultsView({
   prefix: '', stampKey: 'stamp', filtersKey: 'filters',
-  modes: ['sweep', 'explore'], charts: true,
+  modes: ['sweep', 'explore'],
 });
 const FINAL_VIEW = resultsView({
   prefix: 'final-', stampKey: 'finalStamp', filtersKey: 'finalFilters',
-  modes: ['final'], charts: false,
+  modes: ['final'],
 });
 const RESULT_VIEWS = [BROAD_VIEW, FINAL_VIEW];
 
@@ -2700,7 +2710,7 @@ for (const view of RESULT_VIEWS) {
       renderResults(view);
       // The chart above the table reads the same population or the two disagree
       // about what a departure date costs. Only the broad view has one.
-      if (id === 'filter-window' && view.charts) renderByDate();
+      if (id === 'filter-window' && view === BROAD_VIEW) renderByDate();
     };
   }
   if (view.$('filter-reset')) {
@@ -2721,7 +2731,7 @@ async function renderResults(view = BROAD_VIEW) {
 
   if (!view.stamp) {
     view.$('results-empty').hidden = false;
-    view.$('results-empty').textContent = view.charts
+    view.$('results-empty').textContent = view === BROAD_VIEW
       ? 'Run a sweep to see itineraries.'
       : 'No final sweep yet. Run one above to price the dates you have narrowed to.';
     return;
@@ -2844,22 +2854,23 @@ async function renderResults(view = BROAD_VIEW) {
     // The way back up into the charts. A ranking that can only be read is a
     // dead end: the useful move on seeing a trip you half like is to put it
     // under the markers and drag one leg of it.
-    // Only from the broad table. The leg charts draw a broad sweep, so lifting
-    // a final sweep's trip onto them would put the markers on another run's
+    // Onto this step's own charts. Each step draws one population, so a row of
+    // the narrowed ranking goes onto the narrowed curves and a broad row onto
+    // the broad ones; crossing them would put the markers on another run's
     // prices and read the total off that instead.
     const onCharts = document.createElement('td');
-    if (view.charts) {
+    const charts = view.legs;
+    if (charts) {
       const lift = document.createElement('button');
       lift.type = 'button';
       lift.className = 'small';
       lift.textContent = 'Put on the charts';
       lift.title = 'Move the markers above onto this trip’s dates';
       lift.onclick = () => {
-        if (!narrow.data || !narrow.domain.length) return;
-        placeCursor(itinerary);
-        drawLegCharts();
-        document.querySelector('section[data-panel="narrow"] #leg-charts')
-          ?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        if (!charts.data || !charts.domain.length) return;
+        placeCursor(charts, itinerary);
+        drawLegCharts(charts);
+        charts.$('leg-charts')?.scrollIntoView({ block: 'center', behavior: 'smooth' });
       };
       onCharts.appendChild(lift);
     }
@@ -3079,6 +3090,15 @@ async function renderByDate() {
 
 async function renderHistory() {
   if (!state.stamp) return;
+  // Said before the wait, not after it. `/api/history` re-reads and re-combines
+  // every sweep on disk: measured at 7.0s for a trip with twelve of them, and
+  // for all seven of those seconds this panel was a heading over nothing. An
+  // empty trend and a trend still being counted look identical, and only one of
+  // them means there is nothing to see.
+  if (!$('chart-history').childElementCount) {
+    $('chart-history').className = 'chart empty';
+    $('chart-history').textContent = 'Reading every sweep on disk…';
+  }
   // Independent endpoints, fetched together. `allSettled` so one failing panel
   // does not blank the other.
   const [historyResult, probeResult] = await Promise.allSettled([
@@ -3089,6 +3109,7 @@ async function renderHistory() {
   const history = historyResult.status === 'fulfilled' ? historyResult.value : [];
   const width = Math.max(420, $('chart-history').clientWidth - 4);
 
+  $('chart-history').className = 'chart';
   $('chart-history').innerHTML = '';
   // Every sweep is drawn, including the ones too incomplete to trust: the gaps
   // in the record are worth seeing, and a chart that silently dropped them
@@ -3696,7 +3717,7 @@ function repairForm(name, source) {
 
   details.insertAdjacentHTML(
     'beforeend',
-    '<h3 class="muted small" style="margin-top:16px">Selectors</h3>'
+    '<h3 class="subhead">Selectors</h3>'
   );
   const selectors = document.createElement('div');
   selectors.className = 'form-grid';
@@ -4040,13 +4061,55 @@ async function init() {
    forbid, because a range typed a month ago is not evidence and a price is.
 */
 
-const narrow = {
-  stamp: null,
-  data: null,
-  domain: [],
-  cursor: [],       // one date index per leg, into `domain`
-  expanded: new Set(),
-};
+/* One of these per step that draws the leg charts.
+
+   The broad set on "Narrow it down" and the narrowed set on "Final sweeps" are
+   the same three curves over two different populations, and they must not share
+   a cursor: a drag on one moving the other would be exactly the broad/final
+   toggle this deliberately is not. The same shape as `resultsView` above, for
+   the same reason - one set of renderers, addressed by an id prefix.
+
+   `stamp` is the step's selected run and lives in `state`, shared with the
+   ranking table beside these charts. `chartStamp` is the run actually drawn,
+   which can lag by one render while the step is being pulled onto a run its
+   charts can draw. */
+function legView({ prefix, stampKey, modes, picker, mate, table, results, emptyText }) {
+  return {
+    prefix, modes, picker, mate, table, results, emptyText,
+    $: (id) => $(prefix + id),
+    get stamp() { return state[stampKey]; },
+    set stamp(value) { state[stampKey] = value; },
+    chartStamp: null,
+    data: null,
+    domain: [],
+    cursor: [],       // one date index per leg, into `domain`
+    expanded: new Set(),
+  };
+}
+
+/* Broad runs only. A probe prices three dates a leg to compare airports, which
+   draws a line that looks like a price curve and is not one. */
+const NARROW_CHARTS = legView({
+  prefix: '', stampKey: 'stamp', modes: ['sweep'],
+  picker: 'narrow-sweep', mate: 'sweep-select', table: 'results-table',
+  results: BROAD_VIEW,
+  emptyText: 'No broad sweep with flights on disk yet. Run one from Map it out.',
+});
+
+const FINAL_CHARTS = legView({
+  prefix: 'final-', stampKey: 'finalStamp', modes: ['final'],
+  picker: 'final-sweep-charts', mate: 'final-sweep-select', table: 'final-results-table',
+  results: FINAL_VIEW,
+  emptyText: 'No final sweep yet. Run one above to price the dates you have narrowed to.',
+});
+
+const LEG_VIEWS = [NARROW_CHARTS, FINAL_CHARTS];
+
+/* Which charts a ranking row's "Put on the charts" lifts onto. Assigned here
+   rather than in `resultsView` because the views are declared six hundred lines
+   apart, and a step's table and its charts must be two readings of one run. */
+BROAD_VIEW.legs = NARROW_CHARTS;
+FINAL_VIEW.legs = FINAL_CHARTS;
 
 const NIGHTS = (from, to) => Math.round((asDate(to) - asDate(from)) / 86400000);
 
@@ -4228,8 +4291,8 @@ function refreshStayDerived() {
   // these charts are able to describe. Without the line, a table of 9-night
   // Japan stays sits under a box reading 10 with nothing to connect them.
   const line = $('narrow-stays-sweep');
-  const ran = (narrow.data || {}).stay_days;
-  const names = ((narrow.data || {}).stop_labels) || [];
+  const ran = (NARROW_CHARTS.data || {}).stay_days;
+  const names = ((NARROW_CHARTS.data || {}).stop_labels) || [];
   const drifted = ran && counted.some((stop, index) => ran[index]
     && (ran[index][0] !== stop.stay_days[0] || ran[index][1] !== stop.stay_days[1]));
   line.hidden = !drifted;
@@ -4346,9 +4409,13 @@ async function saveNarrowing(fields) {
     // different answers to what this sweep contains.
     await Promise.all([
       refreshNarrowCost(),
-      loadLegCharts(),
+      loadLegCharts(NARROW_CHARTS),
       renderByDate(),
       renderResults(),
+      // The narrowing is what a final sweep searches, so the step that runs one
+      // is describing a different plan the moment this saves. Left out, it went
+      // on quoting the old dates and the old cost until the tab was reopened.
+      renderFinal(),
     ]);
   } catch (error) {
     // The server refuses a narrowing nothing can satisfy and says which stays
@@ -4363,18 +4430,18 @@ async function saveNarrowing(fields) {
 
 async function renderNarrow() {
   renderNarrowFields();
-  const picker = $('narrow-sweep');
+  await renderLegStep(NARROW_CHARTS);
+  await refreshNarrowCost();
+}
+
+/* Populate one step's chart picker and land it on a run it can draw. */
+async function renderLegStep(view) {
+  const picker = $(view.picker);
   // Probes and runs whose legs never reached disk cannot answer this panel:
   // a probe prices three dates a leg to compare airports, which draws a chart
   // that looks like a price curve and is not one.
-  //
-  // Nor can a final sweep, for a nearer version of the same reason. This step
-  // is where a trip is *picked*, and picking needs the whole window on the
-  // axis; a narrowed run draws three charts a few days wide, on which every
-  // marker position already obeys the narrowing and the chart can only ever
-  // agree with it. The narrowed runs are read on their own step.
   const sweeps = state.sweeps.filter(
-    (s) => s.has_legs && BROAD_VIEW.modes.includes(s.mode ?? 'sweep'),
+    (s) => s.has_legs && view.modes.includes(s.mode ?? 'sweep'),
   );
   // Named by depth, exactly as the table's picker below names the same run.
   // Left to the default it read "sweep" here and "standard" there, so one run
@@ -4382,41 +4449,53 @@ async function renderNarrow() {
   picker.innerHTML = sweeps
     .map((s) => `<option value="${escapeHtml(s.stamp)}">${escapeHtml(sweepLabel(s, kindOf(s)))}</option>`)
     .join('');
+  picker.hidden = !sweeps.length;
   if (!sweeps.length) {
-    $('leg-charts').className = 'empty';
-    $('leg-charts').textContent = 'No broad sweep with flights on disk yet. Run one from Map it out.';
-    $('cursor-readout').innerHTML = '';
+    const host = view.$('leg-charts');
+    host.className = 'empty';
+    host.textContent = view.emptyText;
+    view.$('cursor-readout').innerHTML = '';
+    view.data = null;
+    // Three live buttons under an empty panel, one of them the brightest thing
+    // on the step. "Follow this trip" with no trip on screen is an invitation
+    // to press something that can only report an error.
+    setCursorActions(view, false);
     return;
   }
+  setCursorActions(view, true);
   // One sweep for the whole step. This picker and the table's used to be
   // separate, so the charts could be showing 22 August while the itineraries
   // under them were 23 August's probe - two panels on one screen describing two
   // different runs, with nothing to say so. Follow the step's selection when it
   // can be drawn, and pull the step to this one when it cannot.
-  if (state.stamp && sweeps.some((s) => s.stamp === state.stamp)) {
-    narrow.stamp = state.stamp;
+  if (view.stamp && sweeps.some((s) => s.stamp === view.stamp)) {
+    view.chartStamp = view.stamp;
   } else {
     // The step opened on a run these charts cannot draw - most often the
     // newest, which is a two-hourly probe. Move the whole step onto the newest
     // run that can be drawn rather than leaving the charts and the table below
     // them on different days.
-    if (!narrow.stamp || !sweeps.some((s) => s.stamp === narrow.stamp)) {
-      narrow.stamp = sweeps[0].stamp;
+    if (!view.chartStamp || !sweeps.some((s) => s.stamp === view.chartStamp)) {
+      view.chartStamp = sweeps[0].stamp;
     }
-    state.stamp = narrow.stamp;
-    const table = $('sweep-select');
-    if ([...table.options].some((o) => o.value === state.stamp)) table.value = state.stamp;
+    view.stamp = view.chartStamp;
+    const table = $(view.mate);
+    if ([...table.options].some((o) => o.value === view.stamp)) table.value = view.stamp;
   }
-  picker.value = narrow.stamp;
-  await Promise.all([refreshNarrowCost(), loadLegCharts()]);
+  picker.value = view.chartStamp;
+  await loadLegCharts(view);
 }
 
-async function loadLegCharts() {
-  if (!narrow.stamp) return;
-  const host = $('leg-charts');
+async function renderFinalCharts() {
+  await renderLegStep(FINAL_CHARTS);
+}
+
+async function loadLegCharts(view) {
+  if (!view.chartStamp) return;
+  const host = view.$('leg-charts');
   try {
-    narrow.data = await api(
-      `/api/sweeps/${state.scenario.id}/${narrow.stamp}/by-leg`,
+    view.data = await api(
+      `/api/sweeps/${state.scenario.id}/${view.chartStamp}/by-leg`,
     );
   } catch (error) {
     host.className = 'empty';
@@ -4427,8 +4506,13 @@ async function loadLegCharts() {
   // One axis for every leg: the union of every date any leg was asked about,
   // in order. Each chart is then handed the same domain, which is what makes a
   // vertical slice down the stack one trip rather than three unrelated days.
+  //
+  // A narrowed run's legs do not overlap at all - five departures, seven
+  // middles, nine returns, measured on the live trip - so its axis is three
+  // tight clusters rather than one long overlap. That reads better, not worse:
+  // every column on it is a day some leg was actually priced on.
   const dates = new Set();
-  for (const leg of narrow.data.legs) for (const p of leg.points) dates.add(p.depart_date);
+  for (const leg of view.data.legs) for (const p of leg.points) dates.add(p.depart_date);
   const domain = [...dates].sort();
   // A trip picked by hand survives leaving the step and coming back. It is
   // several deliberate drags, and re-snapping it away on the way past would
@@ -4437,25 +4521,38 @@ async function loadLegCharts() {
   // grounds for throwing the cursor away, because indices into the old domain
   // would then point at the wrong days.
   const same =
-    narrow.domain.length === domain.length
-    && narrow.domain.every((label, i) => label === domain[i])
-    && narrow.cursor.length === narrow.data.legs.length;
-  narrow.domain = domain;
-  if (!same) narrow.expanded.clear();
+    view.domain.length === domain.length
+    && view.domain.every((label, i) => label === domain[i])
+    && view.cursor.length === view.data.legs.length;
+  view.domain = domain;
+  if (!same) view.expanded.clear();
   // The stay boxes render before this resolves, so the line about what this
   // run was priced under has nothing to compare against on the first pass.
-  refreshStayDerived();
-  renderNarrowFields();
+  // They belong to the narrowing step alone - the final step has no boxes to
+  // write, and calling this from there would describe the wrong run in them.
+  if (view === NARROW_CHARTS) {
+    refreshStayDerived();
+    renderNarrowFields();
+  }
 
-  if (!same) await snapCursor({ quiet: true });
-  drawLegCharts();
+  if (!same) await snapCursor(view, { quiet: true });
+  drawLegCharts(view);
 }
 
-function drawLegCharts() {
-  const host = $('leg-charts');
+/* Whether this step's chart buttons can do anything yet. Off until a run with
+   flights is drawn - `renderCursor` narrows it further, disabling Follow alone
+   for a pick whose legs are out of order. */
+function setCursorActions(view, live) {
+  for (const id of ['cursor-snap', 'cursor-watch', 'cursor-in-table']) {
+    view.$(id).disabled = !live;
+  }
+}
+
+function drawLegCharts(view) {
+  const host = view.$('leg-charts');
   host.className = '';
   host.innerHTML = '';
-  if (!narrow.data || !narrow.domain.length) {
+  if (!view.data || !view.domain.length) {
     host.className = 'empty';
     host.textContent = 'This sweep found no flights.';
     return;
@@ -4467,11 +4564,11 @@ function drawLegCharts() {
   // room a date axis needs most.
   const width = Math.max(
     host.clientWidth - 4 || 520,
-    narrow.domain.length * 26 + 80,
+    view.domain.length * 26 + 80,
   );
-  const suffix = ` ${narrow.data.currency}`;
+  const suffix = ` ${view.data.currency}`;
 
-  narrow.data.legs.forEach((leg, index) => {
+  view.data.legs.forEach((leg, index) => {
     const block = document.createElement('div');
     block.className = 'leg-chart';
 
@@ -4479,23 +4576,23 @@ function drawLegCharts() {
     header.className = 'leg-chart__header';
     const toggle = document.createElement('button');
     toggle.className = 'small';
-    toggle.textContent = narrow.expanded.has(index)
+    toggle.textContent = view.expanded.has(index)
       ? `${leg.label} — hide routes`
       : `${leg.label}${leg.routes.length > 1 ? ` — ${count(leg.routes.length)} routes` : ''}`;
     toggle.disabled = leg.routes.length < 2;
     toggle.onclick = () => {
-      if (narrow.expanded.has(index)) narrow.expanded.delete(index);
-      else narrow.expanded.add(index);
-      drawLegCharts();
+      if (view.expanded.has(index)) view.expanded.delete(index);
+      else view.expanded.add(index);
+      drawLegCharts(view);
     };
     header.appendChild(toggle);
 
     const picked = document.createElement('span');
     picked.className = 'small muted';
-    const at = narrow.domain[narrow.cursor[index]];
+    const at = view.domain[view.cursor[index]];
     const point = at && leg.points.find((p) => p.depart_date === at);
     picked.textContent = point && point.price !== null
-      ? `${at} · ${point.origin}→${point.destination} · ${money(point.price, narrow.data.currency)}`
+      ? `${at} · ${point.origin}→${point.destination} · ${money(point.price, view.data.currency)}`
       : at ? `${at} · nothing found` : '';
     header.appendChild(picked);
     block.appendChild(header);
@@ -4510,18 +4607,18 @@ function drawLegCharts() {
     }));
 
     block.appendChild(lineChart(series, {
-      domain: narrow.domain,
+      domain: view.domain,
       width,
       height: 190,
       valueSuffix: suffix,
       ariaLabel: `${leg.label} by departure date`,
-      marker: { index: narrow.cursor[index] },
-      onMarkerMove: (i) => { narrow.cursor[index] = i; renderCursor(); },
-      onMarkerRelease: () => drawLegCharts(),
+      marker: { index: view.cursor[index] },
+      onMarkerMove: (i) => { view.cursor[index] = i; renderCursor(view); },
+      onMarkerRelease: () => drawLegCharts(view),
       emptyText: 'Nothing priced on this leg.',
     }));
 
-    if (narrow.expanded.has(index)) {
+    if (view.expanded.has(index)) {
       // Six colours exist and were validated in both themes. A seventh route
       // would reuse one and two lines would be indistinguishable, so the extra
       // ones are named rather than drawn in a colour that lies.
@@ -4538,7 +4635,7 @@ function drawLegCharts() {
             label: p.depart_date, value: p.price, searched: p.searched,
           })),
           {
-            domain: narrow.domain, width, height: 120, valueSuffix: suffix,
+            domain: view.domain, width, height: 120, valueSuffix: suffix,
             color: `var(--color-chart${r + 1})`,
             ariaLabel: `${route.route} by departure date`,
             emptyText: `${route.route} — nothing sold on any date searched.`,
@@ -4559,19 +4656,24 @@ function drawLegCharts() {
     host.appendChild(block);
   });
 
-  renderCursor();
+  renderCursor(view);
 }
 
 /* ----------------------------------------------------------- the readout */
 
-function cursorTrip() {
+function cursorTrip(view) {
   /* What the markers currently say, priced, split and checked.
 
      Checked rather than enforced. Every rule it can break is reported by name
      and none of them stops anything, which is the whole reason the markers
-     move independently. */
-  const legs = narrow.data.legs.map((leg, i) => {
-    const at = narrow.domain[narrow.cursor[i]];
+     move independently.
+
+     Unchanged for a narrowed run, deliberately. Everything a final sweep
+     priced already obeys the narrowing, so nothing here can fire on its own -
+     but a marker dragged past a stay range still can, and that is exactly the
+     case worth naming. */
+  const legs = view.data.legs.map((leg, i) => {
+    const at = view.domain[view.cursor[i]];
     const point = leg.points.find((p) => p.depart_date === at) || null;
     return { label: leg.label, date: at, point };
   });
@@ -4600,7 +4702,7 @@ function cursorTrip() {
     }
   }
 
-  // From the live trip, not from `narrow.data`. `by-leg` reports the stays the
+  // From the live trip, not from `view.data`. `by-leg` reports the stays the
   // *run* was made under, because that is what it priced - but the other three
   // rules checked here come off the live trip through `_narrowing_of`, and a
   // readout mixing the two says "fits every rule you set" about a stay length
@@ -4608,7 +4710,7 @@ function cursorTrip() {
   // so it is measured against what you want now.
   const breaks = [];
   const stops = (state.scenario || {}).stops || [];
-  const fallback = narrow.data.stop_labels || [];
+  const fallback = view.data.stop_labels || [];
   stops.forEach((stop, i) => {
     if (i >= stays.length) return;
     const [low, high] = stop.stay_days;
@@ -4617,19 +4719,19 @@ function cursorTrip() {
         `not ${low}–${high}`);
     }
   });
-  const band = narrow.data.window && narrow.data.window.total_days;
+  const band = view.data.window && view.data.window.total_days;
   if (band && (away < band[0] || away > band[1])) {
     breaks.push(`${away} nights away, not ${band[0]}–${band[1]}`);
   }
   // All three parts of the narrowing, in the order they are read on the panel
   // above. Checking two of them and not the departure window is how "fits every
   // rule you set" came to sit under a trip leaving two days outside it.
-  const out = narrow.data.window && narrow.data.window.focus;
+  const out = view.data.window && view.data.window.focus;
   const first = legs[0].date;
   if (out && first && (first < out[0] || first > out[1])) {
     breaks.unshift(`leaving ${first}, not ${out[0]}–${out[1]}`);
   }
-  const home = narrow.data.window && narrow.data.window.return_focus;
+  const home = view.data.window && view.data.window.return_focus;
   const last = legs[legs.length - 1].date;
   if (home && (last < home[0] || last > home[1])) {
     breaks.push(`flying home ${last}, not ${home[0]}–${home[1]}`);
@@ -4638,14 +4740,16 @@ function cursorTrip() {
   return { legs, priced, total, stays, away, breaks, impossible };
 }
 
-function renderCursor() {
-  const host = $('cursor-readout');
-  if (!narrow.data || !narrow.domain.length || !narrow.cursor.length) {
+function renderCursor(view) {
+  const host = view.$('cursor-readout');
+  if (!view.data || !view.domain.length || !view.cursor.length) {
     host.innerHTML = '';
+    setCursorActions(view, false);
     return;
   }
-  const trip = cursorTrip();
-  const currency = narrow.data.currency;
+  setCursorActions(view, true);
+  const trip = cursorTrip(view);
+  const currency = view.data.currency;
 
   const split = trip.stays.length
     ? trip.stays.join(' + ') + ` = ${count(trip.away)} nights away`
@@ -4661,7 +4765,7 @@ function renderCursor() {
 
   // The only thing on this panel that is ever disabled, and only for the one
   // case nothing downstream could price anyway.
-  const follow = $('cursor-watch');
+  const follow = view.$('cursor-watch');
   follow.disabled = trip.impossible.length > 0;
   follow.title = trip.impossible.length
     ? 'These legs are out of order — no sweep or watch could price this.'
@@ -4774,16 +4878,15 @@ function renderCursor() {
    charts" is the way back from the ranking into the panel where a trip can be
    adjusted. Before this the table was a dead end - you could read that a trip
    existed and had no way to see it against the curves. */
-function placeCursor(itinerary) {
-  narrow.cursor = itinerary.legs.map((leg) => {
-    const at = narrow.domain.indexOf(leg.depart_date);
+function placeCursor(view, itinerary) {
+  view.cursor = itinerary.legs.map((leg) => {
+    const at = view.domain.indexOf(leg.depart_date);
     return at >= 0 ? at : 0;
   });
 }
 
-async function snapCursor({ quiet = false } = {}) {
-  const message = $('cursor-message');
-  const place = placeCursor;
+async function snapCursor(view, { quiet = false } = {}) {
+  const message = view.$('cursor-message');
 
   /* Last resort: each leg's own cheapest day, forced into order.
 
@@ -4795,14 +4898,14 @@ async function snapCursor({ quiet = false } = {}) {
      uninteresting rather than impossible. */
   const spread = () => {
     let floor = -1;
-    narrow.cursor = narrow.data.legs.map((leg) => {
+    view.cursor = view.data.legs.map((leg) => {
       const priced = leg.points.filter((p) => p.price !== null);
       let at = 0;
       if (priced.length) {
         const best = priced.reduce((a, b) => (b.with_bags < a.with_bags ? b : a));
-        at = Math.max(0, narrow.domain.indexOf(best.depart_date));
+        at = Math.max(0, view.domain.indexOf(best.depart_date));
       }
-      if (at <= floor) at = Math.min(floor + 1, narrow.domain.length - 1);
+      if (at <= floor) at = Math.min(floor + 1, view.domain.length - 1);
       floor = at;
       return at;
     });
@@ -4810,7 +4913,7 @@ async function snapCursor({ quiet = false } = {}) {
 
   const ask = async (window) => {
     const body = await api(
-      `/api/sweeps/${state.scenario.id}/${narrow.stamp}/results?window=${window}&limit=1`,
+      `/api/sweeps/${state.scenario.id}/${view.chartStamp}/results?window=${window}&limit=1`,
     );
     return [body.itineraries && body.itineraries[0], body.currency];
   };
@@ -4818,7 +4921,7 @@ async function snapCursor({ quiet = false } = {}) {
   try {
     const [best, currency] = await ask('narrow');
     if (best) {
-      place(best);
+      placeCursor(view, best);
       if (!quiet) {
         message.className = 'small';
         message.textContent = `Snapped to ${money(best.total_with_bags, currency)} incl. bags.`;
@@ -4828,7 +4931,7 @@ async function snapCursor({ quiet = false } = {}) {
       // than no trip at all: that it exists and sits outside the narrowing is
       // the useful thing to see, and it is a real trip to start dragging from.
       const [nearest, nearestCurrency] = await ask('all');
-      if (nearest) place(nearest);
+      if (nearest) placeCursor(view, nearest);
       else spread();
       if (!quiet) {
         message.className = 'small badge badge--warning';
@@ -4845,16 +4948,16 @@ async function snapCursor({ quiet = false } = {}) {
       message.textContent = error.message;
     }
   }
-  if (!quiet) drawLegCharts();
+  if (!quiet) drawLegCharts(view);
 }
 
 /* Follow the picked trip: a Watch, pinned to these exact leg dates.
 
    Legal whether or not it breaks the stay ranges. A watch prices the dates it
    is given; the ranges only ever governed which chains a sweep would build. */
-async function watchCursor() {
-  const message = $('cursor-message');
-  const trip = cursorTrip();
+async function watchCursor(view) {
+  const message = view.$('cursor-message');
+  const trip = cursorTrip(view);
   try {
     await api(`/api/watch/${state.scenario.id}`, {
       method: 'POST',
@@ -4862,7 +4965,7 @@ async function watchCursor() {
       body: JSON.stringify({
         depart_dates: trip.legs.map((l) => l.date),
         added_price: trip.priced ? trip.total : null,
-        currency: narrow.data.currency,
+        currency: view.data.currency,
       }),
     });
     message.className = 'small badge badge--good';
@@ -4875,18 +4978,63 @@ async function watchCursor() {
   }
 }
 
+/* The three buttons under each set of charts, bound once per step.
+
+   Written as a loop for the same reason the results tables are: two copies of
+   this that drifted apart would be two panels answering the same question
+   differently, on two tabs, with nothing on screen to say which was right. */
+for (const view of LEG_VIEWS) {
+  $(view.picker).onchange = async (event) => {
+    view.chartStamp = event.target.value;
+    // The table in this step moves with it, or the step is back to describing
+    // two runs at once.
+    view.stamp = view.chartStamp;
+    const picker = $(view.mate);
+    if ([...picker.options].some((o) => o.value === view.stamp)) picker.value = view.stamp;
+    const also = view === NARROW_CHARTS ? [renderByDate()] : [];
+    await Promise.all([loadLegCharts(view), renderResults(view.results), ...also]);
+  };
+
+  view.$('cursor-snap').onclick = () => snapCursor(view);
+  view.$('cursor-watch').onclick = () => watchCursor(view);
+
+  /* Mark the picked trip in the ranking below and scroll to it.
+
+     The two panels describe the same sweep and had nothing joining them, so a
+     trip built by dragging could only be checked against the ranking by reading
+     dates off one panel and hunting for them in the other. Matched on the leg
+     dates, which is what a row is keyed by - not on the price, which two
+     different trips can share.
+
+     Each step points at its own table. Pointing at the broad one from the final
+     step would send you hunting through a run these prices did not come from. */
+  view.$('cursor-in-table').onclick = () => {
+    const message = view.$('cursor-message');
+    if (!view.data) return;
+    const wanted = cursorTrip(view).legs.map((leg) => leg.date).join(',');
+    const rows = [...document.querySelectorAll(`#${view.table} tbody tr[data-dates]`)];
+    for (const row of rows) row.classList.remove('is-cursor');
+
+    const found = rows.find((row) => row.dataset.dates === wanted);
+    if (!found) {
+      // Not a failure. The ranking is narrowed and capped, and a hand-picked trip
+      // is very often one it never offered - which is the whole reason the
+      // markers move freely.
+      message.className = 'small';
+      message.textContent =
+        'This combination is not in the table below — it is either outside your narrowing or '
+        + 'was not among the cheapest it lists. The charts priced it all the same.';
+      return;
+    }
+    message.textContent = '';
+    found.classList.add('is-cursor');
+    found.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  };
+}
+
 $('notify-save-btn').onclick = saveTrip;
 $('night-save-btn').onclick = saveTrip;
 
-$('narrow-sweep').onchange = async (event) => {
-  narrow.stamp = event.target.value;
-  // The table and the by-date chart in this step move with it, or the step is
-  // back to describing two runs at once.
-  state.stamp = narrow.stamp;
-  const picker = $('sweep-select');
-  if ([...picker.options].some((o) => o.value === state.stamp)) picker.value = state.stamp;
-  await Promise.all([loadLegCharts(), renderByDate(), renderResults()]);
-};
 $('narrow-save').onclick = () => saveNarrowing(narrowFromFields());
 /* All three parts, including the departure window.
 
@@ -4906,37 +5054,6 @@ $('narrow-widen').onclick = () => {
   const needed = windowFor(fields);
   if (!needed) return;
   saveNarrowing({ ...fields, window_start: needed.start, window_end: needed.end });
-};
-$('cursor-snap').onclick = () => snapCursor();
-$('cursor-watch').onclick = () => watchCursor();
-
-/* Mark the picked trip in the ranking below and scroll to it.
-
-   The two panels describe the same sweep and had nothing joining them, so a
-   trip built by dragging could only be checked against the ranking by reading
-   dates off one panel and hunting for them in the other. Matched on the leg
-   dates, which is what a row is keyed by - not on the price, which two
-   different trips can share. */
-$('cursor-in-table').onclick = () => {
-  const message = $('cursor-message');
-  const wanted = cursorTrip().legs.map((leg) => leg.date).join(',');
-  const rows = [...document.querySelectorAll('#results-table tbody tr[data-dates]')];
-  for (const row of rows) row.classList.remove('is-cursor');
-
-  const found = rows.find((row) => row.dataset.dates === wanted);
-  if (!found) {
-    // Not a failure. The ranking is narrowed and capped, and a hand-picked trip
-    // is very often one it never offered - which is the whole reason the
-    // markers move freely.
-    message.className = 'small';
-    message.textContent =
-      'This combination is not in the table below — it is either outside your narrowing or '
-      + 'was not among the cheapest it lists. The charts priced it all the same.';
-    return;
-  }
-  message.textContent = '';
-  found.classList.add('is-cursor');
-  found.scrollIntoView({ block: 'center', behavior: 'smooth' });
 };
 for (const id of [
   'narrow-out-start', 'narrow-out-end', 'narrow-back-start', 'narrow-back-end',
@@ -5146,7 +5263,6 @@ async function renderFinal() {
   const trip = state.scenario;
   const narrowing = narrowingSentence(trip);
   const badge = $('final-state');
-  const note = $('final-cost');
 
   // A trip narrowed to nothing is the one case where the buttons must not work,
   // and the panel says why rather than leaving a dead control to be clicked.
@@ -5155,31 +5271,37 @@ async function renderFinal() {
     ? `This would search: ${narrowing}. Change it under Narrow it down.`
     : 'Nothing has been narrowed yet. Set a departure window, a return window or a '
       + 'nights band under Narrow it down, and this will price it.';
-  badge.textContent = narrowing || 'nothing narrowed yet';
+  badge.textContent = narrowing ? 'pricing it' : 'nothing narrowed yet';
   for (const id of ['final-run-btn', 'final-run-cloud-btn']) {
     $(id).disabled = !narrowing;
   }
 
   populateSweepSelect(FINAL_VIEW);
-  renderResults(FINAL_VIEW);
+  await renderFinalCharts();
+  await renderResults(FINAL_VIEW);
+  await refreshFinalCost();
+}
 
-  if (!narrowing) {
-    note.textContent = '';
-    return;
-  }
-  // Priced at the depth the buttons will use, not at a fixed one: a `quick`
-  // final sweep of a five-day window is one date, and quoting a deep cost
-  // beside a quick button would be describing a different run.
+/* What the buttons on this step would cost, at the depth they will use.
+
+   Split out of `renderFinal` because the depth select changes only this line:
+   re-running the whole step would refetch `by-leg` and redraw three charts to
+   answer a question about a number. Priced at the selected depth rather than a
+   fixed one - a `quick` final sweep of a five-day window is one date, and
+   quoting a deep cost beside a quick button describes a different run. */
+async function refreshFinalCost() {
+  const trip = state.scenario;
+  const badge = $('final-state');
+  if (!trip || !narrowingSentence(trip)) return;
   try {
     const body = await api(
       `/api/scenarios/${trip.id}/estimate?depth=${$('final-depth').value}&mode=final`,
       { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(trip) },
     );
-    note.textContent =
-      `${count(body.searches)} searches, about ${Math.round(body.minutes)} minutes, `
-      + 'at the depth selected below.';
+    badge.textContent = `${count(body.searches)} searches · ~${Math.round(body.minutes)} min`;
   } catch (error) {
-    note.textContent = `No estimate — ${error.message}.`;
+    badge.textContent = 'no estimate';
+    badge.title = error.message;
   }
 }
 
@@ -5189,7 +5311,7 @@ function showFinalError(message) {
   host.textContent = message || '';
 }
 
-$('final-depth').onchange = renderFinal;
+$('final-depth').onchange = refreshFinalCost;
 
 $('final-run-btn').onclick = async () => {
   showFinalError('');
@@ -5204,7 +5326,15 @@ $('final-run-cloud-btn').onclick = async () => {
   await dispatchCloudRun(false, 'final', 'final-depth');
 };
 
-$('final-sweep-select').onchange = (event) => {
+$('final-sweep-select').onchange = async (event) => {
   state.finalStamp = event.target.value;
-  renderResults(FINAL_VIEW);
+  // And the charts above it, or the step is back to describing two runs at once
+  // - the thing the two synced pickers on the narrowing step exist to prevent.
+  const charts = $(FINAL_CHARTS.picker);
+  if ([...charts.options].some((o) => o.value === state.finalStamp)) {
+    charts.value = state.finalStamp;
+    FINAL_CHARTS.chartStamp = state.finalStamp;
+    await loadLegCharts(FINAL_CHARTS);
+  }
+  await renderResults(FINAL_VIEW);
 };
