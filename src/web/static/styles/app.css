@@ -96,6 +96,71 @@ table.data th.num,
   font-size: 13px;
 }
 
+/* The -6px above tucks a hint up under `.panel__header`, whose own 14px bottom
+   margin it is cancelling. Anywhere else that tuck is an overlap: a hint under
+   an `h3` sat on the heading's baseline, and two hints in a row closed up into
+   one paragraph. Only visible with the explanations showing, which is why it
+   went unnoticed while they were the thing nobody could turn off. */
+h3 + .panel__hint,
+.row + .panel__hint,
+.panel__hint + .panel__hint,
+.chart + .panel__hint {
+  margin-top: 8px;
+}
+
+/* ------------------------------------------------ explanations on demand --
+
+   Every panel here explains itself, and the explanations are worth keeping:
+   most of them record a failure that cost a day. What they should not be is
+   the first thing read, every time, on a screen you have already understood.
+
+   The split is between teaching and telling. A `.panel__hint` is prose about
+   how a mechanic works and collapses; a `.panel__hint--live` is written by a
+   renderer - a cost, a sampling resolution, which stays a sweep ran under - and
+   never collapses, because it is an answer rather than a lesson. Notices and
+   warnings are not hints at all and are untouched.
+
+   Collapsed by a class on the panel rather than `hidden` on the prose, so the
+   text stays in the DOM for find-in-page and for anything reading it. */
+.panel.is-quiet .panel__hint:not(.panel__hint--live) { display: none; }
+
+.panel__info {
+  padding: 2px 8px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--color-pageTextLight);
+  border-color: transparent;
+  background: transparent;
+}
+
+.panel__info:hover:not(:disabled) {
+  background: var(--color-buttonNormalBackgroundHover);
+  border-color: var(--color-buttonNormalBorder);
+}
+
+/* Open reads as pressed, so the one panel you have expanded is findable when
+   the rest are quiet. */
+.panel__info[aria-expanded="true"] {
+  color: var(--color-pageText);
+  background: var(--color-buttonNormalBackground);
+  border-color: var(--color-buttonNormalBorder);
+}
+
+/* The same chevron the disclosures use, for the same meaning. */
+.panel__info::before {
+  content: '›';
+  display: inline-block;
+  margin-right: 5px;
+  transition: transform 0.12s ease;
+}
+
+.panel__info[aria-expanded="true"]::before { transform: rotate(90deg); }
+
+/* The header is `justify-content: space-between`, and a third child would push
+   the badge that belongs beside the title away from it. The button sits at the
+   end of the row instead, always in the same place on every panel. */
+.panel__header .panel__info { margin-left: auto; }
+
 /* Airports dropped in the Explore tab but not yet saved. Sticks to the top of
    the panel so that after scrolling through four pools of verdicts, what you
    have decided - and the button that commits it - are still in front of you. */
@@ -908,14 +973,46 @@ label.field > select { font-weight: 400; color: var(--color-formInputText); }
 .cursor-readout__total .small { font-weight: 400; }
 .cursor-readout__split { font-size: 14px; color: var(--color-pageTextLight); }
 .cursor-readout__badges { display: flex; gap: 6px; flex-wrap: wrap; }
+/* One row per leg, and the columns line up down the trip: the three dates read
+   as a column, the three prices as a column that adds to the total above them.
+   A flex row of wrapping spans could not do that, and this panel is now where
+   the trip is booked from - the leg rows carry the links. */
 .cursor-readout__legs {
   width: 100%;
-  display: flex;
-  gap: 16px;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr) max-content max-content max-content;
+  align-items: baseline;
+  gap: 4px 14px;
   font-size: 12px;
 }
-.cursor-readout__legs > span { white-space: nowrap; }
+
+.cursor-readout__leg {
+  display: contents;
+}
+
+.cursor-readout__when { white-space: nowrap; font-weight: 600; }
+.cursor-readout__price { white-space: nowrap; text-align: right; }
+
+/* The row's own controls sit tight to the price rather than out at the panel
+   edge, so a three-leg trip reads as three lines and not as a table. */
+.cursor-readout__leg > a,
+.cursor-readout__leg > button { justify-self: start; }
+.cursor-readout__leg > button { padding: 2px 8px; font-size: 12px; }
+
+/* Narrow enough that five columns would each be a word wide. */
+@media (max-width: 640px) {
+  .cursor-readout__legs { grid-template-columns: max-content minmax(0, 1fr); }
+  .cursor-readout__leg > a,
+  .cursor-readout__leg > button { grid-column: 2; }
+}
+
+/* The itinerary the markers are pointing at, marked in the ranking below them.
+   Without it "show it in the table" scrolls you to a table of fifty rows and
+   leaves you to find which one it meant. */
+tr.is-cursor > td {
+  background: var(--color-warningBackground);
+}
+tr.is-cursor > td:first-child { font-weight: 600; }
 
 /* The gear sits at the far end, after a spacer, because setup is not a fourth
    step of the work — it is the drawer the work is configured from. */

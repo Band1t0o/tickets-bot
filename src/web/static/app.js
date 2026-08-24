@@ -17,10 +17,23 @@ const state = {
   // the best sweep to judge airports by is rarely the one you are pricing.
   exploreStamp: null,
   exploreCost: null,
-  // How the Results table is narrowed. Held here rather than read off the DOM
+  // Which run the Final sweeps step reads. Its own selection, like the probe's:
+  // that step lists only the narrowed runs and this one only the broad ones, so
+  // one shared stamp would have each step keep snapping the other's picker back.
+  finalStamp: null,
+  // Which run the Follow step picks candidates from. Its own again, and this is
+  // the third of them for a reason: every step that lists runs has to own its
+  // selection or it inherits whichever one another step last chose. This picker
+  // was the original case - it had a label and an `onchange` and was never
+  // filled by anything - and binding it to the broad step's stamp only moved the
+  // bug, because it could then never land on a narrowed run.
+  watchStamp: null,
+  // How each ranking table is narrowed. Held here rather than read off the DOM
   // so a re-render cannot lose it, and sent to the server rather than applied
-  // here - see the comment on the filter row in index.html.
-  filters: { from: '', to: '', bags: false },
+  // here - see the comment on the filter row in index.html. One per table:
+  // "ignore my narrowing" means opposite things either side of the split.
+  filters: { from: '', to: '', bags: false, allWindow: false },
+  finalFilters: { from: '', to: '', bags: false, allWindow: false },
 };
 
 /* Must equal `API_CONTRACT` in src/web/app.py; a test fails if it does not.
@@ -31,7 +44,7 @@ const state = {
    was lost: the page rendered an empty trip picker and empty charts, which is
    exactly what a deleted database looks like, when in fact nothing on disk had
    changed and the answer was `make ui` again. */
-const EXPECTED_CONTRACT = 12;
+const EXPECTED_CONTRACT = 14;
 
 const api = async (path, options) => {
   const response = await fetch(path, options);
@@ -121,6 +134,15 @@ const asDate = (stamp) => {
   return Number.isNaN(when.getTime()) ? null : when;
 };
 
+/* A run stamp as the ISO instant `multiLineChart` plots against.
+
+   The history chart moved from `lineChart`, which spaces points evenly and
+   labels them, to `multiLineChart`, which puts them on a real time axis. Two
+   series only line up on a shared axis if both are placed by when they ran -
+   the broad sweeps and the narrowed ones do not alternate neatly, and evenly
+   spacing each line on its own would draw them as though they had. */
+const isoOf = (stamp) => (asDate(stamp) ?? new Date(0)).toISOString();
+
 /* "20 Aug, 20:14" in Prague. Empty string when the stamp cannot be read, so a
    caller concatenating it degrades to a missing time rather than to "Invalid
    Date" sitting in the middle of a sentence. */
@@ -168,6 +190,110 @@ $('theme-toggle').onclick = () => {
   renderPrices();  // charts read theme tokens at draw time
 };
 
+/* ------------------------------------------- explanations on demand ------
+
+   Every panel in this app explains itself, and most of those explanations
+   record a failure that cost a day - a probe read against the wrong trip, a
+   sweep charted through its own breakage, a stay range that quietly threw away
+   a twelve-day Japan. They are worth keeping and they are worth reading once.
+   What they should not be is the first paragraph on every panel of a screen you
+   already understand, which is what pushed the actual numbers below the fold.
+
+   So: teaching collapses, telling does not. `.panel__hint` is prose about how a
+   mechanic works. `.panel__hint--live` is written by a renderer - a cost, a
+   sampling resolution, which stays a run was priced under - and stays whatever
+   the switch says, because it is an answer about the run in front of you.
+   Notices and warnings are neither and are never touched.
+
+   The prose is hidden by a class on the panel, not by `hidden` on the paragraph:
+   it stays in the DOM, so find-in-page still reaches it. */
+
+const HINTS_KEY = 'hints';
+const HINTS_OPEN_KEY = 'hintsOpen';
+
+// Off by default. The alternative was defensible for a first run and wrong for
+// the four hundredth.
+const hintsOn = () => localStorage.getItem(HINTS_KEY) === 'on';
+
+const hintsOpen = () => {
+  try {
+    const raw = JSON.parse(localStorage.getItem(HINTS_OPEN_KEY) || '[]');
+    return new Set(Array.isArray(raw) ? raw : []);
+  } catch {
+    // A hand-edited or half-written value is not worth a broken page.
+    return new Set();
+  }
+};
+
+/* One panel's prose, shown or hidden, remembered by the panel's own name.
+
+   Named by `data-panel` and an index within it, because several panels share a
+   section and nothing else about them is stable: a heading is prose someone may
+   reword, and DOM order changes whenever a panel moves. */
+function panelKey(panel) {
+  const section = panel.closest('section[data-panel]');
+  if (!section) return null;
+  const siblings = [...section.querySelectorAll('.panel')];
+  return `${section.dataset.panel}:${siblings.indexOf(panel)}`;
+}
+
+function applyHints() {
+  const on = hintsOn();
+  const open = hintsOpen();
+  for (const panel of document.querySelectorAll('section[data-panel] .panel')) {
+    const button = panel.querySelector('.panel__info');
+    if (!button) continue;
+    const key = panelKey(panel);
+    // The global switch sets the default; a panel in the override set is the
+    // other way round from it, whichever way round that is.
+    const showing = open.has(key) ? !on : on;
+    panel.classList.toggle('is-quiet', !showing);
+    button.setAttribute('aria-expanded', String(showing));
+    button.title = showing ? 'Hide what this panel is for' : 'What is this panel for?';
+  }
+  const toggle = $('hints-toggle');
+  toggle.textContent = `Explanations: ${on ? 'on' : 'off'}`;
+  toggle.setAttribute('aria-pressed', String(on));
+}
+
+/* Give every panel that has prose to hide a button to hide it with.
+
+   Run once, after the static markup is parsed. Panels whose only hints are live
+   ones get no button, because a control that does nothing is worse than none -
+   and that is most of the Cloud tab.  */
+function mountHintToggles() {
+  for (const panel of document.querySelectorAll('section[data-panel] .panel')) {
+    const collapsible = panel.querySelector('.panel__hint:not(.panel__hint--live)');
+    const header = panel.querySelector('.panel__header');
+    if (!collapsible || !header || panel.querySelector('.panel__info')) continue;
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'panel__info';
+    button.textContent = 'What this is for';
+    button.onclick = () => {
+      const key = panelKey(panel);
+      const open = hintsOpen();
+      if (open.has(key)) open.delete(key);
+      else open.add(key);
+      localStorage.setItem(HINTS_OPEN_KEY, JSON.stringify([...open]));
+      applyHints();
+    };
+    header.appendChild(button);
+  }
+  applyHints();
+}
+
+$('hints-toggle').onclick = () => {
+  localStorage.setItem(HINTS_KEY, hintsOn() ? 'off' : 'on');
+  // The per-panel overrides were answers to the old default and mean the
+  // opposite under the new one. Flipping the switch is the deliberate act, so
+  // it wins outright rather than leaving a scatter of panels disagreeing with it.
+  localStorage.removeItem(HINTS_OPEN_KEY);
+  applyHints();
+};
+
+mountHintToggles();
+
 /* ------------------------------------------------------------------- tabs */
 
 /* Three steps and a gear, over the same eleven panels.
@@ -186,7 +312,8 @@ $('theme-toggle').onclick = () => {
    addresses them by. */
 const STEP_OF = {
   search: 'map', explore: 'map',
-  narrow: 'narrow', dates: 'narrow', results: 'narrow',
+  narrow: 'narrow', results: 'narrow',
+  'final-plan': 'final', 'final-results': 'final',
   watch: 'follow', history: 'follow',
   notify: 'setup', night: 'setup', cloud: 'setup', sources: 'setup',
 };
@@ -211,11 +338,11 @@ function showTab(name) {
     // could render the run the charts were about to move off.
     renderNarrow().then(() => {
       renderByDate();
-      renderFocusControls();
       renderResults();
       renderCloudSync();
     });
   }
+  if (step === 'final') { renderFinal(); }
   if (step === 'follow') { renderWatch(); renderHistory(); }
   if (step === 'setup') {
     renderNightSweep();
@@ -1013,8 +1140,8 @@ async function renderCloudRuns() {
     ? slots.map((slot) =>
       '<div class="night-list__row">' +
       `<span class="night-list__name">${localStamp(slot.next)}</span>` +
-      `<span class="night-list__cost">${slot.focused
-        ? 'only the days pinned on the price chart'
+      `<span class="night-list__cost">${slot.mode === 'final'
+        ? 'only what you narrowed to'
         : 'the whole date window'}</span></div>`).join('')
     : '<span class="muted">The schedule could not be read from the workflow file.</span>';
 
@@ -1107,15 +1234,21 @@ async function renderCloudSync() {
       'but not on this machine' + describeMissing(body.missing) + '.' +
       (body.can_fast_forward ? '' : ` ${body.blocked_by}`);
   const actionable = Boolean(body.known && missing > 0 && body.can_fast_forward);
+  // The other half of the same question. A checkout with commits of its own
+  // cannot fast-forward and should not try - but that refusal is about history,
+  // and the runs behind it are directories this machine does not have. Copying
+  // those needs no merge, so the sentence stops appearing with nothing under it.
+  const takeable = Boolean(body.known && missing > 0 && !body.can_fast_forward);
 
-  for (const [box, text, button] of [
-    ['cloud-sync', 'cloud-sync-text', 'cloud-sync-get'],
-    ['cloud-sync-cloud', 'cloud-sync-cloud-text', 'cloud-sync-cloud-get'],
+  for (const [box, text, button, take] of [
+    ['cloud-sync', 'cloud-sync-text', 'cloud-sync-get', 'cloud-sync-take'],
+    ['cloud-sync-cloud', 'cloud-sync-cloud-text', 'cloud-sync-cloud-get', 'cloud-sync-cloud-take'],
   ]) {
     if (!$(box)) continue;
     $(box).hidden = !show;
     $(text).textContent = message;
     $(button).hidden = !actionable;
+    if ($(take)) $(take).hidden = !takeable;
   }
 
   const ok = $('cloud-sync-ok');
@@ -1137,22 +1270,26 @@ function describeMissing(missing) {
   return ` (${trips.map((id) => `${id}: ${missing[id].length}`).join(', ')})`;
 }
 
-async function pullCloudResults(button) {
+/* `path` is either the fast-forward or the copy-the-directories-only route.
+   The two differ in what they move and in nothing else the page cares about:
+   both answer with the runs that arrived, and both can refuse with a sentence
+   git wrote. `gained` is the sync's word for it and `taken` is the take's. */
+async function pullCloudResults(button, path = '/api/cloud-sync') {
   const original = button.textContent;
   button.disabled = true;
   button.textContent = 'Getting…';
   try {
-    const body = await api('/api/cloud-sync', { method: 'POST' });
+    const body = await api(path, { method: 'POST' });
     // The pull can bring a newer src/web/app.py with it, which this running
     // server has already imported. `contractMatches` is the existing handshake
     // for exactly that, and its message - restart the server - is the right one.
     if (!(await contractMatches())) return;
     await renderCloudSync();
 
-    const gained = Object.values(body.gained ?? {}).reduce((n, v) => n + v.length, 0);
+    const gained = Object.values(body.gained ?? body.taken ?? {}).reduce((n, v) => n + v.length, 0);
     // Land on the newest run, but only when one actually arrived: moving the
     // picker under someone who is reading a specific sweep is its own bug.
-    if (gained) state.stamp = null;
+    if (gained) { state.stamp = null; state.finalStamp = null; state.watchStamp = null; }
     await pollStatus();
     if (gained) renderResults();
     $('status-text').textContent = gained
@@ -1170,6 +1307,9 @@ async function pullCloudResults(button) {
 
 for (const id of ['cloud-sync-get', 'cloud-sync-cloud-get']) {
   if ($(id)) $(id).onclick = (event) => pullCloudResults(event.target);
+}
+for (const id of ['cloud-sync-take', 'cloud-sync-cloud-take']) {
+  if ($(id)) $(id).onclick = (event) => pullCloudResults(event.target, '/api/cloud-sync/take');
 }
 
 $('cloud-queue').onclick = async (event) => {
@@ -1233,8 +1373,8 @@ async function renderNightSweep() {
   const slots = body.schedule ?? [];
   $('night-when').textContent = slots.length
     ? 'Next ' + slots.map((slot) =>
-      `${localStamp(slot.next)}${slot.focused
-        ? ' (only the days pinned on the price chart)'
+      `${localStamp(slot.next)}${slot.mode === 'final'
+        ? ' (only what you narrowed to)'
         : ' (the whole date window)'}`).join(', then ')
     : 'The schedule could not be read from the workflow file.';
 }
@@ -1425,6 +1565,8 @@ $('new-trip-btn').onclick = () => {
   clearError();
   state.isNew = true;
   state.stamp = null;
+  state.finalStamp = null;
+  state.watchStamp = null;
   state.sweeps = [];
   clearFilters();
   state.scenario = blankScenario();
@@ -1498,12 +1640,15 @@ function updateNewTripUi() {
 
    A trip that will not save does not run: the reason appears on whichever tab
    the button was pressed from. */
-async function startRun(mode) {
+async function startRun(mode, depthId = 'depth') {
   clearError();
   if (isDirty() && !(await saveTrip())) return false;
   try {
+    // Which depth picker to read. The Final sweeps step has its own, defaulted
+    // to `deep`: a five-day departure window stepped every seven days prices one
+    // date, and a narrowed sweep that samples one date is not a measurement.
     await api(
-      `/api/scenarios/${state.scenario.id}/run?depth=${$('depth').value}&mode=${mode}`,
+      `/api/scenarios/${state.scenario.id}/run?depth=${$(depthId).value}&mode=${mode}`,
       { method: 'POST' },
     );
     pollStatus();
@@ -1567,9 +1712,9 @@ $('explore-btn').onclick = () => startRun('explore');
 
 /* Both stop buttons, driven together so neither can disagree with the other
    about whether a run is going. */
-const STOP_BUTTONS = ['stop-btn', 'run-stop-btn'];
+const STOP_BUTTONS = ['stop-btn', 'run-stop-btn', 'final-stop-btn'];
 
-const stopButtons = (fn) => { for (const id of STOP_BUTTONS) fn($(id)); };
+const stopButtons = (fn) => { for (const id of STOP_BUTTONS) { if ($(id)) fn($(id)); } };
 
 async function askToStop() {
   stopButtons((button) => { button.disabled = true; });
@@ -1597,8 +1742,9 @@ $('run-cloud-btn').onclick = async () => {
   await dispatchCloudRun(false);
 };
 
-async function dispatchCloudRun(force) {
-  const query = `depth=${$('depth').value}${force ? '&force=true' : ''}`;
+async function dispatchCloudRun(force, mode = 'sweep', depthId = 'depth') {
+  const query =
+    `depth=${$(depthId).value}&mode=${mode}${force ? '&force=true' : ''}`;
   try {
     const body = await api(`/api/scenarios/${state.scenario.id}/run-cloud?${query}`,
       { method: 'POST' });
@@ -1612,7 +1758,7 @@ async function dispatchCloudRun(force) {
     if (!force && /run it anyway/i.test(error.message)) {
       if (confirm(`${error.message}
 
-Run it anyway?`)) return dispatchCloudRun(true);
+Run it anyway?`)) return dispatchCloudRun(true, mode, depthId);
       $('status-text').textContent = 'Cloud run cancelled';
       return;
     }
@@ -1650,7 +1796,7 @@ async function pollStatus() {
     if (body.error) {
       strip.className = 'status-strip is-error';
       $('status-text').textContent = `Sweep failed — ${body.error}`;
-      populateSweepSelect();
+      populateSweepSelects();
       return;
     }
 
@@ -1707,15 +1853,20 @@ async function pollStatus() {
       // Otherwise you explore, open Results, and read yesterday's deep sweep.
       if (state.watching) {
         state.watching = false;
-        state.stamp = latest.stamp;
+        // Onto the picker that lists this kind of run. Setting `state.stamp` to
+        // a final run would be setting the broad table's selection to something
+        // its own picker does not offer, and the next redraw would snap it back.
+        if (latest.mode === 'final') state.finalStamp = latest.stamp;
+        else state.stamp = latest.stamp;
         state.exploreStamp = latest.stamp;
-        populateSweepSelect();
-        // A probe answers in the Explore tab, a sweep in Results. Show whichever
-        // one the run you just watched actually filled in.
-        showTab(latest.mode === 'explore' ? 'explore' : 'results');
+        populateSweepSelects();
+        // A probe answers in the Explore tab, a final sweep on its own step, a
+        // broad sweep in Results. Show whichever one the run you just watched
+        // actually filled in.
+        showTab({ explore: 'explore', final: 'final-results' }[latest.mode] ?? 'results');
         return;
       }
-      populateSweepSelect();
+      populateSweepSelects();
     } else {
       strip.className = 'status-strip';
       $('status-text').textContent = 'No sweeps yet';
@@ -1745,6 +1896,20 @@ function waitingUntil(latest) {
    a single ⚠ instead of being spliced into the middle of the line, where in a
    picker of otherwise ordinary rows it was easy to slide past — which is the
    whole point of flagging a probe or a run of a different trip at all. */
+/* What kind of run this is, in one word, for the label every picker shares.
+
+   A probe and a stopped run are both "not a sweep of this trip", and reading
+   either as one is how a headline price ends up 7,000 Kč wrong. A final sweep
+   is a third case and the subtlest: it *is* a real sweep of this trip, priced
+   at the same depth, and its only difference is that it looked at a fifth of
+   the days. The depth alone - "deep" against "deep" - says nothing about that,
+   which is why the word is in front of it rather than instead of it. */
+const kindOf = (sweep) => {
+  if (sweep.mode === 'explore') return 'probe';
+  const depth = sweep.depth ?? '?';
+  return sweep.mode === 'final' ? `final · ${depth}` : depth;
+};
+
 const sweepLabel = (sweep, kind, warnings = []) => {
   // `|| sweep.stamp` rather than nothing: an unparseable stamp is still the only
   // handle you have on that row, and a picker of dateless rows is unusable.
@@ -1777,27 +1942,54 @@ const sweepLabel = (sweep, kind, warnings = []) => {
   return parts.join(' · ') + (flagged.length ? ` · ⚠ ${flagged.join(' · ')}` : '');
 };
 
-function populateSweepSelect() {
-  const select = $('sweep-select');
+/* The runs one view's picker may offer.
+
+   A broad sweep and a final sweep answer different questions of the same trip,
+   and the step you are on says which you are asking. Mixing them in one picker
+   was the alternative and it is worse than it sounds: the two look identical in
+   a list - same trip, same depth, same day - and only the search count hints
+   that one of them priced a fifth of the window. Selecting the wrong one puts a
+   narrowed run's cheapest under a heading that says it is the trip's cheapest.
+
+   A run with no mode recorded predates the split and priced whatever the trip
+   said at the time, which is what `sweep` meant then. */
+const runsFor = (view) =>
+  state.sweeps.filter((sweep) => view.modes.includes(sweep.mode ?? 'sweep'));
+
+function populateSweepSelect(view = BROAD_VIEW) {
+  const select = view.$('sweep-select');
+  if (!select) return;
   select.innerHTML = '';
-  for (const sweep of state.sweeps) {
+  const offered = runsFor(view);
+  for (const sweep of offered) {
     const option = document.createElement('option');
     option.value = sweep.stamp;
     // Depth and search count are part of the label because a 20-search smoke
     // test and a 204-search real sweep are otherwise indistinguishable here -
     // and reading the wrong one produced a headline price 7,000 Kč too high.
     const dark = (sweep.routes_with_no_results || []).length;
-    // A probe and a stopped run are both "not a sweep of this trip", and
-    // reading either as one is how a headline price ends up 7,000 Kč wrong.
-    const kind = sweep.mode === 'explore' ? 'probe' : (sweep.depth ?? '?');
-    option.textContent = sweepLabel(sweep, kind, [
+    option.textContent = sweepLabel(sweep, kindOf(sweep), [
       sweep.state === 'stopped' ? `stopped at ${sweep.completed ?? '?'}` : '',
       dark ? `${dark} dead route(s)` : '',
     ]);
     select.appendChild(option);
   }
-  if (!state.stamp && state.sweeps.length) state.stamp = state.sweeps[0].stamp;
-  if (state.stamp) select.value = state.stamp;
+  // Selected against what this picker actually offers. Defaulting to
+  // `state.sweeps[0]` would pick a run the list does not contain the moment the
+  // newest run is of the other kind, and the picker would show a blank row.
+  if (!offered.some((sweep) => sweep.stamp === view.stamp)) {
+    view.stamp = offered.length ? offered[0].stamp : null;
+  }
+  if (view.stamp) select.value = view.stamp;
+}
+
+/* Every picker that lists runs, refilled together.
+
+   They must be: a run of either kind arrives in one list and can leave the
+   other's selection pointing at a stamp its picker no longer offers, which
+   renders as a blank row above a table full of some other run's prices. */
+function populateSweepSelects() {
+  for (const view of RESULT_VIEWS) populateSweepSelect(view);
 }
 
 $('sweep-select').onchange = (event) => {
@@ -1826,8 +2018,8 @@ const VERDICTS = {
   nothing_to_check: ['muted', 'nothing to check.'],
 };
 
-function renderVerification(report) {
-  const host = $('verification');
+function renderVerification(report, view) {
+  const host = view.$('verification');
   if (!report) {
     // Not checked is not the same as checked and fine, and must not read as it.
     host.innerHTML =
@@ -2008,7 +2200,7 @@ function populateExploreSelect() {
   for (const sweep of usable) {
     const option = document.createElement('option');
     option.value = sweep.stamp;
-    const kind = sweep.mode === 'explore' ? 'probe' : `${sweep.depth ?? '?'} sweep`;
+    const kind = sweep.mode === 'explore' ? 'probe' : `${kindOf(sweep)} sweep`;
     option.textContent = sweepLabel(sweep, kind, [
       sweep.state === 'throttled' ? 'site refused' : '',
       sweep.state === 'stopped' ? 'stopped early' : '',
@@ -2030,14 +2222,24 @@ async function renderExplore() {
   const anything = populateExploreSelect();
   $('explore-empty').hidden = anything;
   $('explore-report').hidden = !anything;
+  $('explore-one-run').hidden = !anything;
   $('explore-run-note').textContent = state.exploreCost ?? '';
   if (!anything) {
+    $('explore-verdicts').innerHTML = '';
+    $('explore-source').textContent = 'nothing measured yet';
     $('explore-report').innerHTML = '';
     $('explore-intro').textContent = '';
     $('explore-mismatch').hidden = true;
     $('explore-coverage').hidden = true;
     return;
   }
+  // Two independent reads, fetched together. The merged table is what the tab
+  // opens on; the single-run report is folded shut below it and still has to be
+  // right when it is opened.
+  await Promise.all([renderAirportVerdicts(), renderOneRun()]);
+}
+
+async function renderOneRun() {
   try {
     renderExploreReport(
       await api(`/api/sweeps/${state.scenario.id}/${state.exploreStamp}/explore`),
@@ -2048,6 +2250,105 @@ async function renderExplore() {
     $('explore-coverage').hidden = true;
     $('explore-empty').hidden = false;
     $('explore-empty').textContent = `Could not read that run — ${error.message}`;
+  }
+}
+
+/* Every airport of the trip, judged by the best run that measured it.
+
+   The tab used to open on a picker of runs by date and time, so answering "is
+   Vienna worth keeping" began with choosing which of twenty-two runs to ask -
+   and whichever you chose, a route it never reached read as an airport with
+   nothing to say for itself. The server picks per pool now, so the rows in one
+   table are always scored against one baseline; this only has to say which run
+   each pool came from, because a verdict is worth exactly as much as the run
+   behind it. */
+async function renderAirportVerdicts() {
+  const host = $('explore-verdicts');
+  const badge = $('explore-source');
+  let body;
+  try {
+    body = await api(`/api/scenarios/${state.scenario.id}/airport-verdicts`);
+  } catch (error) {
+    host.innerHTML = '';
+    badge.textContent = 'could not read';
+    $('explore-empty').hidden = false;
+    $('explore-empty').textContent = `Could not judge these airports — ${error.message}`;
+    return;
+  }
+
+  // Not a count of runs. The server stops reading as soon as no older run could
+  // beat what it has, so `runs_read` is a fact about the search and not about
+  // the evidence - it says 1 on a trip with twenty-two sweeps behind it. Each
+  // pool names its own run below, which is the number that means something.
+  const measured = body.pools.filter((pool) => pool.measured_by).length;
+  badge.className = `badge badge--${measured ? 'good' : 'muted'}`;
+  badge.textContent = measured
+    ? 'judged from your runs on disk'
+    : 'nothing measured yet';
+
+  host.innerHTML = '';
+  for (const pool of body.pools) {
+    const block = document.createElement('div');
+    block.className = 'panel__section';
+
+    const heading = document.createElement('h3');
+    heading.textContent = pool.role === 'origins' && pool.index === 0
+      ? 'Flying from'
+      : `${pool.label}`;
+    block.appendChild(heading);
+
+    // Which run this pool's numbers are from, on the pool rather than on the
+    // panel: they genuinely can differ, and a single line at the top claiming
+    // one run for all of them would be the lie this endpoint exists to avoid.
+    const from = document.createElement('p');
+    from.className = 'panel__hint panel__hint--live small';
+    if (pool.measured_by) {
+      const run = pool.measured_by;
+      const kind = run.mode === 'explore' ? 'probe' : `${run.depth ?? '?'} sweep`;
+      const holes = run.coverage != null && run.coverage < 1
+        ? ` — it answered ${Math.round(run.coverage * 100)}% of its plan, so a thin row here may be the site rather than the airport`
+        : '';
+      from.innerHTML =
+        `From the ${escapeHtml(kind)} of ${escapeHtml(localStamp(run.stamp))}` +
+        `${escapeHtml(holes)}.`;
+    } else {
+      from.textContent = 'No run on disk has priced any of these.';
+    }
+    block.appendChild(from);
+
+    if (pool.airports.length) {
+      const scroll = document.createElement('div');
+      scroll.className = 'table-scroll';
+      const table = document.createElement('table');
+      table.className = 'data';
+      table.innerHTML =
+        '<thead><tr><th>Airport</th><th>Verdict</th><th class="num">Cheapest in</th>' +
+        '<th class="num">Cheapest out</th><th class="num">Together</th>' +
+        '<th class="num">vs best</th><th class="num">Searches</th><th></th></tr></thead>';
+      const tbody = document.createElement('tbody');
+      // The same row builder the single-run report uses, so a verdict reads the
+      // same and "Remove from trip" behaves the same wherever it is met.
+      for (const row of pool.airports) tbody.appendChild(exploreRow(pool, row, body.currency));
+      table.appendChild(tbody);
+      scroll.appendChild(table);
+      block.appendChild(scroll);
+    }
+
+    // Answered rather than left to inference, exactly as the single-run report
+    // does it: the absence of a row is not an answer to "what about this one?".
+    if (pool.not_searched?.length) {
+      const missing = document.createElement('p');
+      missing.className = 'panel__hint panel__hint--live small';
+      missing.innerHTML =
+        `<strong>${escapeHtml(pool.not_searched.join(', '))}</strong> ` +
+        (pool.measured_by
+          // Added to the trip since the run these rows come from, so there is
+          // no row to put it in rather than a verdict to report.
+          ? 'is not in the run these rows come from — run a probe to price it.'
+          : 'has never been priced by any run on disk — run a probe.');
+      block.appendChild(missing);
+    }
+    host.appendChild(block);
   }
 }
 
@@ -2086,7 +2387,7 @@ function renderOrderVerdict(body) {
   host.innerHTML =
     '<h3 class="muted small" style="margin-top:0">Which way round</h3>' +
     `<table class="data"><tbody>${rows}</tbody></table>` +
-    '<p class="panel__hint small">Cheapest leg seen on each hop, added up — a floor to ' +
+    '<p class="panel__hint panel__hint--live small">Cheapest leg seen on each hop, added up — a floor to ' +
     'compare the two orders by, not a trip you could book. Both were sampled on the same ' +
     'dates by the same run.</p>';
 
@@ -2142,16 +2443,16 @@ function renderExploreReport(body) {
   host.innerHTML = '';
   host.hidden = false;
 
+  // What *this* run is, and nothing about how to read a verdict: that sentence
+  // moved to the panel's own hint, above the merged table, where it is said
+  // once for both tables rather than twice.
   const probe = body.mode === 'explore';
   $('explore-intro').innerHTML =
     (probe
       ? 'A probe, not a sweep: every route on three spread-out dates. '
-      : 'Read from a full sweep, so these prices come from many more dates than a probe. ') +
-    'Prices are the cheapest seen, so they are a floor to compare airports by, never a fare ' +
-    'to book. <strong>Not measured</strong> means the site never answered — run it again ' +
-    'rather than ruling that airport out.' +
-    (body.state === 'stopped' ? ' <strong>This run was stopped early</strong>, so some routes went unasked.' : '') +
-    (body.state === 'throttled' ? ' <strong>The site stopped answering during this run</strong>, so treat thin rows as unmeasured.' : '');
+      : 'A full sweep, so these prices come from many more dates than a probe. ') +
+    (body.state === 'stopped' ? '<strong>This run was stopped early</strong>, so some routes went unasked.' : '') +
+    (body.state === 'throttled' ? '<strong>The site stopped answering during this run</strong>, so treat thin rows as unmeasured.' : '');
 
   renderExploreCoverage(body);
   renderMismatch(body, probe);
@@ -2186,7 +2487,7 @@ function renderExploreReport(body) {
     // this one?" — the absence of a row is not an answer to it.
     if (pool.not_searched?.length) {
       const missing = document.createElement('p');
-      missing.className = 'panel__hint small';
+      missing.className = 'panel__hint panel__hint--live small';
       missing.innerHTML =
         `<strong>${escapeHtml(pool.not_searched.join(', '))}</strong> ` +
         'never searched in this run — run a probe to price them.';
@@ -2231,21 +2532,66 @@ function renderMismatch(body, probe) {
 
 /* ------------------------------------------------------- results: filters */
 
+/* Two readings of two kinds of run, drawn by one set of renderers.
+
+   "Narrow it down" reads the broad sweeps — the whole window, which is what you
+   pick a trip out of. "Final sweeps" reads the narrowed ones, which re-price
+   that pick every few hours. They ask the same questions of different runs, so
+   duplicating six hundred lines of renderer per tab was never the answer; each
+   view says which ids it owns, which run it has selected, and which runs its
+   picker may offer.
+
+   The ids differ only by the prefix, so a panel added to one view and forgotten
+   in the other shows up as a missing element rather than as the two views
+   quietly sharing a control. */
+function resultsView({ prefix, stampKey, filtersKey, modes, charts }) {
+  return {
+    prefix,
+    modes,
+    // Whether a row may offer "Put on the charts". Only the broad view can:
+    // the leg charts draw whichever broad sweep is selected, so lifting a final
+    // sweep's trip onto them would place markers on another run's prices.
+    charts,
+    $: (id) => $(prefix + id),
+    get stamp() { return state[stampKey]; },
+    set stamp(value) { state[stampKey] = value; },
+    get filters() { return state[filtersKey]; },
+    set filters(value) { state[filtersKey] = value; },
+  };
+}
+
+// The broad half of the app, which includes the probe: it samples the whole
+// window, it is started from Map it out, and this table has a branch that says
+// what a probe is when one is picked. Only the leg charts refuse it, and they
+// filter it out themselves - a probe prices three dates a leg, which draws a
+// line that looks like a price curve and is not one.
+const BROAD_VIEW = resultsView({
+  prefix: '', stampKey: 'stamp', filtersKey: 'filters',
+  modes: ['sweep', 'explore'], charts: true,
+});
+const FINAL_VIEW = resultsView({
+  prefix: 'final-', stampKey: 'finalStamp', filtersKey: 'finalFilters',
+  modes: ['final'], charts: false,
+});
+const RESULT_VIEWS = [BROAD_VIEW, FINAL_VIEW];
+
 /* A filter belongs to the trip it was set on. Carrying "from FRA" onto a trip
    that never flies from Frankfurt shows an empty table with a control the reader
    did not set, which reads as a trip with no results. */
 const clearFilters = () => {
-  state.filters = { from: '', to: '', bags: false, allWindow: false };
+  for (const view of RESULT_VIEWS) {
+    view.filters = { from: '', to: '', bags: false, allWindow: false };
+  }
 };
 
-const filterQuery = () => {
+const filterQuery = (view) => {
   const params = new URLSearchParams();
-  if (state.filters.from) params.set('from_airport', state.filters.from);
-  if (state.filters.to) params.set('to_airport', state.filters.to);
-  if (state.filters.bags) params.set('bags', 'true');
+  if (view.filters.from) params.set('from_airport', view.filters.from);
+  if (view.filters.to) params.set('to_airport', view.filters.to);
+  if (view.filters.bags) params.set('bags', 'true');
   // Only ever sent when asked for. `narrow` is the server's default, so a page
   // that never sends this behaves exactly as it did before the toggle existed.
-  if (state.filters.allWindow) params.set('window', 'all');
+  if (view.filters.allWindow) params.set('window', 'all');
   const query = params.toString();
   return query ? `?${query}` : '';
 };
@@ -2257,12 +2603,12 @@ const filterQuery = () => {
    still has trips of its own, so building the list from the results would hide
    exactly the choice worth making. An option with nothing behind it says so
    when you pick it. */
-function renderFilters(body) {
+function renderFilters(body, view) {
   for (const [id, codes, chosen, blank] of [
-    ['filter-from', body.start_airports ?? [], state.filters.from, 'any airport'],
-    ['filter-to', body.end_airports ?? [], state.filters.to, 'any airport'],
+    ['filter-from', body.start_airports ?? [], view.filters.from, 'any airport'],
+    ['filter-to', body.end_airports ?? [], view.filters.to, 'any airport'],
   ]) {
-    const select = $(id);
+    const select = view.$(id);
     select.innerHTML = '';
     for (const [value, text] of [['', blank], ...codes.map((c) => [c, c])]) {
       const option = document.createElement('option');
@@ -2281,24 +2627,24 @@ function renderFilters(body) {
     select.value = chosen;
   }
 
-  $('filter-bags').checked = state.filters.bags;
-  $('filter-window').checked = state.filters.allWindow;
+  view.$('filter-bags').checked = view.filters.bags;
+  view.$('filter-window').checked = view.filters.allWindow;
   // Hidden when there is no narrowing to ignore: a tick that cannot change
   // anything is a control the reader has to rule out before trusting the table.
   const narrowing = body.window ?? {};
-  $('filter-window-wrap').hidden = !(
-    narrowing.applied || state.filters.allWindow
+  view.$('filter-window-wrap').hidden = !(
+    narrowing.applied || view.filters.allWindow
   ) && !(narrowing.focus || narrowing.return_focus || narrowing.total_days);
-  $('filter-reset').hidden = !body.narrowed && !state.filters.allWindow;
+  view.$('filter-reset').hidden = !body.narrowed && !view.filters.allWindow;
 
   // Never "34 of 812". Pruning makes the unfiltered traversal a different set
   // rather than a larger one, so the two counts do not form a fraction.
   const trips = `${count(body.matched)} trip${body.matched === 1 ? '' : 's'}`;
-  $('filter-count').textContent = body.narrowed ? `${trips} match` : trips;
+  view.$('filter-count').textContent = body.narrowed ? `${trips} match` : trips;
 
-  const note = $('filter-note');
+  const note = view.$('filter-note');
   const notes = [];
-  if (state.filters.allWindow) {
+  if (view.filters.allWindow) {
     const said = [];
     if (narrowing.focus) said.push(`leaving ${narrowing.focus[0]} to ${narrowing.focus[1]}`);
     if (narrowing.return_focus) {
@@ -2313,7 +2659,7 @@ function renderFilters(body) {
       '. Nothing is being searched differently — this is the same legs read another way.',
     );
   }
-  if (state.filters.bags) {
+  if (view.filters.bags) {
     // Said every time the tick is on, because the distinction decides whether
     // an absent trip is bad news or merely unmeasured: nothing in a real sweep
     // is ever marked "no bag", only "confirmed" or "never said".
@@ -2337,78 +2683,91 @@ function renderFilters(body) {
   note.innerHTML = notes.join(' ');
 }
 
-for (const [id, apply] of [
-  ['filter-from', (el) => { state.filters.from = el.value; }],
-  ['filter-to', (el) => { state.filters.to = el.value; }],
-  ['filter-bags', (el) => { state.filters.bags = el.checked; }],
-  ['filter-window', (el) => { state.filters.allWindow = el.checked; }],
-]) {
-  $(id).onchange = (event) => {
-    apply(event.target);
-    renderResults();
-    // The chart above the table reads the same population or the two disagree
-    // about what a departure date costs.
-    if (id === 'filter-window') renderByDate();
-  };
+// Bound per view, so the two tables filter independently. They must: "ignore my
+// narrowing" means opposite things either side of the split. On a broad sweep it
+// reveals the window you did not choose; on a narrowed one there is nothing
+// outside the narrowing for it to reveal.
+for (const view of RESULT_VIEWS) {
+  for (const [id, apply] of [
+    ['filter-from', (el) => { view.filters.from = el.value; }],
+    ['filter-to', (el) => { view.filters.to = el.value; }],
+    ['filter-bags', (el) => { view.filters.bags = el.checked; }],
+    ['filter-window', (el) => { view.filters.allWindow = el.checked; }],
+  ]) {
+    if (!view.$(id)) continue;
+    view.$(id).onchange = (event) => {
+      apply(event.target);
+      renderResults(view);
+      // The chart above the table reads the same population or the two disagree
+      // about what a departure date costs. Only the broad view has one.
+      if (id === 'filter-window' && view.charts) renderByDate();
+    };
+  }
+  if (view.$('filter-reset')) {
+    view.$('filter-reset').onclick = () => {
+      view.filters = { from: '', to: '', bags: false, allWindow: false };
+      renderResults(view);
+    };
+  }
 }
 
-$('filter-reset').onclick = () => {
-  clearFilters();
-  renderResults();
-};
-
-async function renderResults() {
-  const tbody = $('results-table').querySelector('tbody');
+async function renderResults(view = BROAD_VIEW) {
+  // A view whose panel is not in the page at all - never the case today, but
+  // the cheapest guard against a half-added second view drawing into the first.
+  if (!view.$('results-table')) return;
+  const tbody = view.$('results-table').querySelector('tbody');
   tbody.innerHTML = '';
-  $('headline').innerHTML = '';
+  view.$('headline').innerHTML = '';
 
-  if (!state.stamp) {
-    $('results-empty').hidden = false;
-    $('results-empty').textContent = 'Run a sweep to see itineraries.';
+  if (!view.stamp) {
+    view.$('results-empty').hidden = false;
+    view.$('results-empty').textContent = view.charts
+      ? 'Run a sweep to see itineraries.'
+      : 'No final sweep yet. Run one above to price the dates you have narrowed to.';
     return;
   }
 
   // A probe prices three dates a leg, so it almost never chains into a whole
   // trip. An empty table here would read as "the probe found nothing" rather
   // than "that is not what it is for", so say where its answer actually is.
-  if (state.sweeps.find((sweep) => sweep.stamp === state.stamp)?.mode === 'explore') {
-    $('verification').innerHTML = '';
-    $('results-scroll').hidden = true;
-    $('results-filters').hidden = true;
-    $('filter-note').hidden = true;
-    $('results-empty').hidden = false;
-    $('results-empty').textContent =
+  if (state.sweeps.find((sweep) => sweep.stamp === view.stamp)?.mode === 'explore') {
+    view.$('verification').innerHTML = '';
+    view.$('results-scroll').hidden = true;
+    view.$('results-filters').hidden = true;
+    view.$('filter-note').hidden = true;
+    view.$('results-empty').hidden = false;
+    view.$('results-empty').textContent =
       'That run was a probe — it prices a few dates per leg to compare airports, not to '
       + 'build trips. Its verdicts are in the Explore tab.';
     return;
   }
-  $('results-scroll').hidden = false;
-  $('results-filters').hidden = false;
+  view.$('results-scroll').hidden = false;
+  view.$('results-filters').hidden = false;
 
   // Every other call site catches; these two did not, so a 500 left a blank
   // table and an explanation only in the browser console.
   let body;
   try {
     body = await api(
-      `/api/sweeps/${state.scenario.id}/${state.stamp}/results${filterQuery()}`,
+      `/api/sweeps/${state.scenario.id}/${view.stamp}/results${filterQuery(view)}`,
     );
   } catch (error) {
-    $('results-empty').hidden = false;
-    $('results-empty').textContent = `Could not load results — ${error.message}`;
+    view.$('results-empty').hidden = false;
+    view.$('results-empty').textContent = `Could not load results — ${error.message}`;
     return;
   }
-  renderFilters(body);
-  $('results-empty').hidden = body.itineraries.length > 0;
+  renderFilters(body, view);
+  view.$('results-empty').hidden = body.itineraries.length > 0;
   // Three different nothings, and telling them apart is the whole difference
   // between "narrow your filter" and "the scraper is broken".
-  $('results-empty').textContent = body.narrowed
+  view.$('results-empty').textContent = body.narrowed
     ? 'No trip in this sweep matches the filter above.'
     : body.legs_found
       ? 'This sweep found flights, but none of them chain into a complete trip.'
       : 'Run a sweep to see itineraries.';
 
-  renderVerification(body.verification);
-  $('completeness').hidden = true;
+  renderVerification(body.verification, view);
+  view.$('completeness').hidden = true;
 
   const same = body.best_same_airport;
   const jaw = body.best_open_jaw;
@@ -2451,10 +2810,10 @@ async function renderResults() {
         ? `<div class="stat__value">${money(withBags(itinerary), itinerary.currency)}</div>
            <div class="stat__sub">${itinerary.route}</div>${bagNote}${ground}${measured}${saving}`
         : '<div class="stat__value muted">—</div><div class="stat__sub">none found</div>');
-    $('headline').appendChild(card);
+    view.$('headline').appendChild(card);
   }
 
-  renderCompleteness(body);
+  renderCompleteness(body, view);
 
   // Airline codes, routes and URLs are all scraped from a third-party page, so
   // every one of them is escaped before it reaches innerHTML. A link is built
@@ -2477,9 +2836,38 @@ async function renderResults() {
         : '<span class="badge badge--good">bags included</span>'}</td>` +
       `<td class="num">${money(withBags(itinerary), itinerary.currency)}</td>`;
 
+    // Which trip this row is, in the terms the charts above index by. Lets the
+    // readout mark its own row without matching on prices or on route strings.
+    const dates = itinerary.legs.map((leg) => leg.depart_date);
+    row.dataset.dates = dates.join(',');
+
+    // The way back up into the charts. A ranking that can only be read is a
+    // dead end: the useful move on seeing a trip you half like is to put it
+    // under the markers and drag one leg of it.
+    // Only from the broad table. The leg charts draw a broad sweep, so lifting
+    // a final sweep's trip onto them would put the markers on another run's
+    // prices and read the total off that instead.
+    const onCharts = document.createElement('td');
+    if (view.charts) {
+      const lift = document.createElement('button');
+      lift.type = 'button';
+      lift.className = 'small';
+      lift.textContent = 'Put on the charts';
+      lift.title = 'Move the markers above onto this trip’s dates';
+      lift.onclick = () => {
+        if (!narrow.data || !narrow.domain.length) return;
+        placeCursor(itinerary);
+        drawLegCharts();
+        document.querySelector('section[data-panel="narrow"] #leg-charts')
+          ?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      };
+      onCharts.appendChild(lift);
+    }
+    row.appendChild(onCharts);
+
     const detail = document.createElement('tr');
     const cell = document.createElement('td');
-    cell.colSpan = 7;
+    cell.colSpan = 8;
     const disclosure = document.createElement('details');
     disclosure.className = 'disclosure';
     disclosure.innerHTML = '<summary class="small muted">Legs</summary>';
@@ -2542,8 +2930,8 @@ async function renderResults() {
    its cheapest total in exactly the same words as a complete one, and the
    difference is whether a cheaper trip was ever looked at. Silent at 100%: a
    banner that is always there is a banner nobody reads. */
-function renderCompleteness(body) {
-  const host = $('completeness');
+function renderCompleteness(body, view) {
+  const host = view.$('completeness');
   if (body.coverage == null || body.coverage >= 1) {
     host.hidden = true;
     return;
@@ -2571,7 +2959,14 @@ const sweepQuality = (row) => {
   if (row.coverage != null && row.coverage < 1) {
     parts.push(`only ${Math.round(row.coverage * 100)}% of searches answered`);
   }
-  if (row.focus) parts.push(`focused ${row.focus[0]} to ${row.focus[1]}`);
+  const narrowing = row.narrowing ?? {};
+  if (narrowing.focus) parts.push(`leaving ${narrowing.focus[0]} to ${narrowing.focus[1]}`);
+  if (narrowing.return_focus) {
+    parts.push(`home ${narrowing.return_focus[0]} to ${narrowing.return_focus[1]}`);
+  }
+  if (narrowing.total_days) {
+    parts.push(`${narrowing.total_days[0]}-${narrowing.total_days[1]} nights`);
+  }
   if (!row.comparable) parts.push('not comparable');
   return parts.join(' · ');
 };
@@ -2642,7 +3037,7 @@ async function renderByDate() {
   const byDateResult = (await Promise.allSettled([
     api(
       `/api/sweeps/${state.scenario.id}/${state.stamp}/by-date` +
-      (state.filters.allWindow ? '?window=all' : ''),
+      (BROAD_VIEW.filters.allWindow ? '?window=all' : ''),
     ),
   ]))[0];
 
@@ -2657,17 +3052,29 @@ async function renderByDate() {
   byDateHost.appendChild(lineChart(
     byDate.map((row) => ({ label: row.depart_date, value: row.cheapest_total, note: row.route })),
     { width, valueSuffix: suffix, ariaLabel: 'Cheapest total by departure date',
-      // A range being picked wins over the one already saved, so a click shows
-      // its effect immediately rather than after a save.
-      band: focusRange() ?? (state.scenario.focus_start
-        ? [state.scenario.focus_start, state.scenario.focus_end]
-        : null),
+      // The boxes above, not the saved trip. They hold a clicked date and a
+      // typed one alike, so the band shows an unsaved pick immediately and
+      // never disagrees with the two fields it is drawn from.
+      band: pickedWindow(),
       onPick: pickFocusDate,
       emptyText: byDateResult.status === 'rejected'
         ? `Could not load — ${byDateResult.reason.message}`
         : 'No itineraries in this sweep yet.' },
   ));
   $('by-date-note').innerHTML = byDateNote(byDate);
+
+  // Which run this curve is of. The chart moved into a panel whose other
+  // controls are all about the trip rather than about a run, and an unlabelled
+  // chart in among them reads as a property of the trip.
+  const badge = $('by-date-sweep');
+  const sweep = state.sweeps.find((row) => row.stamp === state.stamp);
+  // Short. The full label - searches, flights, three drift warnings - is on the
+  // picker of the panel below, which is where a run is chosen; repeated in a
+  // sub-heading it is a line of small print over a chart.
+  badge.textContent = sweep
+    ? `${localStamp(sweep.stamp) || sweep.stamp} · ${sweep.mode === 'explore' ? 'probe' : (sweep.depth ?? 'sweep')}`
+    : '';
+  badge.hidden = !sweep;
 }
 
 async function renderHistory() {
@@ -2690,14 +3097,28 @@ async function renderHistory() {
   // Drawn through starved sweeps, this chart tracked how well the scraper was
   // working rather than what flights cost.
   const comparable = history.filter((row) => row.comparable);
-  $('chart-history').appendChild(lineChart(
+  // Two lines, never one. A broad sweep's cheapest is the cheapest of the whole
+  // window; a final sweep's is the cheapest of the few days you chose out of it,
+  // and it is almost always the dearer number. Joined, the pair draws a sawtooth
+  // that tracks which slot ran last rather than what anything costs - the same
+  // mistake as charting a probe beside a sweep, one level up.
+  const line = (name, rows) => ({
+    name,
+    points: rows.map((row) => ({
+      t: isoOf(row.swept_at),
+      value: row.best_total,
+      muted: !row.comparable,
+      note: sweepQuality(row),
+    })),
+  });
+  const broad = history.filter((row) => row.series !== 'final');
+  const narrowed = history.filter((row) => row.series === 'final');
+  $('chart-history').appendChild(multiLineChart(
     history.length >= 2
-      ? history.map((row) => ({
-        label: row.swept_at.slice(0, 10),
-        value: row.best_total,
-        muted: !row.comparable,
-        note: sweepQuality(row),
-      }))
+      ? [
+        line('The whole window', broad),
+        line('What you narrowed to', narrowed),
+      ].filter((s) => s.points.length)
       : [],
     { width, valueSuffix: suffix, ariaLabel: 'Best total over time',
       emptyText: history.length === 1
@@ -2728,7 +3149,7 @@ async function renderHistory() {
           `<td class="num">${Math.round((r.meaningful_change_rate ?? 0) * 100)}%</td></tr>`;
       }).join('') +
       '</tbody></table></div>' +
-      `<p class="panel__hint" style="margin-top:12px">${escapeHtml(probe.recommendation)}</p>`
+      `<p class="panel__hint panel__hint--live" style="margin-top:12px">${escapeHtml(probe.recommendation)}</p>`
     : 'No observations yet.';
 }
 
@@ -2744,10 +3165,14 @@ async function renderHistory() {
    The tab reads what Prices produced, so it sits after it. */
 
 async function renderWatch() {
+  // Settled before the fetch, so the candidates come from the run the picker is
+  // about to show. Filling it afterwards would ask for one run and label it as
+  // another on the first render of a page that has never had a selection.
+  chooseWatchSweep();
   const [watchResult, candidatesResult] = await Promise.allSettled([
     api(`/api/watch/${state.scenario.id}`),
-    state.stamp
-      ? api(`/api/sweeps/${state.scenario.id}/${state.stamp}/candidates`)
+    state.watchStamp
+      ? api(`/api/sweeps/${state.scenario.id}/${state.watchStamp}/candidates`)
       : Promise.resolve({ candidates: [], coverage: null }),
   ]);
 
@@ -2755,12 +3180,83 @@ async function renderWatch() {
     showWatchError(`Could not read what is being watched — ${watchResult.reason.message}`);
     return;
   }
+  renderFollowSummary(watchResult.value);
   renderWatched(watchResult.value);
   renderLegWatches(watchResult.value);
+  populateWatchSweepSelect();
   renderWatchCandidates(
     candidatesResult.status === 'fulfilled' ? candidatesResult.value : { candidates: [] },
     watchResult.value,
   );
+}
+
+/* What is being followed, what one check costs, and what will not move.
+
+   Above both panels because the budget is one budget: a followed flight and a
+   pinned trip are priced by the same run, and the cap is on the run. Both
+   panels used to carry a badge of the whole figure, so a step costing 27
+   searches announced 27 twice and read as costing 54.
+
+   The second half answers the question the tab is actually arrived with, which
+   nothing on it used to answer: change the trip, and does any of this move? It
+   does not. `watch._admitting` widens the stays to whatever a candidate pinned
+   and drops the narrowing entirely, per candidate. */
+function renderFollowSummary(body) {
+  const trips = (body.candidates ?? []).length;
+  const legs = (body.legs ?? []).length;
+  const host = $('follow-summary-text');
+
+  if (!trips && !legs) {
+    host.textContent =
+      'Nothing is being followed yet, so no check is scheduled and nothing is being spent.';
+    return;
+  }
+  const parts = [];
+  if (legs) parts.push(`${count(legs)} flight${legs === 1 ? '' : 's'}`);
+  if (trips) parts.push(`${count(trips)} trip${trips === 1 ? '' : 's'}`);
+  host.textContent =
+    `Following ${parts.join(' and ')} — ${count(body.searches)} searches ` +
+    `(~${body.minutes} min) every four hours, for both panels together.`;
+}
+
+/* Which run the candidates below are picked from.
+
+   The one picker that deliberately offers both families. Every other list on
+   the page belongs to a step that has already decided which question it is
+   asking; this one is where you choose a trip to follow, and by then the
+   freshest reading of the days you care about is usually the narrowed run
+   while the broad one is what says whether a better week exists. Both are
+   reasonable answers, so both are offered and each row says which it is.
+
+   Defaults to the newest final run when there is one, because that is the
+   freshest pricing of the dates a follow is about to pin. Falls back to the
+   newest broad run before any final sweep has been taken.
+
+   This picker existed, was labelled, had an `onchange` that moved the whole
+   tab - and was never given a single option by anything. It silently showed the
+   run `state.stamp` happened to hold, which is whichever one another step last
+   selected. */
+const watchableSweeps = () => state.sweeps.filter((sweep) => sweep.mode !== 'explore');
+
+/* Settle which run this step reads, keeping a choice already made.
+
+   Defaults to the newest final run, because by the time you are pinning days
+   the freshest pricing of *those days* is the narrowed one; the broad run is
+   what says whether a better week exists, which is a question you have stopped
+   asking by now. Falls back to the newest broad run before any final sweep. */
+function chooseWatchSweep() {
+  const usable = watchableSweeps();
+  if (usable.some((sweep) => sweep.stamp === state.watchStamp)) return;
+  const preferred = usable.find((sweep) => sweep.mode === 'final') ?? usable[0];
+  state.watchStamp = preferred ? preferred.stamp : null;
+}
+
+function populateWatchSweepSelect() {
+  const select = $('watch-sweep-select');
+  select.innerHTML = watchableSweeps()
+    .map((sweep) => `<option value="${escapeHtml(sweep.stamp)}">${escapeHtml(sweepLabel(sweep, kindOf(sweep)))}</option>`)
+    .join('');
+  if (state.watchStamp) select.value = state.watchStamp;
 }
 
 function showWatchError(message) {
@@ -2782,8 +3278,8 @@ function renderWatched(body) {
   const cost = $('watch-cost');
   cost.className = `badge badge--${candidates.length ? 'good' : 'muted'}`;
   cost.textContent = candidates.length
-    ? `${body.searches} searches (~${body.minutes} min) a check`
-    : 'nothing watched';
+    ? `${count(candidates.length)} trip${candidates.length === 1 ? '' : 's'}`
+    : 'none yet';
 
   $('watch-run-note').textContent = body.running
     ? 'Checking now…'
@@ -2842,7 +3338,9 @@ function renderWatched(body) {
     const cell = document.createElement('td');
     const drop = document.createElement('button');
     drop.className = 'small watch-drop';
-    drop.textContent = 'Stop watching';
+    // "Following", like the flights table and like the panel now says. Two
+    // verbs for one act read as two different mechanics.
+    drop.textContent = 'Stop following';
     drop.onclick = () => stopWatching(candidate.depart_date);
     cell.appendChild(drop);
     row.appendChild(cell);
@@ -2850,11 +3348,20 @@ function renderWatched(body) {
   }
 }
 
+// Opened for you once, and only when there is nothing to open it for. A folded
+// list is right when you have already followed something and wrong when the
+// panel above it is empty and this is the only way to fill it.
+let nudgedCandidates = false;
+
 function renderWatchCandidates(body, watched) {
   const host = $('watch-candidates');
   host.innerHTML = '';
 
   const already = new Set((watched.candidates ?? []).map((c) => c.depart_date));
+  if (!nudgedCandidates && !already.size && (body.candidates ?? []).length) {
+    $('watch-from-sweep').open = true;
+    nudgedCandidates = true;
+  }
   const candidates = body.candidates ?? [];
 
   // A day that looks cheap because the days around it went unpriced is not a
@@ -2952,130 +3459,70 @@ $('watch-run-btn').onclick = async () => {
 };
 
 $('watch-sweep-select').onchange = (event) => {
-  state.stamp = event.target.value;
+  state.watchStamp = event.target.value;
   renderWatch();
 };
 
-/* ------------------------------------------------------------------ focus
+/* ------------------------------------------------ the departure window ---
 
-   Once a broad sweep has shown which departure dates are cheap, a focus
-   narrows the next one onto them. It bounds the *first* leg only; the later
-   legs are derived from it through the stay ranges, so the three can never
-   contradict each other and a focused sweep can still complete a trip.
+   Once a broad sweep has shown which departure dates are cheap, the departure
+   window narrows the next one onto them. It bounds the *first* leg only; the
+   later legs are derived from it through the stay ranges, so the three parts of
+   the narrowing can never contradict each other and a narrowed sweep can still
+   complete a trip.
 
-   Picked here rather than typed into two date boxes because the decision is
-   made by looking at the chart, and a date box beside a chart is a second
-   place to get the same answer wrong. */
+   Picked on the chart, because the decision is made by looking at it. It used to
+   be picked on a *panel of its own*, with its own badge, its own Save and its own
+   words for the same thing - "watching 2027-01-08 to 2027-01-12" two panels below
+   "out 01-08–01-12" - and both wrote `focus_start`/`focus_end`. Two controls over
+   one field is two states to reconcile and two chances to disagree on screen, so
+   there is one now: the chart fills the boxes, and the panel's Save writes them.
 
-// Which two days are picked, before anything is saved. Kept out of
-// `state.scenario` so an abandoned pick never reaches disk.
-const focusPick = { start: null, end: null };
+   Which also settles what a click *means*. It no longer saves anything on its
+   own, so a misclick is corrected by clicking again or by typing in the box,
+   and the third-click-starts-over rule stays as the cheapest way to do that. */
 
-function focusRange() {
-  const { start, end } = focusPick;
-  if (!start) return null;
-  if (!end) return [start, start];
-  return start <= end ? [start, end] : [end, start];
-}
+// Which end of the range the next click sets. Not the range itself - that lives
+// in the two date boxes now, so an abandoned pick is visible where every other
+// unsaved edit on this panel is, rather than in a variable of its own.
+let pickingReturn = false;
 
 function pickFocusDate(label) {
-  // First click starts a range, second closes it, third starts over. A picker
-  // that could only ever extend would need a Clear button to correct a misclick.
-  if (!focusPick.start || (focusPick.start && focusPick.end)) {
-    focusPick.start = label;
-    focusPick.end = null;
+  const start = $('narrow-out-start');
+  const end = $('narrow-out-end');
+  if (!pickingReturn) {
+    start.value = label;
+    end.value = '';
+    pickingReturn = true;
   } else {
-    focusPick.end = label;
+    // Clicked before the first pick: the two boxes are a range, not an order of
+    // clicks, and refusing the second click here would be a rule about mouse
+    // movements rather than about dates.
+    if (label < start.value) {
+      end.value = start.value;
+      start.value = label;
+    } else {
+      end.value = label;
+    }
+    pickingReturn = false;
   }
-  renderFocusControls();
-  renderPrices();
+  // Deliberately not `renderNarrowFields`, which fills these two boxes from the
+  // *saved* trip: calling it here wiped the click on the way to redrawing the
+  // band, and the chart showed nothing happening.
+  renderWidenOffer();
+  refreshNarrowCost();
+  renderByDate();
 }
 
-async function renderFocusControls() {
-  const saved = state.scenario.focus_start && state.scenario.focus_end
-    ? [state.scenario.focus_start, state.scenario.focus_end]
-    : null;
-  const badge = $('focus-state');
-  badge.className = `badge badge--${saved ? 'good' : 'muted'}`;
-  badge.textContent = saved
-    ? `watching ${saved[0]} to ${saved[1]}`
-    : 'watching the whole window';
-
-  const range = focusRange();
-  const save = $('focus-save');
-  const note = $('focus-pick');
-  $('focus-clear').disabled = !saved && !range;
-
-  if (!range) {
-    save.disabled = true;
-    note.textContent = saved
-      ? 'Click two points to move the window you are watching.'
-      : 'Click two points to pick the days worth watching closely.';
-    return;
-  }
-
-  const [from, to] = range;
-  save.disabled = false;
-  note.textContent = focusPick.end
-    ? `Picked ${from} to ${to}. `
-    : `Picked ${from}. Click a second day to close the range. `;
-
-  // What it would actually cost, priced against the trip on screen rather than
-  // guessed. The estimate endpoint takes an unsaved trip for exactly this.
-  try {
-    const trip = { ...state.scenario, focus_start: from, focus_end: to };
-    const [narrow, broad] = await Promise.all([
-      api(`/api/scenarios/${state.scenario.id}/estimate?depth=deep`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(trip),
-      }),
-      api(`/api/scenarios/${state.scenario.id}/estimate?depth=deep`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...state.scenario, focus_start: null, focus_end: null }),
-      }),
-    ]);
-    note.textContent +=
-      `${narrow.searches} searches (~${narrow.minutes} min) against ` +
-      `${broad.searches} for the whole window.`;
-  } catch (error) {
-    note.textContent += `Could not price that range — ${error.message}`;
-  }
+// What the boxes currently say, for the band drawn on the chart. Read from the
+// boxes rather than from the saved trip so a typed date and a clicked one draw
+// identically, and a half-open pick still shows the day it has.
+function pickedWindow() {
+  const start = $('narrow-out-start').value;
+  const end = $('narrow-out-end').value;
+  if (!start) return null;
+  return [start, end || start];
 }
-
-$('focus-save').onclick = async () => {
-  const range = focusRange();
-  if (!range) return;
-  await saveFocus(range[0], range[1]);
-};
-
-$('focus-clear').onclick = async () => {
-  focusPick.start = focusPick.end = null;
-  await saveFocus(null, null);
-};
-
-async function saveFocus(from, to) {
-  const note = $('focus-pick');
-  try {
-    const saved = await api(`/api/scenarios/${state.scenario.id}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...state.scenario, focus_start: from, focus_end: to }),
-    });
-    state.scenario = saved;
-    focusPick.start = focusPick.end = null;
-    await renderFocusControls();
-    note.textContent = from
-      ? `Saved. The afternoon sweep will price ${from} to ${to}; the morning one still ` +
-        'covers the whole window.'
-      : 'Cleared. Both sweeps cover the whole window again.';
-  } catch (error) {
-    note.className = 'small badge badge--error';
-    note.textContent = error.message;
-  }
-}
-
 /* ---------------------------------------------------------------- sources */
 
 /* One card per source, and the card answers the only question people arrive
@@ -3159,7 +3606,7 @@ function sourceCard(name, source) {
 
   if (source.note) {
     const note = document.createElement('p');
-    note.className = 'panel__hint small';
+    note.className = 'panel__hint panel__hint--live small';
     note.style.margin = '0 0 8px';
     note.textContent = source.note;
     card.appendChild(note);
@@ -3229,7 +3676,7 @@ function repairForm(name, source) {
 
   details.insertAdjacentHTML(
     'beforeend',
-    '<p class="panel__hint small">Edit the string that broke, then save — it re-checks itself. ' +
+    '<p class="panel__hint panel__hint--live small">Edit the string that broke, then save — it re-checks itself. ' +
       'Zero cards matched means the markup changed; a page that will not load at all means the ' +
       'URL did.</p>'
   );
@@ -3535,6 +3982,8 @@ async function reloadScenarioList(preferred = null) {
   const id = scenarios.some((s) => s.id === preferred) ? preferred : scenarios[0].id;
   select.value = id;
   state.stamp = null;
+  state.finalStamp = null;
+  state.watchStamp = null;
   clearFilters();
   await loadScenario(id);
   await refreshEstimate();
@@ -3559,6 +4008,8 @@ async function init() {
       const id = $('scenario-select').value;
       if (!id) return;
       state.stamp = null;
+      state.finalStamp = null;
+      state.watchStamp = null;
       clearFilters();
       await loadScenario(id);
       await refreshEstimate();
@@ -3823,32 +4274,43 @@ async function refreshNarrowCost() {
   // figure moves as the dates are typed. Deep on both sides: comparing a
   // narrowed quick plan against a broad deep one would flatter the narrowing
   // by the depth rather than by the narrowing.
+  //
+  // The two calls differ by `mode`, not by the body they send. They used to
+  // differ by the body - the same trip with the narrowing nulled out - which
+  // stopped meaning anything the moment a broad sweep stopped reading the
+  // narrowing: both sides came back with the identical number, and the line
+  // reported that narrowing to five days out of thirty-five saved nothing.
   const note = $('narrow-cost');
   const trip = { ...state.scenario, ...narrowFromFields() };
+  const price = (mode) =>
+    api(`/api/scenarios/${state.scenario.id}/estimate?depth=deep&mode=${mode}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(trip),
+    });
+  // Nothing typed in yet is not an error, and asking anyway makes it look like
+  // one: `plan_final` refuses a trip with no narrowing by design, and the
+  // refusal rendered here as "No estimate — There is nothing to narrow to yet",
+  // in red, on a panel whose boxes are empty because you have not filled them
+  // in. The broad cost is the true and useful answer at that point.
+  const narrowedYet = Boolean(
+    (trip.focus_start && trip.focus_end)
+    || (trip.return_focus_start && trip.return_focus_end)
+    || trip.total_days,
+  );
   try {
-    const [whole, narrowed] = await Promise.all([
-      api(`/api/scenarios/${state.scenario.id}/estimate?depth=deep`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        // The same trip with the narrowing off, not the saved one. The
-        // sentence claims the two numbers differ by the narrowing, and a
-        // baseline built from the saved stays would not move when a stay does -
-        // so widening a stay would report as costing nothing at all.
-        body: JSON.stringify({
-          ...trip,
-          focus_start: null, focus_end: null,
-          return_focus_start: null, return_focus_end: null, total_days: null,
-        }),
-      }),
-      api(`/api/scenarios/${state.scenario.id}/estimate?depth=deep`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(trip),
-      }),
-    ]);
+    const whole = await price('sweep');
+    const broadly =
+      `${count(whole.searches)} searches (~${Math.round(whole.minutes)} min) for the broad sweep, `
+      + 'which goes on pricing the whole window either way';
+    if (!narrowedYet) {
+      note.textContent = `Nothing narrowed yet — ${broadly}.`;
+      return;
+    }
+    const narrowed = await price('final');
     note.textContent =
-      `A deep sweep of this is ${count(narrowed.searches)} searches (~${Math.round(narrowed.minutes)} min), ` +
-      `against ${count(whole.searches)} searches (~${Math.round(whole.minutes)} min) for the whole window.`;
+      `A final sweep of this is ${count(narrowed.searches)} searches (~${Math.round(narrowed.minutes)} min), ` +
+      `against ${broadly}.`;
   } catch (error) {
     // Said as a cost, because that is this line's job and the reason it cannot
     // be given happens to be the reason the save would fail. Without the
@@ -3868,6 +4330,7 @@ async function saveNarrowing(fields) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...state.scenario, ...fields }),
     });
+    pickingReturn = false;
     renderNarrowFields();
     // This panel now writes fields the trip's own form holds a draft of - the
     // window, when widening, and the stays. `route` is that draft and it is
@@ -3904,13 +4367,24 @@ async function renderNarrow() {
   // Probes and runs whose legs never reached disk cannot answer this panel:
   // a probe prices three dates a leg to compare airports, which draws a chart
   // that looks like a price curve and is not one.
-  const sweeps = state.sweeps.filter((s) => s.has_legs && s.mode !== 'explore');
+  //
+  // Nor can a final sweep, for a nearer version of the same reason. This step
+  // is where a trip is *picked*, and picking needs the whole window on the
+  // axis; a narrowed run draws three charts a few days wide, on which every
+  // marker position already obeys the narrowing and the chart can only ever
+  // agree with it. The narrowed runs are read on their own step.
+  const sweeps = state.sweeps.filter(
+    (s) => s.has_legs && BROAD_VIEW.modes.includes(s.mode ?? 'sweep'),
+  );
+  // Named by depth, exactly as the table's picker below names the same run.
+  // Left to the default it read "sweep" here and "standard" there, so one run
+  // appeared twice on one screen under two names.
   picker.innerHTML = sweeps
-    .map((s) => `<option value="${escapeHtml(s.stamp)}">${escapeHtml(sweepLabel(s))}</option>`)
+    .map((s) => `<option value="${escapeHtml(s.stamp)}">${escapeHtml(sweepLabel(s, kindOf(s)))}</option>`)
     .join('');
   if (!sweeps.length) {
     $('leg-charts').className = 'empty';
-    $('leg-charts').textContent = 'No sweep with flights on disk yet. Run one from Search.';
+    $('leg-charts').textContent = 'No broad sweep with flights on disk yet. Run one from Map it out.';
     $('cursor-readout').innerHTML = '';
     return;
   }
@@ -4074,7 +4548,7 @@ function drawLegCharts() {
       });
       if (leg.routes.length > shown.length) {
         const rest = document.createElement('p');
-        rest.className = 'panel__hint small';
+        rest.className = 'panel__hint panel__hint--live small';
         rest.textContent =
           `${count(leg.routes.length - shown.length)} other routes not drawn: six is as many ` +
           'lines as this palette can tell apart.';
@@ -4200,13 +4674,83 @@ function renderCursor() {
     </div>
     <div class="cursor-readout__split">${escapeHtml(split)}</div>
     <div class="cursor-readout__badges">${badges}</div>
-    <div class="cursor-readout__legs">${trip.legs.map((l) => `
-      <span>${escapeHtml(l.date || '—')}
-        <span class="muted">${l.point && l.point.price !== null
-          ? escapeHtml(`${l.point.origin}→${l.point.destination} ${money(l.point.price, currency)}`)
-          : 'nothing found'}</span>
-      </span>`).join('')}</div>
+    <div class="cursor-readout__legs"></div>
   `;
+
+  /* One row per leg, and each row is everything you can do about that flight.
+
+     This panel is where a trip is actually chosen - three curves, a marker on
+     each, a total that moves as you drag - and it was the one place in the app
+     with no way to buy anything and nothing to follow. The link was already in
+     the payload it fetches: `by-leg` carries the offer's `url` beside its price
+     and nothing read it, so the way to book the trip you had just built was to
+     scroll past the ranking, find the row again and open its Legs. */
+  const rows = host.querySelector('.cursor-readout__legs');
+  trip.legs.forEach((leg) => {
+    const row = document.createElement('div');
+    row.className = 'cursor-readout__leg';
+    const point = leg.point;
+    const priced = point && point.price !== null;
+
+    const when = document.createElement('span');
+    when.className = 'cursor-readout__when';
+    when.textContent = leg.date || '—';
+    row.appendChild(when);
+
+    const what = document.createElement('span');
+    what.className = 'muted';
+    what.textContent = priced
+      ? `${point.origin}→${point.destination}` +
+        (point.airline ? ` · ${point.airline}` : '') +
+        (point.stops === 0 ? ' · direct' : point.stops ? ` · ${count(point.stops)} stops` : '')
+      : 'nothing found on this date';
+    row.appendChild(what);
+
+    const price = document.createElement('span');
+    price.className = 'cursor-readout__price tnum';
+    price.textContent = priced ? money(point.price, currency) : '—';
+    row.appendChild(price);
+
+    if (priced) {
+      // Scraped from a third-party page, so it is built as a node with `.href`
+      // and never through innerHTML - a `javascript:` URL cannot be injected
+      // into an attribute that is assigned rather than parsed. Same rule the
+      // itinerary table's leg links follow.
+      if (point.url && /^https?:\/\//i.test(point.url)) {
+        const book = document.createElement('a');
+        book.href = point.url;
+        book.target = '_blank';
+        book.rel = 'noopener';
+        book.className = 'small';
+        book.textContent = 'Book ↗';
+        book.title = `Open this flight on the site it was priced on · ${observedAt(point.observed_at)}`;
+        row.appendChild(book);
+      } else {
+        // Said rather than left as a gap, because an absent link between two
+        // present ones reads as a page that failed rather than as a sweep that
+        // recorded a price without one.
+        const none = document.createElement('span');
+        none.className = 'small muted';
+        none.textContent = 'no link saved';
+        row.appendChild(none);
+      }
+
+      const follow = document.createElement('button');
+      follow.type = 'button';
+      follow.className = 'small';
+      follow.textContent = 'Follow';
+      follow.title = 'Re-price this exact flight every four hours (one search)';
+      follow.onclick = () => followLeg({
+        origin: point.origin,
+        destination: point.destination,
+        depart_date: leg.date,
+        price: point.price,
+      });
+      row.appendChild(follow);
+    }
+    rows.appendChild(row);
+  });
+
   if (!trip.priced) {
     const warn = document.createElement('p');
     warn.className = 'small muted';
@@ -4223,15 +4767,23 @@ function renderCursor() {
    button lands on exactly the itinerary the table calls cheapest. Two pieces
    of code answering "which is cheapest" is two answers, and the one on the
    chart would be the one nobody could check. */
+/* Put an itinerary's leg dates under the markers.
+
+   Top-level rather than a closure inside `snapCursor`, because the ranking
+   below now uses it too: a row of the table is a trip, and "put it on the
+   charts" is the way back from the ranking into the panel where a trip can be
+   adjusted. Before this the table was a dead end - you could read that a trip
+   existed and had no way to see it against the curves. */
+function placeCursor(itinerary) {
+  narrow.cursor = itinerary.legs.map((leg) => {
+    const at = narrow.domain.indexOf(leg.depart_date);
+    return at >= 0 ? at : 0;
+  });
+}
+
 async function snapCursor({ quiet = false } = {}) {
   const message = $('cursor-message');
-
-  const place = (itinerary) => {
-    narrow.cursor = itinerary.legs.map((leg) => {
-      const at = narrow.domain.indexOf(leg.depart_date);
-      return at >= 0 ? at : 0;
-    });
-  };
+  const place = placeCursor;
 
   /* Last resort: each leg's own cheapest day, forced into order.
 
@@ -4336,7 +4888,14 @@ $('narrow-sweep').onchange = async (event) => {
   await Promise.all([loadLegCharts(), renderByDate(), renderResults()]);
 };
 $('narrow-save').onclick = () => saveNarrowing(narrowFromFields());
+/* All three parts, including the departure window.
+
+   It used to leave `focus_start`/`focus_end` alone, because the departure window
+   had its own "Watch the whole window" button on a panel of its own. That panel
+   is gone, so a Clear that skipped the departure window would leave a narrowing
+   nothing on screen could undo. */
 $('narrow-clear').onclick = () => saveNarrowing({
+  focus_start: null, focus_end: null,
   return_focus_start: null, return_focus_end: null, total_days: null,
 });
 $('narrow-widen').onclick = () => {
@@ -4350,11 +4909,48 @@ $('narrow-widen').onclick = () => {
 };
 $('cursor-snap').onclick = () => snapCursor();
 $('cursor-watch').onclick = () => watchCursor();
+
+/* Mark the picked trip in the ranking below and scroll to it.
+
+   The two panels describe the same sweep and had nothing joining them, so a
+   trip built by dragging could only be checked against the ranking by reading
+   dates off one panel and hunting for them in the other. Matched on the leg
+   dates, which is what a row is keyed by - not on the price, which two
+   different trips can share. */
+$('cursor-in-table').onclick = () => {
+  const message = $('cursor-message');
+  const wanted = cursorTrip().legs.map((leg) => leg.date).join(',');
+  const rows = [...document.querySelectorAll('#results-table tbody tr[data-dates]')];
+  for (const row of rows) row.classList.remove('is-cursor');
+
+  const found = rows.find((row) => row.dataset.dates === wanted);
+  if (!found) {
+    // Not a failure. The ranking is narrowed and capped, and a hand-picked trip
+    // is very often one it never offered - which is the whole reason the
+    // markers move freely.
+    message.className = 'small';
+    message.textContent =
+      'This combination is not in the table below — it is either outside your narrowing or '
+      + 'was not among the cheapest it lists. The charts priced it all the same.';
+    return;
+  }
+  message.textContent = '';
+  found.classList.add('is-cursor');
+  found.scrollIntoView({ block: 'center', behavior: 'smooth' });
+};
 for (const id of [
   'narrow-out-start', 'narrow-out-end', 'narrow-back-start', 'narrow-back-end',
   'narrow-nights-min', 'narrow-nights-max',
 ]) {
-  $(id).onchange = () => { renderWidenOffer(); refreshNarrowCost(); };
+  $(id).onchange = () => {
+    // Typed rather than clicked, so the chart's half-open pick is stale: the
+    // next click should start a range, not close one against a date the boxes
+    // no longer hold.
+    pickingReturn = false;
+    renderWidenOffer();
+    refreshNarrowCost();
+    renderByDate();
+  };
 }
 
 init();
@@ -4372,11 +4968,13 @@ function renderLegWatches(body) {
   const legs = body.legs ?? [];
   $('leg-watch-empty').hidden = legs.length > 0;
 
+  // This panel's own count. The searches figure is the whole run's and now sits
+  // once, above both panels, where it is not read as this panel's share.
   const cost = $('leg-watch-cost');
   cost.className = `badge badge--${legs.length ? 'good' : 'muted'}`;
   cost.textContent = legs.length
-    ? `${count(body.searches)} searches (~${body.minutes} min) a check, all told`
-    : 'nothing followed';
+    ? `${count(legs.length)} flight${legs.length === 1 ? '' : 's'}`
+    : 'none yet';
 
   const host = $('leg-watch-chart');
   host.innerHTML = '';
@@ -4428,6 +5026,24 @@ function renderLegWatches(body) {
       `<td class="num ${trend}">${now == null || picked == null
         ? '—'
         : `${move > 0 ? '+' : ''}${money(move, '')}`}</td>`;
+
+    // Where to go and buy it, on the row that says it got cheaper. A search
+    // link rather than the offer's own: the watch keeps a price and not a URL,
+    // and a deep link recorded four hours ago need not still be the cheapest
+    // thing on that route. Built server-side, and still assigned to `.href`
+    // rather than interpolated, like every other link this page draws.
+    const booking = document.createElement('td');
+    if (leg.book_url && /^https?:\/\//i.test(leg.book_url)) {
+      const book = document.createElement('a');
+      book.href = leg.book_url;
+      book.target = '_blank';
+      book.rel = 'noopener';
+      book.className = 'small';
+      book.textContent = 'Book ↗';
+      book.title = 'Search this route and date on the site it is priced from';
+      booking.appendChild(book);
+    }
+    row.appendChild(booking);
 
     const cell = document.createElement('td');
     const drop = document.createElement('button');
@@ -4495,4 +5111,100 @@ $('leg-watch-add-btn').onclick = async () => {
   if (await followLeg({ origin, destination, depart_date: departDate })) {
     for (const id of ['leg-watch-from', 'leg-watch-to']) $(id).value = '';
   }
+};
+
+/* ---------------------------------------------------------- final sweeps */
+
+/* The step that prices the decision rather than the window.
+
+   It reads the same narrowing the step before it writes — one field, one
+   control, the rule the by-date chart was moved to obey. Nothing here is
+   editable: this panel says what a run of it would search and lets you start
+   one, and a second set of date boxes would be two controls over one field
+   again, three hundred pixels apart and disagreeing.
+
+   Everything below the plan is the ordinary results view, pointed at the
+   narrowed runs instead of the broad ones. */
+
+const NARROWING_LINES = [
+  ['focus_start', 'focus_end', 'leaving'],
+  ['return_focus_start', 'return_focus_end', 'home'],
+];
+
+/* What a final sweep of this trip would search, in a sentence, or '' for a trip
+   that has not been narrowed to anything. */
+function narrowingSentence(trip) {
+  if (!trip) return '';
+  const said = NARROWING_LINES
+    .filter(([from, to]) => trip[from] && trip[to])
+    .map(([from, to, word]) => `${word} ${trip[from]} to ${trip[to]}`);
+  if (trip.total_days) said.push(`${trip.total_days[0]}–${trip.total_days[1]} nights away`);
+  return said.join(', ');
+}
+
+async function renderFinal() {
+  const trip = state.scenario;
+  const narrowing = narrowingSentence(trip);
+  const badge = $('final-state');
+  const note = $('final-cost');
+
+  // A trip narrowed to nothing is the one case where the buttons must not work,
+  // and the panel says why rather than leaving a dead control to be clicked.
+  // The server refuses it too - the button is not the guard, it is the notice.
+  $('final-narrowing').textContent = narrowing
+    ? `This would search: ${narrowing}. Change it under Narrow it down.`
+    : 'Nothing has been narrowed yet. Set a departure window, a return window or a '
+      + 'nights band under Narrow it down, and this will price it.';
+  badge.textContent = narrowing || 'nothing narrowed yet';
+  for (const id of ['final-run-btn', 'final-run-cloud-btn']) {
+    $(id).disabled = !narrowing;
+  }
+
+  populateSweepSelect(FINAL_VIEW);
+  renderResults(FINAL_VIEW);
+
+  if (!narrowing) {
+    note.textContent = '';
+    return;
+  }
+  // Priced at the depth the buttons will use, not at a fixed one: a `quick`
+  // final sweep of a five-day window is one date, and quoting a deep cost
+  // beside a quick button would be describing a different run.
+  try {
+    const body = await api(
+      `/api/scenarios/${trip.id}/estimate?depth=${$('final-depth').value}&mode=final`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(trip) },
+    );
+    note.textContent =
+      `${count(body.searches)} searches, about ${Math.round(body.minutes)} minutes, `
+      + 'at the depth selected below.';
+  } catch (error) {
+    note.textContent = `No estimate — ${error.message}.`;
+  }
+}
+
+function showFinalError(message) {
+  const host = $('final-error');
+  host.hidden = !message;
+  host.textContent = message || '';
+}
+
+$('final-depth').onchange = renderFinal;
+
+$('final-run-btn').onclick = async () => {
+  showFinalError('');
+  // Watched, so the finished run is the one this step shows - the same rule the
+  // broad sweep follows, and the reason `state.watching` exists.
+  if (await startRun('final', 'final-depth')) state.watching = true;
+};
+
+$('final-run-cloud-btn').onclick = async () => {
+  showFinalError('');
+  if (isDirty() && !(await saveTrip())) return;
+  await dispatchCloudRun(false, 'final', 'final-depth');
+};
+
+$('final-sweep-select').onchange = (event) => {
+  state.finalStamp = event.target.value;
+  renderResults(FINAL_VIEW);
 };

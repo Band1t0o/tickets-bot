@@ -17,7 +17,7 @@ import pytest
 from src.combine import combine_all
 from src.models import Leg
 from src.scenario import Scenario, Stop
-from src.sweep.planner import plan_searches
+from src.sweep.planner import plan_final, plan_searches
 from tests.conftest import WINDOW_END, make_scenario
 
 
@@ -178,11 +178,20 @@ def narrowed_trip() -> Scenario:
 
 
 def test_narrowing_cuts_the_plan():
-    assert len(plan_searches(narrowed_trip())) < len(plan_searches(scenario())) / 3
+    assert len(plan_final(narrowed_trip())) < len(plan_searches(scenario())) / 3
+
+
+def test_narrowing_does_not_cut_the_broad_plan():
+    """The other half of the same statement, and the one that was untrue.
+
+    A narrowing is a decision about which trip to take. Until 24 Aug it was also
+    a decision to stop pricing every other one, taken silently by saving it.
+    """
+    assert plan_searches(narrowed_trip()) == plan_searches(scenario())
 
 
 def test_the_final_leg_is_searched_only_inside_the_return_window():
-    dates = {s.depart_date for s in plan_searches(narrowed_trip()) if s.leg_index == 2}
+    dates = {s.depart_date for s in plan_final(narrowed_trip()) if s.leg_index == 2}
     assert min(dates) >= date(2027, 2, 4)
     assert max(dates) <= date(2027, 2, 8)
 
@@ -194,7 +203,7 @@ def test_the_first_leg_drops_dates_that_cannot_reach_the_return_window():
     return window opens. Searching it would buy legs no itinerary could use -
     the same orphan-search bug `_leg_window` already fixed for the horizon.
     """
-    dates = {s.depart_date for s in plan_searches(narrowed_trip()) if s.leg_index == 0}
+    dates = {s.depart_date for s in plan_final(narrowed_trip()) if s.leg_index == 0}
     assert date(2027, 1, 8) not in dates
     assert min(dates) == date(2027, 1, 9)
 
@@ -202,7 +211,7 @@ def test_the_first_leg_drops_dates_that_cannot_reach_the_return_window():
 def test_no_planned_first_leg_date_is_an_orphan():
     """Every date searched for the first leg must reach a searched final leg."""
     sc = narrowed_trip()
-    searches = plan_searches(sc)
+    searches = plan_final(sc)
     finals = {s.depart_date for s in searches if s.leg_index == sc.leg_count - 1}
     for start in {s.depart_date for s in searches if s.leg_index == 0}:
         reachable = {
@@ -222,15 +231,15 @@ def test_a_nights_band_alone_does_not_narrow_the_plan():
     worth running, and the combiner is where it bites. Pin either end and it
     starts narrowing the plan too - which is what the tests above measure.
     """
-    assert len(plan_searches(scenario(total_days=(18, 19)))) == len(
+    assert len(plan_final(scenario(total_days=(18, 19)))) == len(
         plan_searches(scenario())
     )
 
 
 def test_a_band_narrows_the_plan_once_an_end_is_pinned():
     focused = scenario(focus_start=date(2027, 1, 8), focus_end=date(2027, 1, 12))
-    assert len(plan_searches(replace(focused, total_days=(18, 19)))) < len(
-        plan_searches(focused)
+    assert len(plan_final(replace(focused, total_days=(18, 19)))) < len(
+        plan_final(focused)
     )
 
 

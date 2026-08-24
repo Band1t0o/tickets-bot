@@ -4,12 +4,15 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import timedelta
 
+import pytest
+
 from src.scenario import Stop
 from src.sweep.planner import (
     RETURN_SLACK_DAYS,
     SEARCHES_PER_RUNNER,
     estimate_minutes,
     plan_exploration,
+    plan_final,
     plan_searches,
     planned_routes,
     shard_of,
@@ -351,11 +354,17 @@ def test_exploration_searches_one_way_like_everything_else():
     assert all(s.ret_date is None for s in plan_exploration(make_scenario()))
 
 
-# --------------------------------------------------------------------- focus
+# ----------------------------------------------------------------- narrowing
 #
-# Once a broad sweep has shown which departure dates are cheap, a focus narrows
-# the next sweep onto them. It bounds the *first* leg; the later legs follow
-# through the stay ranges, so the three can never contradict each other.
+# Two plans, one arithmetic. A broad sweep prices the window the trip declares
+# and nothing on the trip may shrink it - that is what makes it broad, and what
+# it was not until 24 Aug: `plan_searches` read the narrowing, so saving one
+# quietly turned every sweep, including the 02:00 one, into a narrowed sweep.
+# Measured on the committed japan-philippines trip that day: two nightly runs
+# planned 48 searches where the window is 85, and their status recorded
+# `focus: None`, because only the focus was ever written down.
+#
+# `plan_final` is that narrowed plan, asked for by name.
 
 
 def focused(**overrides):
@@ -367,17 +376,33 @@ def focused(**overrides):
     )
 
 
-def test_no_focus_plans_exactly_what_the_whole_window_plans():
-    """The unfocused case must not be a special case. It is the same code path
-    with the focus bound absent, so it has to reduce to it exactly."""
-    assert plan_searches(two_stop(depth="deep")) == plan_searches(
-        two_stop(depth="deep", focus_start=None, focus_end=None)
+def narrowed(**overrides):
+    """All three constraints at once - the shape a real trip ends up in."""
+    return focused(
+        return_focus_start=WINDOW_START + timedelta(days=30),
+        return_focus_end=WINDOW_START + timedelta(days=36),
+        total_days=(24, 28),
+        **overrides,
     )
 
 
-def test_a_focus_bounds_the_first_leg_to_the_chosen_dates():
+def test_a_broad_sweep_prices_the_window_whatever_the_trip_has_been_narrowed_to():
+    """The bug this split exists to fix, stated as an equality.
+
+    Not a count comparison: the two plans must be the *same searches*, so a
+    narrowing cannot move a date rather than remove it.
+    """
+    assert plan_searches(narrowed()) == plan_searches(two_stop(depth="deep"))
+
+
+def test_a_final_sweep_is_the_narrowed_plan_the_broad_one_used_to_be():
+    assert len(plan_final(narrowed())) == 24
+    assert len(plan_searches(narrowed())) == 168
+
+
+def test_a_focus_bounds_a_final_sweeps_first_leg_to_the_chosen_dates():
     scenario = focused()
-    assert dates_of(plan_searches(scenario), 0) == [
+    assert dates_of(plan_final(scenario), 0) == [
         scenario.focus_start + timedelta(days=offset) for offset in range(5)
     ]
 
@@ -391,7 +416,7 @@ def test_a_focus_carries_through_to_the_later_legs():
     """
     scenario = focused()
     for leg_index in (1, 2):
-        dates = dates_of(plan_searches(scenario), leg_index)
+        dates = dates_of(plan_final(scenario), leg_index)
         assert dates[0] == scenario.focus_start + timedelta(
             days=scenario.earliest_departure(leg_index)
         )
@@ -401,17 +426,78 @@ def test_a_focus_carries_through_to_the_later_legs():
         )
 
 
-def test_a_focus_is_much_cheaper_than_the_window_it_narrows():
-    assert len(plan_searches(focused())) < len(plan_searches(two_stop(depth="deep"))) / 2
+def test_a_return_window_alone_narrows_a_final_sweep():
+    """Each constraint bites on its own; they are intersected, never chosen between."""
+    only_home = two_stop(
+        depth="deep",
+        return_focus_start=WINDOW_START + timedelta(days=30),
+        return_focus_end=WINDOW_START + timedelta(days=36),
+    )
+    assert len(plan_final(only_home)) == 76
+    assert len(plan_searches(only_home)) == 168
 
 
-def test_a_focused_sweep_can_still_complete_a_trip():
+def test_a_nights_band_alone_narrows_a_final_sweep():
+    """It bounds the last leg against the earliest the first one could go.
+
+    Weakly - 140 against 168 - because with neither end pinned it can only say
+    how soon the flight home may be. Most of its work happens in `combine.py`,
+    on chains it can measure rather than on dates it can only guess at.
+    """
+    only_nights = two_stop(depth="deep", total_days=(24, 28))
+    assert len(plan_final(only_nights)) == 140
+    assert len(plan_searches(only_nights)) == 168
+
+
+def test_every_search_a_final_sweep_plans_falls_inside_the_narrowing():
+    """The property the whole feature is for, checked directly.
+
+    A final sweep that priced one day outside the decision would be spending the
+    site's answers on exactly what the broad sweep is already for.
+    """
+    scenario = narrowed()
+    out = dates_of(plan_final(scenario), 0)
+    home = dates_of(plan_final(scenario), scenario.leg_count - 1)
+
+    assert min(out) >= scenario.focus_start and max(out) <= scenario.focus_end
+    assert min(home) >= scenario.return_focus_start
+    assert max(home) <= scenario.return_focus_end
+
+
+def test_a_final_sweep_of_a_trip_with_nothing_narrowed_is_refused_by_name():
+    """Otherwise the button spends an hour re-running the broad sweep.
+
+    Refused rather than silently equal, because the two are different questions
+    and a run filed as `final` that priced the whole window would join the wrong
+    trend line for as long as it stayed on disk.
+    """
+    with pytest.raises(ValueError) as raised:
+        plan_final(two_stop(depth="deep"))
+
+    assert "narrow" in str(raised.value).lower()
+
+
+def test_a_final_sweep_can_still_complete_a_trip():
     """The point of narrowing is fewer searches, never a sweep that finds nothing."""
     scenario = focused()
-    searches = plan_searches(scenario)
+    searches = plan_final(scenario)
     last_out = max(s.depart_date for s in searches if s.leg_index == 0)
     last_home = max(s.depart_date for s in searches if s.leg_index == scenario.leg_count - 1)
     assert last_out + timedelta(days=scenario.min_trip_days) <= last_home
+
+
+def test_a_probe_samples_the_whole_window_whatever_the_narrowing():
+    """The probe judges airports, and it belongs to the broad half of the app.
+
+    Sampled inside the narrowing it would rank airports on the handful of days
+    already chosen, which is a verdict about those days wearing an airport's
+    name. Asserted on the dates rather than the count: three dates a leg is
+    three dates a leg either way, and only where they land says anything.
+    """
+    def sampled(scenario):
+        return sorted({(s.origin, s.destination, s.depart_date) for s in plan_exploration(scenario)})
+
+    assert sampled(narrowed()) == sampled(two_stop(depth="deep"))
 
 
 # ---------------------------------------------------------------- watch plan

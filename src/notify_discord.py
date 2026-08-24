@@ -68,6 +68,30 @@ def _figure(directory: Path | str, name: str, field: str) -> float | None:
         return None
 
 
+def alert_key(name: str, mode: str = "sweep") -> str:
+    """Where one pick's high-water mark is kept, per kind of sweep.
+
+    A broad sweep and a final sweep price different things - the whole window
+    against the handful of days it was narrowed to - so their cheapest totals
+    are not two readings of one number. The narrowed one is almost always the
+    dearer, and it is not a rise.
+
+    One shared key was harmless only while every sweep read the narrowing off
+    the trip file, which is to say while every sweep was narrowed. Measured on
+    24 Aug, immediately after the two were split: a final run recorded 25,967
+    over the broad runs' 21,445, and the next broad sweep would have been
+    reported as a 4,500 CZK drop that no fare ever made. It is the trend-chart
+    mistake one layer down, and it is caught the same way - by keeping the two
+    populations apart rather than by trying to reconcile them.
+
+    `sweep` keeps the bare name. `best.json` is committed and every entry ever
+    written to it is a broad sweep's, so renaming that key would restart the
+    high-water mark from nothing and report the next ordinary sweep as an
+    all-time low.
+    """
+    return name if mode == "sweep" else f"{mode}:{name}"
+
+
 def load_best(directory: Path | str, name: str = "cheapest") -> float | None:
     """Best total previously recorded for one pick, if any."""
     return _figure(directory, name, "best_total")
@@ -537,6 +561,10 @@ def notify_sweep(scenario, result, webhook_url: str | None = None) -> bool:
 
     bag = float(scenario.bag_estimate)
     state_dir = result.directory.parent
+    # Which population this run belongs to. A broad sweep and a final sweep hold
+    # separate high-water marks under `best.json`, because their cheapest totals
+    # measure different things - see `alert_key`.
+    mode = getattr(result, "mode", "sweep")
 
     # Judged per pick, not on one shared figure. A tier-1 trip dropping 3,000
     # is news on a day the outright cheapest did not move, and a single
@@ -546,7 +574,7 @@ def notify_sweep(scenario, result, webhook_url: str | None = None) -> bool:
         if not scenario.notify_quiet
         or should_alert(
             pick.itinerary.total_with_bags(bag),
-            load_best(state_dir, pick.name),
+            load_best(state_dir, alert_key(pick.name, mode)),
             scenario.alert_threshold,
         )
     ]
@@ -557,10 +585,10 @@ def notify_sweep(scenario, result, webhook_url: str | None = None) -> bool:
     embed = build_price_embed(
         scenario.name,
         reportable,
-        load_best(state_dir, "cheapest"),
+        load_best(state_dir, alert_key("cheapest", mode)),
         bag,
         getattr(result, "coverage", None),
-        load_last(state_dir, "cheapest"),
+        load_last(state_dir, alert_key("cheapest", mode)),
     )
     sent = post(webhook_url, [embed])
     if sent:
@@ -569,7 +597,7 @@ def notify_sweep(scenario, result, webhook_url: str | None = None) -> bool:
                 state_dir,
                 pick.itinerary.total_with_bags(bag),
                 pick.itinerary.currency,
-                pick.name,
+                alert_key(pick.name, mode),
             )
     return sent
 

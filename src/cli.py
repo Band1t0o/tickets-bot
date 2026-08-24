@@ -57,7 +57,7 @@ def run_sweep_command(
     import threading
 
     from .scenario import load_scenario
-    from .sweep.planner import estimate_minutes, plan_exploration, plan_searches
+    from .sweep.planner import PLANS, estimate_minutes
     from .sweep.runner import SEARCH_DELAY_S, run_sweep
 
     path = Path("scenarios") / f"{scenario_id}.json"
@@ -70,19 +70,24 @@ def run_sweep_command(
         scenario = replace(scenario, depth=depth)
     scenario.validate()
 
-    from .sweep.planner import plan_watch, shard_of
+    from .sweep.planner import shard_of
 
-    plans = {"explore": plan_exploration, "watch": plan_watch, "sweep": plan_searches}
-    searches = plans[mode](scenario)
+    searches = PLANS[mode](scenario)
     planned = len(searches)
     if shard is not None:
         searches = shard_of(searches, *shard)
     minutes = estimate_minutes(searches)
     label = mode if mode in {"explore", "watch"} else f"depth={scenario.depth}"
+    if mode == "final":
+        label = f"final depth={scenario.depth}"
     share = f" (shard {shard[0] + 1}/{shard[1]} of {planned})" if shard else ""
+    # Only a run the narrowing actually binds may claim to be narrowed by it.
+    # Printed unconditionally, this line told every broad dry run it was focused
+    # - which is precisely the belief that let the nightly sweep stop pricing
+    # most of its window without anyone noticing.
     focus = (
         f" focused {scenario.focus_start}..{scenario.focus_end}"
-        if scenario.focus_start
+        if mode == "final" and scenario.focus_start
         else ""
     )
     print(f"[{scenario.id}] {label}{focus} → {len(searches)} searches{share}, ~{minutes} min")
@@ -466,6 +471,8 @@ def check_price_command(origin: str, destination: str, depart: str, ret: str | N
 
 def main():
     _force_utf8_output()
+    from .sweep.runner import MODES
+
     parser = argparse.ArgumentParser(description="Flight scenario watcher")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
@@ -473,8 +480,9 @@ def main():
     p_sweep.add_argument("--scenario", required=True)
     p_sweep.add_argument("--depth", choices=["quick", "standard", "deep"],
                          help="Override the scenario's depth")
-    p_sweep.add_argument("--mode", choices=["sweep", "explore"], default="sweep",
-                         help="explore: every route on three dates, to see which "
+    p_sweep.add_argument("--mode", choices=list(MODES), default="sweep",
+                         help="final: only the dates the trip has been narrowed to. "
+                              "explore: every route on three dates, to see which "
                               "airports are worth a real sweep at all")
     p_sweep.add_argument("--max-minutes", type=float,
                          help="Wall-clock budget. The sweep stops cleanly when it runs out, "

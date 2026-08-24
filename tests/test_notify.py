@@ -485,3 +485,52 @@ def test_a_state_file_with_a_best_but_no_previous_run_is_read_honestly(tmp_path)
 
     above = build_price_embed("S", [pick("cheapest", 32000)], previous_best=30000)
     assert "above the best of 30,000" in above["description"]
+
+
+# ------------------------------------------ the two sweeps report separately
+#
+# A broad sweep and a final sweep price different things: the whole window
+# against the handful of days it was narrowed to. The narrowed cheapest is
+# almost always the dearer of the two, and it is not a rise.
+#
+# They shared one high-water mark under `best.json["cheapest"]` until the two
+# modes were split apart, which was harmless only while every sweep was narrowed.
+# Measured on 24 Aug, immediately after the split: a final run recorded 25,967
+# over the broad runs' 21,445, so the next broad sweep would have reported a
+# 4,500 CZK drop that no fare ever made -- the trend-chart bug, one layer down.
+
+
+def test_a_final_sweep_records_its_best_apart_from_the_broad_one(tmp_path):
+    from src.notify_discord import alert_key
+
+    save_best(tmp_path, 21445.0, "CZK", alert_key("cheapest", "sweep"))
+    save_best(tmp_path, 25967.0, "CZK", alert_key("cheapest", "final"))
+
+    assert load_best(tmp_path, alert_key("cheapest", "sweep")) == 21445.0
+    assert load_best(tmp_path, alert_key("cheapest", "final")) == 25967.0
+
+
+def test_the_broad_key_is_unchanged_so_committed_history_still_reads(tmp_path):
+    """`best.json` is committed, and every entry in it was written as `cheapest`.
+
+    Renaming the broad key would restart the high-water mark from nothing and
+    report the next ordinary sweep as an all-time low.
+    """
+    from src.notify_discord import alert_key
+
+    assert alert_key("cheapest", "sweep") == "cheapest"
+    assert alert_key("preferred", "sweep") == "preferred"
+    assert alert_key("cheapest", "final") == "final:cheapest"
+
+
+def test_a_narrowed_run_is_not_read_as_a_rise_against_a_broad_one(tmp_path):
+    """The reading that would have been wrong, stated as the two calls it is."""
+    from src.notify_discord import alert_key
+
+    save_best(tmp_path, 21445.0, "CZK", alert_key("cheapest", "sweep"))
+
+    # Nothing narrowed has been recorded yet, so the first final run is news on
+    # its own terms rather than a 4,500 rise against a measurement of the window.
+    assert load_best(tmp_path, alert_key("cheapest", "final")) is None
+    assert should_alert(25967.0, load_best(tmp_path, alert_key("cheapest", "final")), None)
+    assert not should_alert(25967.0, load_best(tmp_path, alert_key("cheapest", "sweep")), None)

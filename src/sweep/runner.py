@@ -24,7 +24,7 @@ from typing import Protocol
 
 from ..models import Leg
 from ..scenario import Scenario
-from .planner import LegSearch, plan_exploration, plan_searches, plan_watch, shard_of
+from .planner import PLANS, LegSearch, shard_of
 
 # Politeness delay between searches on the same worker.
 #
@@ -42,15 +42,28 @@ from .planner import LegSearch, plan_exploration, plan_searches, plan_watch, sha
 SEARCH_DELAY_S = 4.0
 DEFAULT_WORKERS = 2
 
-# "sweep" prices a trip; "explore" scouts which airports are worth pricing;
-# "watch" re-prices a handful of pinned candidate trips on their exact dates.
-MODES = ("sweep", "explore", "watch")
+# "sweep" prices a trip's whole window; "final" prices only what it has been
+# narrowed to; "explore" scouts which airports are worth pricing at all; "watch"
+# re-prices a handful of pinned candidate trips on their exact dates.
+#
+# `sweep` and `final` are separate modes rather than a flag on one because the
+# difference has to survive onto disk. A run's status is the only thing that
+# still knows what it searched by the time it is being read a week later, and
+# until 24 Aug it recorded the focus and nothing else - so two nightly runs
+# narrowed to 48 searches out of 85 by a return window were charted as though
+# they had priced the window.
+MODES = ("sweep", "explore", "watch", "final")
 
 # Where each mode's runs are kept. A watch is not a sweep and must not be filed
 # as one: six tiny runs a day in `data/sweeps/` would fill the Results picker
 # with healthy-looking sweeps that priced three days out of seventy, and the
 # richest-looking run offered would be the one that looked at least.
-MODE_ROOTS = {"sweep": "sweeps", "explore": "sweeps", "watch": "watch"}
+#
+# A final sweep *is* a sweep and is filed with them: it prices the trip properly,
+# just over fewer days, and the history, merge and branch-sync paths all read
+# that one directory. The pickers tell the two apart by `status.mode`, which is
+# also what keeps them on separate trend lines.
+MODE_ROOTS = {"sweep": "sweeps", "explore": "sweeps", "watch": "watch", "final": "sweeps"}
 
 # Times a worker will come back to a search that has not been answered.
 #
@@ -145,8 +158,34 @@ def focus_of(status: dict) -> list | None:
     return list(focus) if focus else None
 
 
+def narrowing_of(status: dict) -> dict:
+    """Everything this sweep let narrow it, as three comparable JSON values.
+
+    Replaces `focus_of` as the thing comparability turns on, because a focus was
+    only ever one of three. A run bounded by a return window or a nights band
+    recorded `focus: None` and read as broad: on 24 Aug the two committed nightly
+    runs of japan-philippines planned 48 searches against a window of 85, on
+    exactly that reading, and the trend chart joined them to sweeps that had
+    priced the whole thing.
+
+    A status written before the field existed is read by its focus alone. That is
+    what it knew, and it is not nothing - it still separates the focused runs
+    from the unfocused ones. Reading such a run as broad would put it back on the
+    line it does not belong to; discarding it would retire every sweep committed
+    before the split.
+    """
+    if "narrowing" in status:
+        recorded = status["narrowing"] or {}
+        return {
+            "focus": list(recorded["focus"]) if recorded.get("focus") else None,
+            "return_focus": list(recorded["return_focus"]) if recorded.get("return_focus") else None,
+            "total_days": list(recorded["total_days"]) if recorded.get("total_days") else None,
+        }
+    return {"focus": focus_of(status), "return_focus": None, "total_days": None}
+
+
 def is_comparable(
-    status: dict, routes_covered: int, routes_planned: int, focus=None
+    status: dict, routes_covered: int, routes_planned: int, narrowing=None
 ) -> bool:
     """Whether this sweep's best total may be plotted beside another's.
 
@@ -165,23 +204,63 @@ def is_comparable(
       a price would put a spike in the chart that no fare ever made. Stopped
       sweeps fall out through `state` for the same reason, and a watch - which
       prices even fewer days, and on purpose - falls out with them.
-    - **Focused differently.** A focused sweep prices a handful of departure
+
+      A `final` sweep is deliberately **not** in that company. It prices the trip
+      properly, over fewer days, and two of them a day apart are the same
+      measurement twice - which is the series a booking decision is waiting on.
+      What keeps it off the broad line is the rule below, not its mode.
+    - **Narrowed differently.** A narrowed sweep prices a handful of departure
       dates out of the window, so its cheapest is the cheapest *of those dates*
       rather than of the trip. Plotting it beside a broad sweep draws a step no
       fare ever made - the same mistake as charting an exploration pass, and
       caught the same way. A sweep is only comparable with others carrying the
-      focus the trip has now.
+      same narrowing, and `narrowing=None` asks for the broad ones.
+
+      All three constraints count, not only the focus. That was the gap: a run
+      bounded by a return window recorded `focus: None`, and the chart could not
+      tell it from a sweep of the whole window.
     """
     if status.get("state") != "done":
         return False
     if status.get("mode") in {"explore", "watch"}:
         return False
-    if focus_of(status) != (list(focus) if focus else None):
+    if narrowing_of(status) != _wanted_narrowing(narrowing):
         return False
     if not routes_planned or routes_covered < routes_planned:
         return False
     legs_per_search = legs_per_search_of(status)
     return legs_per_search is not None and legs_per_search >= MIN_COMPARABLE_LEGS_PER_SEARCH
+
+
+def _narrowing_searched(scenario: Scenario) -> dict:
+    """A trip's three narrowing constraints, as the JSON a status records.
+
+    Pairs are recorded only when both ends are set, matching what the planner
+    does with them: a half-open focus bounds nothing, so a run carrying one is
+    not narrowed by it and must not say it was.
+    """
+    def pair(start, end):
+        return [start.isoformat(), end.isoformat()] if start and end else None
+
+    return {
+        "focus": pair(scenario.focus_start, scenario.focus_end),
+        "return_focus": pair(scenario.return_focus_start, scenario.return_focus_end),
+        "total_days": list(scenario.total_days) if scenario.total_days else None,
+    }
+
+
+def _wanted_narrowing(narrowing) -> dict:
+    """The narrowing being asked about, in the shape `narrowing_of` returns.
+
+    `None` and a dict of three `None`s are the same question - "which runs
+    priced the whole window" - and callers reach for whichever is to hand.
+    """
+    given = narrowing or {}
+    return {
+        "focus": list(given["focus"]) if given.get("focus") else None,
+        "return_focus": list(given["return_focus"]) if given.get("return_focus") else None,
+        "total_days": list(given["total_days"]) if given.get("total_days") else None,
+    }
 
 
 class LegProvider(Protocol):
@@ -196,6 +275,12 @@ class SweepResult:
     scenario_id: str
     directory: Path
     total: int
+    # Which of the two questions this run answered: the whole window, or only
+    # what the trip was narrowed to. Carried on the result because everything
+    # downstream of a sweep - the alert's high-water mark, the trend line - has
+    # to keep the two populations apart, and re-reading status.json to find out
+    # is a second copy of the same fact.
+    mode: str = "sweep"
     completed: int = 0
     # Searches the site actually replied to, with offers or with its own "no
     # flights" message. The figure `legs_found` and `error_count` between them
@@ -567,8 +652,7 @@ def run_sweep(
 
         provider = PelikanProvider()
 
-    plans = {"explore": plan_exploration, "watch": plan_watch, "sweep": plan_searches}
-    searches = plans[mode](scenario)
+    searches = PLANS[mode](scenario)
     # Counted before any narrowing, so a shard and a resumed run both report what
     # they are a part of rather than the part they ran.
     planned = len(searches)
@@ -595,6 +679,7 @@ def run_sweep(
         scenario_id=scenario.id,
         directory=directory,
         total=len(searches),
+        mode=mode,
         started_at=_now(),
     )
     if inherited is not None:
@@ -630,6 +715,14 @@ def run_sweep(
             on_backoff(seconds)
 
     breaker = _Breaker(backoff_s, note_backoff)
+
+    # What this run let narrow it, decided once by the mode rather than read off
+    # the trip. Only `final` is bound by the narrowing; every other mode prices
+    # what its own planner asked for, so recording the trip's fields would
+    # describe a constraint the run never obeyed.
+    narrowing = _narrowing_searched(scenario) if mode == "final" else {
+        "focus": None, "return_focus": None, "total_days": None,
+    }
 
     def status_payload(state: str, current: str = "") -> dict:
         return {
@@ -684,12 +777,17 @@ def run_sweep(
             "backoff_seconds": backoff["seconds"],
             "backoff_until": backoff["until"],
             # The focus this sweep searched under, so a narrowed run is never
-            # charted as though it had priced the whole window.
-            "focus": (
-                [scenario.focus_start.isoformat(), scenario.focus_end.isoformat()]
-                if scenario.focus_start and scenario.focus_end
-                else None
-            ),
+            # charted as though it had priced the whole window. Kept beside
+            # `narrowing` rather than replaced by it: every sweep committed
+            # before the two were split carries this key and nothing else, and
+            # `narrowing_of` still reads them by it.
+            "focus": narrowing["focus"],
+            # All three constraints, and whether this run let any of them bind.
+            # A `sweep` records three Nones however narrow the trip is, because
+            # that is what it searched - the field says what happened, not what
+            # the trip said at the time. Reading it the other way is how two
+            # runs of 48 searches out of 85 were charted as broad ones.
+            "narrowing": narrowing,
             # The candidates this run was following, so a watch directory says
             # what it is a watch *of* without needing the trip beside it - the
             # trip is edited, and the run is not.
@@ -1181,6 +1279,13 @@ def _merged_status(statuses: list[dict], destination: Path) -> dict:
         "shard": None,
         "shards": [s.get("shard") for s in statuses],
         "focus": first.get("focus"),
+        # Carried through from the shards, like `mode` and `focus` beside it.
+        # Dropping it made a sharded final sweep arrive on the branch looking
+        # broad - right mode, no narrowing - and join the trend line the split
+        # exists to keep it off. Only in the cloud, where nobody is watching.
+        # `narrowing_of` rather than `.get`, so a shard written before the field
+        # existed is read by its focus instead of as unconstrained.
+        "narrowing": narrowing_of(first),
         "started_at": min((s.get("started_at") or "" for s in statuses), default=""),
         "finished_at": max((s.get("finished_at") or "" for s in statuses), default=""),
         "depth": first.get("depth"),

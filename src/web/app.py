@@ -23,6 +23,7 @@ from ..airports import describe, frequent_airports, lookup
 from ..airports import search_with_meta as search_airports
 from ..combine import combine_all, series_from_result
 from ..notify_discord import COLOR_INFO, post
+from ..providers.pelikan_url import build_search_url
 from ..scenario import LegWatch, Scenario, Watch, load_scenario, read_scenarios, save_scenario
 from ..sources import DEFAULTS as DEFAULT_SOURCES
 from ..sources import (
@@ -35,10 +36,10 @@ from ..sources import (
 )
 from ..sweep.explore import explore_report
 from ..sweep.planner import (
+    PLANS,
     SEARCHES_PER_RUNNER,
     SECONDS_PER_SEARCH,
     estimate_minutes,
-    plan_exploration,
     plan_searches,
     plan_watch,
     planned_routes,
@@ -51,6 +52,7 @@ from ..sweep.runner import (
     is_comparable,
     legs_per_search_of,
     load_legs,
+    narrowing_of,
     run_sweep,
 )
 from ..viability import report as viability_report
@@ -93,10 +95,11 @@ CLOUD_REF = branch_sync.CLOUD_REF
 # `src/web/app.py`.
 SWEEP_WORKFLOW = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "scrape.yml"
 DAILY_CRON = re.compile(r"cron:\s*'(\d{1,2})\s+(\d{1,2})\s+\*\s+\*\s+\*'")
-# The afternoon slot, which follows the dates picked off the price chart rather
-# than sweeping the window again. Matched as the literal the workflow itself
-# compares `github.event.schedule` against.
-FOCUSED_CRON = "0 13 * * *"
+# The afternoon slots, which re-price what the trip has been narrowed to rather
+# than sweeping the window again. Matched as the literals the workflow itself
+# compares `github.event.schedule` against, so the panel and the run agree about
+# which slot does which - the whole reason the crons are read out of the file.
+FINAL_CRONS = ("0 13 * * *", "0 20 * * *")
 # The depth a *scheduled* run uses, which is a workflow default rather than a
 # trip setting: the plan step reads `${INPUT_DEPTH:-deep}`, and a schedule
 # supplies no input. Read from the workflow for the same reason as the crons -
@@ -113,7 +116,7 @@ FORCED_DEPTH = re.compile(r"INPUT_DEPTH:-(\w+)")
 # and 400s for things it needs, and renders them as emptiness - which is
 # indistinguishable from "you have no saved trips". `static/app.js` carries the
 # same number and refuses to render until they match.
-API_CONTRACT = 12
+API_CONTRACT = 14
 
 app = FastAPI(title="Flight scenario watcher")
 
@@ -343,7 +346,10 @@ def _night_schedule(now: datetime | None = None) -> list[dict]:
             # UTC, formatted into Prague by the page like every other moment it
             # shows. A time-of-day string would have to pick a zone here.
             "next": at.isoformat(),
-            "focused": cron == FOCUSED_CRON,
+            # Which of the two questions this slot answers. `sweep` prices the
+            # whole window; `final` prices only the narrowing, so it is skipped
+            # entirely for a trip that has not been narrowed to anything.
+            "mode": "final" if cron in FINAL_CRONS else "sweep",
         })
     return sorted(slots, key=lambda slot: slot["next"])
 
@@ -355,7 +361,16 @@ def night_sweep() -> dict:
     forced = _night_depth()
     trips = []
     for scenario in scenarios:
-        searches = plan_searches(_at_depth(scenario, forced))
+        at_depth = _at_depth(scenario, forced)
+        searches = plan_searches(at_depth)
+        # What the two afternoon slots will run, and nothing when the trip has
+        # not been narrowed - which is a real answer rather than a zero: those
+        # slots skip such a trip outright, and a panel quoting a cost for a run
+        # that will not happen is the kind of number this app keeps removing.
+        try:
+            final = PLANS["final"](at_depth)
+        except ValueError:
+            final = None
         trips.append({
             "id": scenario.id,
             "name": scenario.name,
@@ -367,6 +382,8 @@ def night_sweep() -> dict:
             "searches": len(searches),
             "runners": shards_for(len(searches)),
             "minutes": estimate_minutes(searches),
+            "final_searches": len(final) if final is not None else None,
+            "final_minutes": estimate_minutes(final) if final is not None else None,
             "cloud": _cloud_state(scenario, forced),
         })
     return {
@@ -471,8 +488,7 @@ def estimate(
         scenario.validate()
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    plans = {"explore": plan_exploration, "watch": plan_watch, "sweep": plan_searches}
-    searches = plans[mode](scenario)
+    searches = PLANS[mode](scenario)
     return {
         "searches": len(searches),
         "minutes": estimate_minutes(searches),
@@ -492,6 +508,23 @@ def _focus_of(scenario: Scenario) -> list | None:
     if scenario.focus_start and scenario.focus_end:
         return [scenario.focus_start.isoformat(), scenario.focus_end.isoformat()]
     return None
+
+
+def _narrowing_wanted(scenario: Scenario) -> dict:
+    """A trip's three narrowing constraints, shaped like a status's record of them.
+
+    The live half of the comparison `is_comparable` makes: what the trip asks for
+    now, against what each run on disk actually searched under.
+    """
+    return {
+        "focus": _focus_of(scenario),
+        "return_focus": (
+            [scenario.return_focus_start.isoformat(), scenario.return_focus_end.isoformat()]
+            if scenario.return_focus_start and scenario.return_focus_end
+            else None
+        ),
+        "total_days": list(scenario.total_days) if scenario.total_days else None,
+    }
 
 
 def _leg_labels(scenario: Scenario) -> list[str]:
@@ -526,6 +559,16 @@ def run_locally(scenario_id: str, depth: str | None = None, mode: str | None = N
             replace(scenario, depth=depth).validate()
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
+
+    # Planned here rather than left to the thread. `plan_final` refuses a trip
+    # with nothing narrowed, and a refusal raised inside the worker lands in
+    # `_failures` minutes later, reaching the strip as "Sweep failed —
+    # ValueError: …" in the voice of a crash. It is not a crash; it is a button
+    # that should not have been pressable.
+    try:
+        PLANS[mode](replace(scenario, depth=depth) if depth else scenario)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
     _failures.pop(scenario_id, None)
     stop = threading.Event()
@@ -641,7 +684,8 @@ def _fetch_cloud_ref() -> None:
 
 @app.post("/api/scenarios/{scenario_id}/run-cloud")
 def run_in_cloud(
-    scenario_id: str, depth: str | None = None, force: bool = False
+    scenario_id: str, depth: str | None = None, force: bool = False,
+    mode: str = "sweep",
 ) -> dict:
     """Sweep this trip in the cloud, or hold it until the lane is free.
 
@@ -651,6 +695,14 @@ def run_in_cloud(
     a different trip than the one on screen.
     """
     scenario = _scenario_or_404(scenario_id)
+    mode = _checked_mode(mode)
+    if mode == "final":
+        # Refused here rather than in the runner twenty minutes from now, on a
+        # machine nobody is watching. `plan_final` raises the sentence to show.
+        try:
+            PLANS["final"](scenario)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
 
     if not force:
         _fetch_cloud_ref()
@@ -678,12 +730,12 @@ def run_in_cloud(
         # lane clears - two runs were lost that way on 22 Aug, and nothing said
         # so.
         if cloud_runs.lane_is_busy():
-            entry = cloud_runs.enqueue(scenario_id, depth)
+            entry = cloud_runs.enqueue(scenario_id, depth, mode)
             return {"dispatched": False, "queued": True, "scenario_id": scenario_id, **entry}
-        cloud_runs.dispatch(scenario_id, depth)
+        cloud_runs.dispatch(scenario_id, depth, mode)
     except cloud_runs.CloudError as exc:
         raise HTTPException(500, str(exc)) from exc
-    return {"dispatched": True, "queued": False, "scenario_id": scenario_id}
+    return {"dispatched": True, "queued": False, "scenario_id": scenario_id, "mode": mode}
 
 
 @app.get("/api/cloud-runs")
@@ -754,6 +806,23 @@ def cloud_sync_pull() -> dict:
     """
     result = branch_sync.pull(DATA_DIR, _known_trips())
     if not result["synced"] and result["reason"]:
+        raise HTTPException(409, result["reason"])
+    return result
+
+
+@app.post("/api/cloud-sync/take")
+def cloud_sync_take() -> dict:
+    """Copy the missing run directories across without moving the branch.
+
+    What `POST /api/cloud-sync` cannot do when the checkout has commits of its
+    own. Refusing the merge is right; refusing the results with it never was,
+    and the results are directories this machine does not have at all.
+
+    409 on a refusal for the same reason as the sync: it is a state the person
+    here resolves, not a fault, and git's sentence is the part worth reading.
+    """
+    result = branch_sync.take(DATA_DIR, _known_trips())
+    if not result["took"] and result["reason"]:
         raise HTTPException(409, result["reason"])
     return result
 
@@ -1164,6 +1233,128 @@ def sweep_explore(scenario_id: str, stamp: str) -> dict:
     }
 
 
+@app.get("/api/scenarios/{scenario_id}/airport-verdicts")
+def airport_verdicts(scenario_id: str) -> dict:
+    """Every airport of the trip, judged by the best run that measured it.
+
+    The Explore tab used to open on a picker of runs by date and time: you chose
+    "23 Aug, 10:46 · probe · 48 searches" and only then found out what it said
+    about Vienna. That is backwards - the question is about an airport, and the
+    run is an implementation detail of the answer - and it also threw work away.
+    A probe the site refused after 31 of 123 searches has nothing to say about
+    the airports it never reached, and yesterday's complete deep sweep, sitting
+    right there on disk, does.
+
+    **Chosen per pool, not per airport.** The verdicts in a pool are relative -
+    `_rank` scores each airport against the cheapest of its own pool - so rows
+    taken from different runs would be percentages against different baselines,
+    printed in one table as though they were comparable. So a whole pool comes
+    from one run: the newest run that priced the most of that pool's airports.
+    Different pools may come from different runs, which is safe, because pools
+    are ranked independently in the first place.
+
+    Runs of a differently shaped trip are skipped outright. Pools are positional,
+    and lining up pool 2 of a two-stop trip with pool 2 of a three-stop one is
+    how a probe of Prague and Vienna came to be presented as the verdict for a
+    trip flying out of Katowice.
+    """
+    live = _scenario_or_404(scenario_id)
+    pools = live.airport_pools
+    roles = live.pool_roles
+
+    # Best run per pool, decided as the runs are read rather than after all of
+    # them are: `best[index]` is (how many of that pool it priced, stamp, block,
+    # status). Walking newest-first with a strict `>` means recency breaks a tie.
+    best: dict[int, tuple] = {}
+    runs_read = 0
+
+    for directory in _sweep_dirs(scenario_id):
+        # Nothing more to learn: every pool has a run that priced all of it, and
+        # no older run can beat "all of it" or be newer. Without this the tab
+        # re-reads every sweep ever committed - 22 of them and ~140 ms today,
+        # and it only grows.
+        if len(best) == len(pools) and all(
+            best[i][0] == len(pools[i]) for i in range(len(pools))
+        ):
+            break
+
+        status = _read_status(directory)
+        if not _has_legs(directory):
+            continue
+        searched = _sweep_scenario(directory, live)
+        if len(searched.airport_pools) != len(pools):
+            continue
+        try:
+            report = explore_report(load_legs(directory), searched, status, current=live)
+        except (ValueError, KeyError, TypeError):
+            # One unreadable run must not cost the tab every other run's answer.
+            continue
+        runs_read += 1
+
+        for index, airports in enumerate(pools):
+            wanted = set(airports)
+            block = next((b for b in report["pools"] if b["index"] == index), None)
+            if block is None:
+                continue
+            priced = sum(
+                1
+                for row in block["airports"]
+                if row["iata"] in wanted and row["total_min"] is not None
+            )
+            if priced and (index not in best or priced > best[index][0]):
+                best[index] = (priced, directory.name, block, status)
+
+    blocks = []
+    for index, (airports, role) in enumerate(zip(pools, roles, strict=True)):
+        wanted = set(airports)
+        if index not in best:
+            blocks.append(
+                {
+                    "index": index,
+                    **role,
+                    "measured_by": None,
+                    "airports": [],
+                    "not_searched": sorted(airports),
+                }
+            )
+            continue
+
+        _, stamp, block, status = best[index]
+        rows = [row for row in block["airports"] if row["iata"] in wanted]
+        seen = {row["iata"] for row in rows}
+        blocks.append(
+            {
+                "index": index,
+                **role,
+                # Named, because a verdict is only as good as the run behind it
+                # and this table mixes runs by design.
+                "measured_by": {
+                    "stamp": stamp,
+                    "mode": status.get("mode", "sweep"),
+                    "depth": status.get("depth"),
+                    "state": status.get("state"),
+                    "coverage": status.get("coverage"),
+                },
+                "airports": rows,
+                # Airports of this pool the chosen run has no row for at all,
+                # which happens when the trip has gained an airport since it
+                # ran. Deliberately *not* "nothing has ever priced this": an
+                # airport the run asked about and got nothing for already has a
+                # row, saying `unproven`, and listing it twice would read as two
+                # different facts. Same name as the single-run report's field,
+                # because it means the same thing.
+                "not_searched": sorted(wanted - seen),
+            }
+        )
+
+    return {
+        "scenario_id": scenario_id,
+        "currency": live.currency,
+        "runs_read": runs_read,
+        "pools": blocks,
+    }
+
+
 @app.get("/api/sweeps/{scenario_id}/{stamp}/by-date")
 def sweep_by_date(scenario_id: str, stamp: str, window: str = "narrow") -> list[dict]:
     scenario, directory = _sweep_dir_or_404(scenario_id, stamp)
@@ -1310,17 +1501,26 @@ def history(scenario_id: str) -> list[dict]:
     # What the trip requires *now*, so a sweep taken under a narrower shape is
     # retired rather than plotted beside sweeps of the current one.
     required = planned_routes(scenario)
-    # Same idea along the date axis. A focused sweep prices a handful of
-    # departure dates, so its cheapest is the cheapest of those dates and not of
-    # the trip; charting it beside a broad sweep draws a step no fare made.
-    focus = _focus_of(scenario)
+    # Same idea along the date axis, and the reason there are two lines rather
+    # than one. A narrowed sweep prices a handful of departure dates, so its
+    # cheapest is the cheapest of those dates and not of the trip; charting it
+    # beside a broad sweep draws a step no fare made.
+    wanted = _narrowing_wanted(scenario)
     series = []
     for directory in reversed(_sweep_dirs(scenario_id)):
-        legs = load_legs(directory)
-        best = _combination(scenario, directory).best
+        status = _read_status(directory)
+        # Which question this run answered, taken from what it recorded rather
+        # than from what the trip says today. A run is broad or narrowed for
+        # good the moment it finishes; nothing edited afterwards can change it.
+        narrowed = any(narrowing_of(status).values())
+        # And read on its own terms. A broad run's best total is the cheapest of
+        # the whole window - reading it through today's narrowing would turn the
+        # broad line into a second copy of the narrowed one, drawn from older
+        # data. That was the state of it: every point on the chart was narrowed.
+        best = _combination(scenario, directory, in_window=narrowed).best
         if best is None:
             continue
-        status = _read_status(directory)
+        legs = load_legs(directory)
         covered = len(required & {(leg.origin, leg.destination) for leg in legs})
         series.append(
             {
@@ -1329,12 +1529,23 @@ def history(scenario_id: str) -> list[dict]:
                 "best_total_with_bags": best.total_with_bags(scenario.bag_estimate),
                 "currency": best.currency,
                 "depth": status.get("depth"),
+                "mode": status.get("mode", "sweep"),
+                # The line this point belongs on. Two runs on different lines are
+                # never joined, whatever else they have in common.
+                "series": "final" if narrowed else "broad",
                 "searches": status.get("total"),
                 "legs_per_search": legs_per_search_of(status),
                 "routes_covered": covered,
                 "routes_planned": len(required),
-                "comparable": is_comparable(status, covered, len(required), focus),
+                # Judged against its own line: a broad run against no narrowing,
+                # a narrowed one against the narrowing the trip has now. A trip
+                # gaining a focus no longer retires the broad sweeps behind it -
+                # they priced the window, and the window has not moved.
+                "comparable": is_comparable(
+                    status, covered, len(required), wanted if narrowed else None
+                ),
                 "focus": status.get("focus"),
+                "narrowing": narrowing_of(status),
                 "coverage": status.get("coverage"),
             }
         )
@@ -1465,6 +1676,19 @@ def _watch_payload(scenario: Scenario) -> dict:
             "exact": recorded.get("exact", True),
             "found_date": recorded.get("found_date"),
             "off_trip": (watch.origin, watch.destination) not in trip_routes,
+            # Where to go and buy it. The watch records a price and never the
+            # offer's URL - `record_leg` keeps what it needs to compare, and a
+            # deep link scraped four hours ago is not that - so the search is
+            # rebuilt from the three things that define this watch. A search
+            # page rather than a specific offer, which is the honest link:
+            # what was cheapest at the last check need not still be.
+            "book_url": build_search_url(
+                watch.origin,
+                watch.destination,
+                watch.depart_date,
+                adults=scenario.adults,
+                source=load_source("PELIKAN", DATA_DIR),
+            ),
         }
         for watch in scenario.leg_watches
         for recorded in [legs_recorded.get(watch.key, {})]

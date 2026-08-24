@@ -294,3 +294,85 @@ def test_a_data_dir_outside_the_checkout_has_no_branch_counterpart(repo, tmp_pat
 
     assert found["known"] is True
     assert found["missing_count"] == 0
+
+
+# ------------------------------------------------- taking the runs alone
+#
+# The case a fast-forward cannot serve. Working on a feature branch, the
+# checkout is ahead of `origin/main` and `pull` correctly refuses - but the runs
+# it is refusing to bring are directories that do not exist here at all, and no
+# merge is needed to copy those.
+
+
+def diverge(repo: Path) -> str:
+    """One local commit the branch does not have. Returns HEAD before taking."""
+    write(repo / "notes.md", "work in progress\n")
+    commit(repo, "a commit the branch does not have")
+    return head(repo)
+
+
+def test_a_diverged_checkout_can_still_take_the_runs_it_is_missing(repo):
+    """The refusal is about moving the branch, never about the results.
+
+    Three finished sweeps sat unreachable on 24 Aug behind exactly this message,
+    with no button under it, because the only way in was a merge nobody wanted.
+    """
+    before = diverge(repo)
+
+    result = branch_sync.take(repo / "data", [TRIP])
+
+    assert result["took"] is True, result["reason"]
+    assert result["taken"][TRIP] == sorted(CLOUD_SWEEPS, reverse=True)
+    for stamp in CLOUD_SWEEPS:
+        assert (repo / "data" / "sweeps" / TRIP / stamp / "legs.jsonl").exists()
+    # The whole safety story: the local commit is still the tip.
+    assert head(repo) == before
+
+
+def test_taking_leaves_the_missing_count_at_nothing(repo):
+    """Because the picker reads the disk, and the disk now has them."""
+    diverge(repo)
+
+    branch_sync.take(repo / "data", [TRIP])
+
+    assert state(repo)["missing_count"] == 0
+    # And still diverged - taking is not syncing, and must not claim to be.
+    assert state(repo)["can_fast_forward"] is False
+
+
+def test_a_run_already_on_disk_is_never_written_over(repo):
+    """A local run of the same stamp outranks the branch's, always.
+
+    Stamps are the second a run started, so a collision is possible, and the
+    local one may be a sweep still being appended to. A bare `checkout --` of the
+    branch's copy would silently replace it, which is the one loss this module
+    exists to make impossible.
+    """
+    diverge(repo)
+    mine = repo / "data" / "sweeps" / TRIP / CLOUD_SWEEPS[0]
+    write(mine / "legs.jsonl", '{"origin": "MINE"}\n')
+
+    result = branch_sync.take(repo / "data", [TRIP])
+
+    assert CLOUD_SWEEPS[0] not in result["taken"].get(TRIP, [])
+    assert (mine / "legs.jsonl").read_text(encoding="utf-8") == '{"origin": "MINE"}\n'
+    # The other two still arrive; one collision is not a reason to bring nothing.
+    assert sorted(result["taken"][TRIP]) == sorted(CLOUD_SWEEPS[1:])
+
+
+def test_taking_when_nothing_is_missing_says_so_rather_than_failing(repo):
+    branch_sync.pull(repo / "data", [TRIP])
+
+    result = branch_sync.take(repo / "data", [TRIP])
+
+    assert result["took"] is False
+    assert result["already_current"] is True
+    assert result["reason"] == ""
+
+
+def test_taking_without_a_branch_to_read_says_why(tmp_path):
+    """The suite-wide git refusal stands in for a machine that cannot answer."""
+    result = branch_sync.take(tmp_path / "data", [TRIP])
+
+    assert result["took"] is False
+    assert result["reason"]

@@ -249,6 +249,107 @@ def test_an_explore_run_is_never_plotted_beside_real_sweeps():
     assert is_comparable({**status, "mode": "sweep"}, routes_covered=21, routes_planned=21)
 
 
+# ------------------------------------------------------ what a run searched
+#
+# A run's status is the only thing that still knows what it priced by the time
+# it is read a week later. It recorded the focus and nothing else, so a run
+# narrowed by a return window or a nights band was indistinguishable from one
+# that had priced the whole window - which is exactly what the two committed
+# nightly runs of 24 Aug were: 48 searches out of 85, `focus: None`.
+
+
+NARROWED = {
+    "focus": ["2027-01-08", "2027-01-12"],
+    "return_focus": ["2027-02-01", "2027-02-12"],
+    "total_days": [24, 28],
+}
+BROAD = {"focus": None, "return_focus": None, "total_days": None}
+
+
+def test_a_run_records_every_narrowing_it_searched_under(tmp_path):
+    from dataclasses import replace
+
+    from src.sweep.runner import narrowing_of
+
+    trip = replace(
+        scenario(),
+        return_focus_start=date(2027, 1, 28),
+        return_focus_end=date(2027, 2, 4),
+        total_days=(18, 22),
+    )
+    result = run_sweep(
+        trip, provider=FakeProvider(), data_dir=tmp_path, workers=1, delay_s=0,
+        mode="final",
+    )
+
+    status = json.loads((result.directory / "status.json").read_text(encoding="utf-8"))
+    assert status["narrowing"]["return_focus"] == ["2027-01-28", "2027-02-04"]
+    assert status["narrowing"]["total_days"] == [18, 22]
+    assert narrowing_of(status) == status["narrowing"]
+
+
+def test_a_broad_run_records_that_it_was_narrowed_by_nothing(tmp_path):
+    """Even on a trip that has a narrowing - because that run ignored it."""
+    from dataclasses import replace
+
+    trip = replace(scenario(), total_days=(18, 22))
+    result = run_sweep(
+        trip, provider=FakeProvider(), data_dir=tmp_path, workers=1, delay_s=0,
+    )
+
+    status = json.loads((result.directory / "status.json").read_text(encoding="utf-8"))
+    assert status["narrowing"] == BROAD
+
+
+def test_a_narrowed_run_is_not_plotted_beside_a_broad_one():
+    narrow = {"state": "done", "legs_per_search": 9.0, "mode": "final", "narrowing": NARROWED}
+    broad = {"state": "done", "legs_per_search": 9.0, "mode": "sweep", "narrowing": BROAD}
+
+    assert is_comparable(broad, 21, 21, BROAD)
+    assert not is_comparable(narrow, 21, 21, BROAD)
+
+
+def test_two_final_runs_of_the_same_narrowing_are_comparable():
+    """The whole reason `final` is not lumped in with explore and watch.
+
+    A narrowed sweep prices the trip properly, over fewer days. Two of them a day
+    apart are the same measurement twice, and that series is the one a booking
+    decision is actually waiting on.
+    """
+    monday = {"state": "done", "legs_per_search": 9.0, "mode": "final", "narrowing": NARROWED}
+    tuesday = {**monday, "legs_per_search": 9.4}
+
+    assert is_comparable(monday, 21, 21, NARROWED)
+    assert is_comparable(tuesday, 21, 21, NARROWED)
+
+
+def test_a_run_narrowed_by_a_return_window_alone_is_told_apart_from_a_broad_one():
+    """The case `focus` could not express, and the one that actually happened."""
+    only_home = {
+        "state": "done", "legs_per_search": 9.0, "mode": "final",
+        "narrowing": {"focus": None, "return_focus": ["2027-02-01", "2027-02-12"],
+                      "total_days": None},
+    }
+    assert not is_comparable(only_home, 21, 21, BROAD)
+
+
+def test_a_run_from_before_the_narrowing_was_recorded_is_read_by_its_focus():
+    """Committed history carries `focus` and no `narrowing`, and must stay readable.
+
+    Read as broad it would join the broad line it was never part of; discarded it
+    would throw away every sweep taken before 24 Aug.
+    """
+    from src.sweep.runner import narrowing_of
+
+    legacy = {"state": "done", "legs_per_search": 9.0, "mode": "sweep",
+              "focus": ["2027-01-08", "2027-01-12"]}
+
+    assert narrowing_of(legacy) == {
+        "focus": ["2027-01-08", "2027-01-12"], "return_focus": None, "total_days": None,
+    }
+    assert not is_comparable(legacy, 21, 21, BROAD)
+
+
 # --------------------------------------------------------------------- stopping
 
 
@@ -1343,3 +1444,38 @@ def test_more_workers_than_routes_still_splits_rather_than_refusing():
 
 def test_an_empty_plan_produces_no_workers():
     assert _chunk([], 4) == []
+
+
+def test_a_merged_final_sweep_still_says_what_it_was_narrowed_to(tmp_path):
+    """The cloud path, where the run that reaches disk is a merge of shards.
+
+    `mode` was carried through and `narrowing` was not, so a sharded final sweep
+    arrived on the branch looking like a broad one: filed under `data/sweeps/`,
+    tagged `final`, and recording three Nones for what bounded it. It would have
+    joined the broad trend line, which is the whole thing the split exists to
+    stop - and it would have done it only in the cloud, where nobody is looking.
+    """
+    from dataclasses import replace
+
+    trip = replace(
+        scenario(),
+        return_focus_start=date(2027, 1, 28),
+        return_focus_end=date(2027, 2, 4),
+        total_days=(18, 22),
+    )
+    shards = [
+        run_sweep(
+            trip, provider=FakeProvider(), data_dir=tmp_path / f"shard{index}",
+            workers=1, delay_s=0, shard=(index, 2), mode="final",
+        ).directory
+        for index in range(2)
+    ]
+
+    status = merge_shards(shards, tmp_path / "merged")
+
+    assert status["mode"] == "final"
+    assert status["narrowing"] == {
+        "focus": None,
+        "return_focus": ["2027-01-28", "2027-02-04"],
+        "total_days": [18, 22],
+    }

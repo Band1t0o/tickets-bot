@@ -2,7 +2,7 @@
 
 Lives here rather than as an inline heredoc in the workflow so it can be tested.
 The equivalent decision used to be a shell loop over `scenarios/*.json`, which
-could not express "skip the focused slot when nothing is focused" without
+could not express "skip the final slot when nothing is narrowed" without
 another layer of shell.
 
 Prints `key=value` lines for `$GITHUB_OUTPUT`.
@@ -17,20 +17,29 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.cli import health_gate_command  # noqa: E402
 from src.scenario import load_scenarios  # noqa: E402
-from src.sweep.planner import plan_searches, shards_for  # noqa: E402
+from src.sweep.planner import PLANS, plan_searches, shards_for  # noqa: E402
 
-# What the morning sweep must have managed before an afternoon one is worth
-# running. Legs per search, not error count: the sweep that was failing most had
-# error_count 0 and 2.9 legs per search, where a healthy one returns ~10.
-MIN_LEGS_PER_SEARCH = 6.0
+
+def has_narrowing(scenario) -> bool:
+    """Whether a trip says anything less than its whole window.
+
+    Any one of the three counts. Selecting on the focus alone was the old rule
+    and it would skip the case that actually happened: on 24 Aug the committed
+    japan-philippines trip had no focus and a return window, and its nightly
+    runs were narrowed to 48 searches out of 85 by it.
+    """
+    return bool(
+        (scenario.focus_start and scenario.focus_end)
+        or (scenario.return_focus_start and scenario.return_focus_end)
+        or scenario.total_days
+    )
 
 
 def choose(
     directory: Path,
     wanted: str = "",
-    focused: bool = False,
+    final: bool = False,
     data_dir: Path | str = "data",
     watching: bool = False,
 ) -> list[str]:
@@ -46,15 +55,17 @@ def choose(
     checked - the workflow would skip the trip entirely and nothing anywhere
     would say why.
 
-    `focused` is the 13:00 slot, which watches the dates picked off the price
-    chart. Two things can take a trip out of it, and both are decisions rather
-    than failures:
+    `final` is the 13:00 and 20:00 slots, which re-price what the trip has been
+    narrowed to. A trip narrowed to nothing is skipped: a final sweep of it would
+    plan the whole window, which is the 02:00 slot's job and exactly the load
+    this client has been throttled for.
 
-    - **No focus.** Nothing has been chosen to watch closely, and sweeping the
-      whole window a second time is exactly the load this client has been
-      throttled for.
-    - **A starved morning.** Following a sweep the site refused with another is
-      the most reliable way to make the day's data worse rather than better.
+    Deliberately no health gate, on the watch slot's reasoning rather than the
+    old focused slot's. That gate existed because the afternoon used to re-run
+    the whole window - 85 searches at the site a starved morning has just shown
+    to be refusing. A final sweep is 31, and the days it prices are the ones a
+    booking decision is waiting on. If the site is still refusing, coverage
+    records it honestly and nothing is lost.
     """
     trips = list(load_scenarios(directory))
     if wanted:
@@ -73,20 +84,15 @@ def choose(
         # decision is actually waiting on. If the site is refusing, the watch
         # records that honestly through coverage and says nothing.
         return [s.id for s in trips if s.watches or s.leg_watches]
-    if focused:
-        trips = [s for s in trips if s.focus_start and s.focus_end]
-        trips = [
-            s
-            for s in trips
-            if health_gate_command(s.id, MIN_LEGS_PER_SEARCH, data_dir=data_dir) == 0
-        ]
+    if final:
+        trips = [s for s in trips if has_narrowing(s)]
     return [s.id for s in trips]
 
 
 def reason_for_nothing(
     directory: Path,
     wanted: str,
-    focused: bool = False,
+    final: bool = False,
     data_dir: Path | str = "data",
     watching: bool = False,
 ) -> str:
@@ -100,7 +106,7 @@ def reason_for_nothing(
 
     Empty string when there is nothing to explain.
     """
-    if not wanted or choose(directory, wanted, focused, data_dir, watching):
+    if not wanted or choose(directory, wanted, final, data_dir, watching):
         return ""
 
     known = [s.id for s in load_scenarios(directory)]
@@ -116,10 +122,11 @@ def reason_for_nothing(
             f"{wanted!r} is not watching anything, so a watch of it would price "
             "nothing. Pin some days or follow a flight on the Watch tab first."
         )
-    if focused:
+    if final:
         return (
-            f"{wanted!r} has no focus dates, or its morning sweep came back too "
-            "starved to follow with another."
+            f"{wanted!r} has not been narrowed to anything - no departure window, "
+            "no return window, no nights band - so a final sweep of it would price "
+            "the whole window the 02:00 sweep already does."
         )
     # choose() with a named trip applies no other filter, so anything reaching
     # here means the planner sized the trip at zero searches.
@@ -131,6 +138,7 @@ def jobs(
     chosen: list[str],
     depth: str = "",
     shards: int = 0,
+    final: bool = False,
 ) -> list[dict]:
     """One matrix entry per runner, sized from each trip's own plan.
 
@@ -153,7 +161,12 @@ def jobs(
         scenario = by_id[scenario_id]
         if depth:
             scenario = replace(scenario, depth=depth)
-        count = shards or shards_for(len(plan_searches(scenario)))
+        # Sized from the plan this slot will actually run. A final sweep is a
+        # fraction of the broad one - 31 searches against 85 on the real trip -
+        # and sizing it from `plan_searches` would deal those 31 across the five
+        # runners the broad shape needs, at four searches a runner.
+        planner = PLANS["final"] if final else plan_searches
+        count = shards or shards_for(len(planner(scenario)))
         entries += [
             {"scenario": scenario_id, "shard": index, "shard_count": count}
             for index in range(count)
@@ -165,7 +178,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scenarios", default="scenarios")
     parser.add_argument("--only", default="", help="A single trip id, from workflow_dispatch")
-    parser.add_argument("--focused", action="store_true", help="The focused afternoon slot")
+    parser.add_argument("--final", action="store_true",
+                        help="The 13:00/20:00 slot, which re-prices the narrowing")
     parser.add_argument("--watching", action="store_true", help="The four-hourly watch slot")
     parser.add_argument(
         "--shards",
@@ -178,7 +192,7 @@ def main() -> None:
     args = parser.parse_args()
 
     directory = Path(args.scenarios)
-    chosen = choose(directory, args.only, args.focused, args.data_dir, args.watching)
+    chosen = choose(directory, args.only, args.final, args.data_dir, args.watching)
     print("scenarios=" + json.dumps(chosen))
     # Only ever non-empty for a dispatch that named a trip and got nothing for
     # it. The workflow turns this into a failing job, so the run goes red saying
@@ -186,14 +200,14 @@ def main() -> None:
     print(
         "reason="
         + reason_for_nothing(
-            directory, args.only, args.focused, args.data_dir, args.watching
+            directory, args.only, args.final, args.data_dir, args.watching
         )
     )
     # One entry per runner, each carrying the count it is a share of. Emitted as
     # a single `include` list rather than as two matrix axes because the count
     # now differs per trip: a cross product of trips and shard indices cannot
     # give one trip five runners and another one.
-    print("jobs=" + json.dumps(jobs(directory, chosen, args.depth, max(0, args.shards))))
+    print("jobs=" + json.dumps(jobs(directory, chosen, args.depth, max(0, args.shards), args.final)))
 
 
 if __name__ == "__main__":

@@ -15,9 +15,23 @@ than draw a confident empty list.
 
 What it will not do matters as much as what it does. This moves the checkout by
 fast-forward only, and refuses - with a sentence, for a person to act on - when
-it cannot. No `--force`, no `--rebase`, no `--autostash`, no `checkout --`. A
-sweep is an hour of prices that cannot be observed again, and nothing running
-unattended may be able to discard one.
+it cannot. No `--force`, no `--rebase`, no `--autostash`. A sweep is an hour of
+prices that cannot be observed again, and nothing running unattended may be able
+to discard one.
+
+`take` is the one carve-out from that, and it is narrow by construction. The rule
+above forbids `checkout --` because it overwrites whatever is at the path. `take`
+only ever names paths that **do not exist in the working tree** - run directories
+the branch has and this machine does not - and re-checks that immediately before
+each one. A checkout restricted to a path with nothing at it cannot discard
+anything, so the rule's reason does not reach it.
+
+It exists because refusing to move the branch and refusing to hand over the
+results are different refusals, and only the first one was ever intended. On
+24 Aug a feature branch seven commits ahead of `origin/main` made `pull` refuse
+correctly, and two finished cloud sweeps sat unreachable behind a sentence with
+no button under it. `take` copies the directories and leaves HEAD exactly where
+it was; the files land staged, for a person to commit.
 """
 from __future__ import annotations
 
@@ -301,6 +315,62 @@ def pull(data_dir: Path, scenario_ids: list[str]) -> dict:
         "reason": "",
         "commits": before["behind"],
         "gained": {trip: stamps for trip, stamps in gained.items() if stamps},
+        **_shape(after),
+    }
+
+
+def take(data_dir: Path, scenario_ids: list[str]) -> dict:
+    """Copy the runs this machine is missing out of the branch, without merging.
+
+    The answer to a refusal that is about history rather than about results. It
+    checks out one path per missing run directory, so HEAD, the index's view of
+    every other file, and every local commit are left exactly as they were.
+
+    Deliberately makes no attempt to be `pull`. It brings run directories and
+    nothing else: not the probe's observations, not a code change, not the trip
+    files. So a checkout that has taken every run it was missing is still
+    reported as diverged and still behind, because it is - and a panel that said
+    otherwise would be lying about the next sweep's starting point.
+    """
+    fetch()
+    found = state(data_dir, scenario_ids)
+    if not found["known"]:
+        return {"took": False, "already_current": False, "reason": found["reason"],
+                "taken": {}, **_shape(found)}
+    if not found["missing_count"]:
+        return {"took": False, "already_current": True, "reason": "",
+                "taken": {}, **_shape(found)}
+
+    # Never None here: `missing` is only ever populated when the data directory
+    # has a counterpart on the branch to compare against.
+    data_root = _branch_path(data_dir)
+
+    taken: dict[str, list[str]] = {}
+    refused: list[str] = []
+    for scenario_id, stamps in found["missing"].items():
+        for stamp in stamps:
+            # `missing` is already branch-minus-local, so this can only fire on a
+            # run that appeared since `state` was computed a moment ago. Checked
+            # anyway: it is the property that makes this safe, and a property
+            # this module relies on is one it states rather than infers.
+            if (data_dir / "sweeps" / scenario_id / stamp).exists():
+                continue
+            code, _, stderr = _run(
+                "checkout", CLOUD_REF, "--", f"{data_root}/sweeps/{scenario_id}/{stamp}"
+            )
+            if code != 0:
+                # Named, not counted. One run failing to copy while five succeed
+                # is a different morning from none of them arriving.
+                refused.append(f"{scenario_id} {stamp}: {stderr.strip() or 'git gave no reason'}")
+                continue
+            taken.setdefault(scenario_id, []).append(stamp)
+
+    after = state(data_dir, scenario_ids)
+    return {
+        "took": bool(taken),
+        "already_current": False,
+        "reason": "git would not copy " + "; ".join(refused) if refused else "",
+        "taken": {trip: sorted(stamps, reverse=True) for trip, stamps in taken.items()},
         **_shape(after),
     }
 

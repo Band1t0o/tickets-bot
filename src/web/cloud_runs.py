@@ -129,11 +129,19 @@ def _seconds(started: str | None, ended: str | None) -> float | None:
         return None
 
 
-def dispatch(scenario_id: str, depth: str | None = None) -> None:
-    """Ask Actions to sweep one trip now."""
+def dispatch(scenario_id: str, depth: str | None = None, mode: str | None = None) -> None:
+    """Ask Actions to sweep one trip now.
+
+    `mode` is passed through rather than left to the workflow's default, because
+    a dispatch has no `github.event.schedule` for the plan step to read - so a
+    final sweep asked for from the page would arrive as a broad one and price
+    the whole window.
+    """
     command = ["workflow", "run", WORKFLOW, "-f", f"scenario={scenario_id}"]
     if depth:
         command += ["-f", f"depth={depth}"]
+    if mode:
+        command += ["-f", f"mode={mode}"]
     _gh(*command)
 
 
@@ -169,10 +177,13 @@ def queued() -> list[dict]:
         return [dict(entry) for entry in _queue]
 
 
-def enqueue(scenario_id: str, depth: str | None = None) -> dict:
+def enqueue(scenario_id: str, depth: str | None = None, mode: str | None = None) -> dict:
     entry = {
         "scenario_id": scenario_id,
         "depth": depth or "",
+        # Held with the run, so a queued final sweep is still a final sweep when
+        # the lane clears twenty minutes later.
+        "mode": mode or "",
         "queued_at": datetime.now(UTC).isoformat(),
         "error": "",
     }
@@ -224,7 +235,7 @@ def drain(wait=None) -> None:
             entry = dict(_queue[0])
         try:
             if not lane_is_busy():
-                dispatch(entry["scenario_id"], entry["depth"] or None)
+                dispatch(entry["scenario_id"], entry["depth"] or None, entry.get("mode") or None)
                 drop(entry["scenario_id"])
                 continue
         except CloudError as exc:

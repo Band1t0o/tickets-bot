@@ -17,6 +17,12 @@
             title="Stop after the searches already in flight">
       Stop this run
     </button>
+    <!-- Sets the default for every panel at once. The per-panel ⓘ overrides it
+         for one panel, which is the case this exists for: one mechanic you have
+         not learnt yet, on a screen you otherwise know. -->
+    <button class="small" id="hints-toggle" title="Show or hide the explanations on every panel">
+      Explanations: off
+    </button>
     <button class="small" id="theme-toggle" title="Toggle light / dark">◐</button>
   </div>
 
@@ -58,6 +64,7 @@
     <div class="tabs" id="tabs">
       <button data-tab="map" class="is-active">Map it out</button>
       <button data-tab="narrow">Narrow it down</button>
+      <button data-tab="final">Final sweeps</button>
       <button data-tab="follow">Follow it</button>
       <span class="spacer"></span>
       <button data-tab="setup" class="tabs__gear" title="Discord, the night sweep, the cloud and the sources">&#9881;</button>
@@ -155,12 +162,18 @@
         <div id="dirty-note" class="badge badge--warning" hidden></div>
         <div id="resume-note" class="small muted" hidden></div>
         <div id="leg-breakdown" class="small muted" style="margin-top:12px"></div>
-        <p class="panel__hint" style="margin:12px 0 0" id="explore-note">
-          <strong>Explore first</strong> prices every route in this trip on three spread-out
-          dates — <span id="explore-cost">a few minutes</span> rather than an hour and a half.
-          It will not find you a trip; it tells you which airports are hopeless, so the real
-          sweep can leave them out. The verdicts land in <em>Explore</em>, with a button to
-          drop an airport from the trip.
+        <!-- Split in two so collapsing the lesson does not take the number with
+             it. The cost is measured against the trip on screen and moves as the
+             trip does, which makes it an answer; the paragraph under it is the
+             same sentence every time. -->
+        <p class="panel__hint panel__hint--live small" style="margin:12px 0 0" id="explore-cost-line">
+          <strong>Explore first</strong> costs <span id="explore-cost">a few minutes</span>,
+          against an hour and a half for the real sweep.
+        </p>
+        <p class="panel__hint" style="margin:6px 0 0" id="explore-note">
+          It prices every route in this trip on three spread-out dates. It will not find you a
+          trip; it tells you which airports are hopeless, so the real sweep can leave them out.
+          The verdicts land in <em>Explore</em>, with a button to drop an airport from the trip.
         </p>
         <p class="panel__hint" style="margin:12px 0 0" id="run-note">
           Local runs use your machine; cloud runs are free, since the repo is public. What
@@ -186,35 +199,58 @@
       <div class="panel">
         <div class="panel__header">
           <h2>Worth searching?</h2>
-          <select id="explore-select"></select>
+          <span class="badge badge--muted" id="explore-source">—</span>
         </div>
-        <p class="panel__hint" id="explore-intro"></p>
-        <!--
-          A run searched one trip. Read against a trip edited since, it lists
-          airports that were never asked about and leaves out the ones that
-          were - which is exactly what happened, twice, and the tab drew it as
-          a table of perfectly ordinary verdicts.
-        -->
-        <!--
-          How much of the probe's plan was actually answered. First, because it
-          qualifies every verdict below it: a probe the site refused after 31 of
-          123 searches ranks airports in exactly the words a complete one uses.
-        -->
-        <div class="notice notice--warning" id="explore-coverage" hidden></div>
-        <div class="notice notice--warning" id="explore-mismatch" hidden></div>
-        <!-- Only drawn when the probe was asked to sample both stop orders. -->
-        <div class="notice" id="explore-orders" hidden></div>
+        <p class="panel__hint">
+          One row per airport of this trip, and what it costs against the alternatives standing
+          in the same place. Prices are the cheapest ever seen, so they are a floor to compare
+          airports by, never a fare to book. <strong>Not measured</strong> means the site never
+          answered — run it again rather than ruling that airport out.
+        </p>
         <div class="notice" id="explore-pending" hidden>
           <span id="explore-pending-text"></span>
           <span class="spacer"></span>
           <button class="small" id="explore-undo">Undo</button>
           <button class="small primary" id="explore-save">Save trip</button>
         </div>
-        <div id="explore-report"></div>
+        <div id="explore-verdicts"></div>
         <div class="empty" id="explore-empty">
           Nothing to judge yet. Run a probe or a sweep, and this tab will say which
           airports are worth keeping.
         </div>
+
+        <!--
+          Reading one run on its own, which is what this whole panel used to be.
+          It is still the right view for two questions the merged table cannot
+          answer - how much of *this* run's plan came back, and which way round
+          it found cheaper - so it keeps every notice it had. It is just no
+          longer the thing you must do first: the tab opens on the airports.
+        -->
+        <details class="disclosure" id="explore-one-run" style="margin-top:18px">
+          <summary class="small muted">Read one run on its own</summary>
+          <div class="row" style="margin:10px 0">
+            <label class="field">The run
+              <select id="explore-select"></select>
+            </label>
+          </div>
+          <p class="panel__hint panel__hint--live" id="explore-intro"></p>
+          <!--
+            A run searched one trip. Read against a trip edited since, it lists
+            airports that were never asked about and leaves out the ones that
+            were - which is exactly what happened, twice, and the tab drew it as
+            a table of perfectly ordinary verdicts.
+          -->
+          <!--
+            How much of the probe's plan was actually answered. First, because it
+            qualifies every verdict below it: a probe the site refused after 31 of
+            123 searches ranks airports in exactly the words a complete one uses.
+          -->
+          <div class="notice notice--warning" id="explore-coverage" hidden></div>
+          <div class="notice notice--warning" id="explore-mismatch" hidden></div>
+          <!-- Only drawn when the probe was asked to sample both stop orders. -->
+          <div class="notice" id="explore-orders" hidden></div>
+          <div id="explore-report"></div>
+        </details>
         <div class="row" style="margin-top:16px">
           <button id="explore-run-btn">Run a probe</button>
           <span class="muted small" id="explore-run-note"></span>
@@ -234,11 +270,25 @@
           <span class="badge badge--muted" id="narrow-state">the whole window</span>
         </div>
         <p class="panel__hint">
-          Not a second sweep and not a filter: this is what the nightly run searches. Three
-          constraints, intersected — so the searches go where the decision already is, and a
+          Three constraints, intersected — so the searches go where the decision already is, and a
           combination none of them can satisfy is refused here rather than swept for an hour
           and found empty. Legs already on disk stay readable both ways, under the table below.
         </p>
+        <p class="panel__hint">
+          <strong>These boxes do two things, and neither of them narrows the broad sweep.</strong>
+          They filter what you read on this step, and they are what a <em>final sweep</em> searches —
+          the step after this one, which re-prices them several times a day. The 02:00 run goes on
+          pricing the whole window whatever is typed here, so a cheaper week outside your choice is
+          still found and still shows up in the ranking below.
+        </p>
+        <!--
+          This paragraph used to say the opposite, in bold: "Both scheduled sweeps read these
+          boxes off the trip file, so a date outside them stops being priced at all." It was
+          true, and it was the bug. `plan_searches` read the narrowing, so saving one narrowed
+          every sweep including the nightly one, and the broad picture stopped being refreshed
+          the moment you decided anything. Measured on this trip on 24 Aug: two nightly runs of
+          48 searches against a window of 85, both filed as broad sweeps.
+        -->
         <div class="narrow-grid">
           <label>Leave between
             <span class="row">
@@ -263,6 +313,26 @@
             </span>
           </label>
         </div>
+        <!-- The chart the departure window is picked on, in the panel that owns
+             the field. It used to be a panel of its own with its own badge, its
+             own Save and its own vocabulary - "watching 01-08 to 01-12" against
+             "out 01-08–01-12" up here - and both wrote `focus_start`/`focus_end`.
+             One field, one control. Clicking two points fills the boxes above;
+             the panel's own Save is what writes them. -->
+        <h3 class="muted small" style="margin-top:22px">
+          Cheapest total by the day you leave
+          <span class="badge badge--muted" id="by-date-sweep"></span>
+        </h3>
+        <p class="panel__hint small">
+          Click two points to fill <em>Leave between</em> above. For a trip of several legs this
+          is the weakest of the three constraints — the total is a sum of legs priced on their
+          own days, and the flight home usually moves it more than the flight out. It is here to
+          be read before you narrow, not to narrow by on its own; the per-leg charts below are
+          where a trip is actually picked.
+        </p>
+        <div class="chart" id="chart-by-date"></div>
+        <p class="panel__hint panel__hint--live small" id="by-date-note"></p>
+
         <h3 class="muted small" style="margin-top:20px">How long in each place</h3>
         <p class="panel__hint small">
           The shape of the trip rather than a narrowing, and the reason the band above stops
@@ -274,7 +344,7 @@
         </p>
         <div class="narrow-grid" id="narrow-stays"></div>
         <p class="small muted" id="narrow-stays-sweep" hidden></p>
-        <p class="panel__hint small" id="narrow-cost"></p>
+        <p class="panel__hint panel__hint--live small" id="narrow-cost"></p>
         <div class="row" style="margin-top:12px">
           <button class="small primary" id="narrow-save">Save</button>
           <button class="small" id="narrow-clear">Clear it</button>
@@ -307,6 +377,11 @@
         <div class="row" style="margin-top:14px">
           <button class="small" id="cursor-snap">Snap to the cheapest that fits</button>
           <button class="small primary" id="cursor-watch">Follow this trip</button>
+          <!-- The ranking below answers a different question about the same
+               trip - what else was near it, and whether it is open jaw - and
+               finding your own pick among fifty rows by eye is not a thing to
+               ask of anyone. -->
+          <button class="small" id="cursor-in-table">Find it in the table</button>
           <span class="spacer"></span>
           <span class="small" id="cursor-message"></span>
         </div>
@@ -317,31 +392,6 @@
           typed a month ago should not be what hides it. Drag wherever you like — the badges say
           what a pick breaks, and following it works either way.
         </p>
-      </div>
-    </section>
-
-    <!-- Cheapest total by departure date, and the focus picked on it -->
-    <section data-panel="dates" data-step="narrow" hidden>
-      <div class="panel">
-        <div class="panel__header">
-          <h2>Cheapest total by departure date</h2>
-          <span class="badge badge--muted" id="focus-state">watching the whole window</span>
-        </div>
-        <p class="panel__hint">
-          Which day to leave on. Lowest point is labelled. <strong>Click two points</strong> to
-          mark the days worth watching closely — the afternoon sweep then prices only those,
-          which is a fraction of the searches and finishes in minutes rather than an hour.
-          The morning sweep keeps covering the whole window, so a better date opening up
-          outside your pick is still found.
-        </p>
-        <div class="chart" id="chart-by-date"></div>
-        <div class="row" id="focus-controls" style="margin-top:12px">
-          <span class="small" id="focus-pick">No days picked yet.</span>
-          <span class="spacer"></span>
-          <button class="small primary" id="focus-save" disabled>Watch these dates</button>
-          <button class="small" id="focus-clear">Watch the whole window</button>
-        </div>
-        <p class="panel__hint small" id="by-date-note"></p>
       </div>
     </section>
 
@@ -362,6 +412,11 @@
         <div class="notice notice--warning cloud-sync" id="cloud-sync" hidden>
           <span id="cloud-sync-text"></span>
           <button class="small" id="cloud-sync-get">Get them</button>
+          <!-- Shown instead of the one above when the checkout has commits
+               of its own. A fast-forward is genuinely impossible then, but
+               the runs it is refusing are directories this machine does not
+               have at all, and copying those moves no history. -->
+          <button class="small" id="cloud-sync-take" hidden>Just get the results</button>
         </div>
         <div class="stat-row" id="headline"></div>
         <!-- Only drawn when the sweep behind these prices had holes in it. -->
@@ -392,7 +447,7 @@
           <span class="small muted" id="filter-count"></span>
           <button class="small" id="filter-reset" hidden>Reset</button>
         </div>
-        <p class="panel__hint small" id="filter-note" hidden></p>
+        <p class="panel__hint panel__hint--live small" id="filter-note" hidden></p>
 
         <div class="table-scroll" id="results-scroll">
           <table class="data" id="results-table">
@@ -400,12 +455,131 @@
               <tr>
                 <th>Route</th><th>Departs</th><th>Returns</th>
                 <th>Airlines</th><th>Type</th><th>Baggage</th><th class="num">Total incl. bags</th>
+                <!-- Unlabelled, like the watch tables: the button in it says
+                     what it does, and a header over one control is a word that
+                     has to be read on every row it does not describe. -->
+                <th></th>
               </tr>
             </thead>
             <tbody></tbody>
           </table>
         </div>
         <div class="empty" id="results-empty">Run a sweep to see itineraries.</div>
+      </div>
+    </section>
+
+    <!-- ------------------------------------------------------- Final sweeps -->
+    <!--
+      The step the narrowing was always missing. "Narrow it down" reads a broad
+      sweep and decides which trip you mean to take; this one prices that
+      decision, over and over, until you book.
+
+      They used to be the same thing, and that was the bug. The narrowing lived
+      on the trip file and `plan_searches` read it, so saving one narrowed every
+      sweep — the 02:00 run included. Measured on this trip on 24 Aug: two
+      nightly runs of 48 searches against a window of 85, both filed as broad
+      sweeps because a status only ever recorded the focus and this trip was
+      narrowed by a return window. The broad picture stopped being refreshed and
+      nothing on the page said so.
+    -->
+    <section data-panel="final-plan" data-step="final" hidden>
+      <div class="panel">
+        <div class="panel__header">
+          <h2>Price the trip you have chosen</h2>
+          <span class="badge badge--muted" id="final-state">nothing narrowed yet</span>
+        </div>
+        <p class="panel__hint">
+          A sweep of the dates you settled on under <strong>Narrow it down</strong>, and only
+          those. A fraction of the searches, so it can run several times a day against a site
+          that answers about 120 per address — which is what makes it worth having at all.
+          The point is not one more price: it is the same price on Monday, Tuesday and
+          Wednesday, so a drop is visible as a drop.
+        </p>
+        <p class="panel__hint">
+          <strong>It does not replace the broad sweep.</strong> That one still prices the whole
+          window every night, and it is the only thing that can still tell you a better week
+          exists outside what you have chosen — the question a narrowing was decided against,
+          and the one that goes stale fastest.
+        </p>
+        <!-- What it will search, written from the trip rather than restated
+             here, and a link back to the one place it can be changed. Two
+             controls for one field is the mistake the by-date chart was moved
+             into the narrowing panel to end. -->
+        <p class="panel__hint panel__hint--live" id="final-narrowing"></p>
+        <p class="panel__hint panel__hint--live" id="final-cost"></p>
+        <div class="row" style="margin-top:12px">
+          <label class="field small">Depth
+            <select id="final-depth">
+              <option value="deep" selected>deep — every day</option>
+              <option value="standard">standard — every 3 days</option>
+              <option value="quick">quick — every 7 days</option>
+            </select>
+          </label>
+          <button class="small primary" id="final-run-btn">Run it here</button>
+          <button class="small" id="final-run-cloud-btn">Run it in the cloud</button>
+          <button class="small" id="final-stop-btn" hidden>Stop</button>
+          <span class="spacer"></span>
+          <span class="small" id="final-run-note"></span>
+        </div>
+        <p class="small" id="final-error" hidden></p>
+        <p class="panel__hint small">
+          The cloud runs one of these at 13:00 and again at 20:00 UTC, for every trip that has
+          been narrowed to something. A trip narrowed to nothing is skipped rather than swept
+          twice — the 02:00 run already prices its whole window.
+        </p>
+      </div>
+    </section>
+
+    <section data-panel="final-results" data-step="final" hidden>
+      <div class="panel">
+        <div class="panel__header">
+          <h2>What the narrowing costs now</h2>
+          <select id="final-sweep-select"></select>
+        </div>
+        <p class="panel__hint">
+          The same ranking as the step before, over the narrowed runs instead of the broad
+          ones. Read it for the question the broad table cannot answer: among the trips that
+          fit what you decided, is a <em>different</em> one cheaper today than the one you had
+          in mind?
+        </p>
+        <div class="stat-row" id="final-headline"></div>
+        <div class="notice notice--warning" id="final-completeness" hidden></div>
+        <div class="small" id="final-verification" style="margin:12px 0"></div>
+
+        <div class="row results-filters" id="final-results-filters">
+          <label class="field">From
+            <select id="final-filter-from"><option value="">any airport</option></select>
+          </label>
+          <label class="field">Back to
+            <select id="final-filter-to"><option value="">any airport</option></select>
+          </label>
+          <label class="check small">
+            <input type="checkbox" id="final-filter-bags"> Bags included
+          </label>
+          <span class="spacer"></span>
+          <label class="check small" id="final-filter-window-wrap" hidden>
+            <input type="checkbox" id="final-filter-window"> Ignore my narrowing
+          </label>
+          <span class="small muted" id="final-filter-count"></span>
+          <button class="small" id="final-filter-reset" hidden>Reset</button>
+        </div>
+        <p class="panel__hint panel__hint--live small" id="final-filter-note" hidden></p>
+
+        <div class="table-scroll" id="final-results-scroll">
+          <table class="data" id="final-results-table">
+            <thead>
+              <tr>
+                <th>Route</th><th>Departs</th><th>Returns</th>
+                <th>Airlines</th><th>Type</th><th>Baggage</th><th class="num">Total incl. bags</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="empty" id="final-results-empty">
+          No final sweep yet. Run one above to price the dates you have narrowed to.
+        </div>
       </div>
     </section>
 
@@ -531,7 +705,7 @@
 
         <h3 class="muted small" style="margin-top:20px">Everything it will run tonight</h3>
         <div id="night-all" class="night-list small"></div>
-        <p class="panel__hint small" id="night-when" style="margin:12px 0 0"></p>
+        <p class="panel__hint panel__hint--live small" id="night-when" style="margin:12px 0 0"></p>
       </div>
     </section>
 
@@ -581,6 +755,7 @@
         <div class="notice notice--warning cloud-sync" id="cloud-sync-cloud" hidden>
           <span id="cloud-sync-cloud-text"></span>
           <button class="small" id="cloud-sync-cloud-get">Get them</button>
+          <button class="small" id="cloud-sync-cloud-take" hidden>Just get the results</button>
         </div>
         <div class="small muted" id="cloud-sync-ok" hidden></div>
       </div>
@@ -654,7 +829,22 @@
         assembled: you saw Vienna to Haneda look good on the 10th and the 12th,
         and Manila home on the 2nd, and you want to know whether *those* move.
         A whole pinned trip is the heavier question and sits below.
+
+        Above both, one line saying what is being followed and what it costs.
+        The two panels share one budget and one run - the cap is on the run, not
+        on either panel's share of it - and both used to carry a badge of the
+        whole figure, so the step read as though it cost twice what it does.
       -->
+      <div class="notice" id="follow-summary">
+        <span id="follow-summary-text">Nothing is being followed yet.</span>
+        <p class="small" style="margin:8px 0 0">
+          <strong>Nothing here moves when you change the trip or the narrowing.</strong>
+          A follow is pinned to the exact dates it was picked on and is re-priced on those,
+          whatever the trip on the other tabs has since become. Editing a stay range or a
+          departure window changes what the next <em>sweep</em> prices, and nothing on this tab.
+        </p>
+      </div>
+
       <div class="panel">
         <div class="panel__header">
           <h2>Flights you are following</h2>
@@ -672,16 +862,19 @@
             <thead>
               <tr>
                 <th>Flight</th><th>Departs</th><th class="num">When picked</th>
-                <th class="num">Now</th><th class="num">Change</th><th></th>
+                <th class="num">Now</th><th class="num">Change</th><th></th><th></th>
               </tr>
             </thead>
             <tbody></tbody>
           </table>
         </div>
+        <!-- The old wording sent you to a "Results" tab, which stopped existing
+             when the seven tabs became three steps. Naming the real path is the
+             whole job of an empty state. -->
         <div class="empty" id="leg-watch-empty">
-          Nothing followed yet. Open a trip in <strong>Results</strong>, expand its legs,
-          and press <strong>Follow</strong> on the flight you care about — or add one by
-          hand below.
+          Nothing followed yet. Go to <strong>Narrow it down</strong> → <strong>Every flight,
+          priced on its own</strong>, drag the markers to the day you like, and press
+          <strong>Follow</strong> on that leg — or add one by hand below.
         </div>
         <div class="row" id="leg-watch-add" style="margin-top:16px">
           <label class="field">From<input type="text" id="leg-watch-from" maxlength="3"
@@ -696,15 +889,18 @@
 
       <div class="panel">
         <div class="panel__header">
-          <h2>Days you are watching</h2>
+          <!-- "Days you are watching" was the wrong name twice over: each of
+               these is a whole trip and not a day, and "days" is now what the
+               previous step calls the departure window it narrows by. -->
+          <h2>Trips you are following</h2>
           <span class="badge badge--muted" id="watch-cost">—</span>
         </div>
         <p class="panel__hint">
           Each of these is a whole trip pinned to its exact dates, re-priced every four
           hours by its own cloud run. Lines share one set of axes on purpose: the question
-          is which of these days to book, and that is a comparison. A point drawn hollow
+          is which of these to book, and that is a comparison. A point drawn hollow
           came from a run the site refused part of — the gap is worth seeing, the price in
-          it is not a price. Discord hears about a day only when it falls by more than 1%,
+          it is not a price. Discord hears about one only when it falls by more than 1%,
           because this site moves fares by a few crowns at a time and those are not news.
         </p>
         <div class="chart" id="watch-chart"></div>
@@ -720,29 +916,39 @@
           </table>
         </div>
         <div class="empty" id="watch-empty">
-          Nothing is being watched yet. Pick a day below and it will be re-priced every
-          few hours from then on.
+          Nothing followed yet. Build a trip on <strong>Narrow it down</strong> →
+          <strong>Every flight, priced on its own</strong> and press <strong>Follow this
+          trip</strong> — or take one off the last sweep's ranking below.
         </div>
         <div class="row" style="margin-top:16px">
           <button id="watch-run-btn">Check now</button>
           <span class="muted small" id="watch-run-note"></span>
         </div>
         <div id="watch-error" class="panel-error badge badge--error" hidden></div>
-      </div>
 
-      <div class="panel">
-        <div class="panel__header">
-          <h2>Pick a day from the last sweep</h2>
-          <select id="watch-sweep-select"></select>
-        </div>
-        <p class="panel__hint">
-          The cheapest trip found on each departure date, cheapest first. Picking one pins
-          that trip's leg dates — so a nine-day stay in Japan stays nine days — while still
-          pricing every airport on them, which is what lets the watch notice that Frankfurt
-          undercut Vienna overnight.
-        </p>
-        <div class="notice notice--warning" id="watch-coverage" hidden></div>
-        <div id="watch-candidates"></div>
+        <!--
+          A panel of its own until now, which made it a third place to pick a
+          trip competing with the two that came before it. It is the fallback
+          path: the ranking only offers combinations that obeyed the stay ranges,
+          and the charts on the previous step offer every combination there is.
+          So it folds shut, inside the panel whose list it adds to.
+        -->
+        <details class="disclosure" id="watch-from-sweep" style="margin-top:18px">
+          <summary class="small muted">Add one from a sweep's ranking</summary>
+          <div class="row" style="margin:10px 0">
+            <label class="field">From the run
+              <select id="watch-sweep-select"></select>
+            </label>
+          </div>
+          <p class="panel__hint small">
+            The cheapest trip found on each departure date, cheapest first. Picking one pins
+            that trip's leg dates — so a nine-day stay in Japan stays nine days — while still
+            pricing every airport on them, which is what lets the watch notice that Frankfurt
+            undercut Vienna overnight.
+          </p>
+          <div class="notice notice--warning" id="watch-coverage" hidden></div>
+          <div id="watch-candidates"></div>
+        </details>
       </div>
     </section>
 
@@ -756,7 +962,7 @@
           scraper than about the market.
         </p>
         <div class="chart" id="chart-history"></div>
-        <p class="panel__hint small" id="history-note"></p>
+        <p class="panel__hint panel__hint--live small" id="history-note"></p>
       </div>
 
       <div class="panel">
