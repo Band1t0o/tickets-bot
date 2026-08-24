@@ -172,20 +172,134 @@ Explore narrows a trip by airport. A **focus** narrows it by date, and it is the
 same idea: once a broad sweep has drawn the price-by-date curve, most of the window is not worth
 pricing again tonight.
 
-Click two points on the **Prices** chart and press **Watch these dates**. That writes `focus_start`
-and `focus_end` onto the trip, and the planner bounds the *first* leg to them -- the later legs
-follow through the stay ranges, so the three can never contradict each other and a focused sweep can
-still complete a whole trip. Five departure days on the trip above is **195 searches, ~48 min**,
-against 483 and ~119.
+It is the **Leave between** pair in *When you actually want to go*, on **Narrow it down**. Type the
+two dates, or click two points on the cheapest-by-day chart in the same panel to fill them, and press
+**Save**. That writes `focus_start` and `focus_end` onto the trip, and the planner bounds the *first*
+leg to them -- the later legs follow through the stay ranges, so the three can never contradict each
+other and a focused sweep can still complete a whole trip. Five departure days on the trip above is
+**195 searches, ~48 min**, against 483 and ~119.
 
-The picking is done on the chart rather than in two date boxes because that is where the decision is
-made, and a date box beside a chart is a second place to get the same answer wrong.
+The chart is in the panel rather than beside it because a click and a keystroke were setting one
+field through two controls. It used to be a panel of its own, with its own badge (*watching 2027-01-08
+to 2027-01-12*), its own Save (*Watch these dates*) and its own words for the range the boxes two
+panels above already called *out 01-08--01-12*. Neither control knew what the other had done. The
+chart fills the boxes now, and the narrowing panel's one Save writes them.
 
-**The broad sweep does not stop.** 02:00 keeps covering the whole window, so a better date opening
-up outside the focus is still found; 13:00 runs the focus. A focused sweep is also never charted
-beside a broad one -- its cheapest is the cheapest *of those days*, and joining the two would draw a
-step no fare ever made, which is the same mistake `is_comparable` already refuses for an exploration
-pass.
+For a trip of several legs this curve is the weakest of the three constraints, and the panel says so:
+the total is a sum of legs priced on their own days, and the flight home usually moves it more than
+the flight out. *Every flight, priced on its own* is where a trip is actually picked.
+
+A narrowed sweep is never charted beside a broad one -- its cheapest is the cheapest *of those days*,
+and joining the two would draw a step no fare ever made, which is the same mistake `is_comparable`
+already refuses for an exploration pass. They are two lines on one chart, never one line.
+
+**The broad sweep stays broad.** It did not until 24 August, and the bug was structural: `plan_searches`
+read the narrowing off the trip file, so saving one silently narrowed *every* sweep -- the 02:00 run
+included -- and the broad picture simply stopped being refreshed. Nothing on the page said so, because
+a status recorded only the focus, and this trip was narrowed by a return window. Measured that morning
+on `japan-philippines`: two nightly runs of **48 searches against a window of 85**, both filed as broad
+sweeps.
+
+The narrowing is now the setting of a **separate sweep**, with its own mode, its own tab and its own
+line on the trend chart. `plan_searches` prices the window and nothing on the trip may shrink it;
+`plan_final` prices the narrowing and refuses a trip that has none. Same arithmetic, one flag apart --
+`_leg_window(scenario, leg_index, narrowed)` in [src/sweep/planner.py](src/sweep/planner.py) is still
+the one place the four constraints meet.
+
+### Final sweeps
+
+The step after narrowing, and the reason narrowing is worth doing more than once. Once the decision has
+settled, what you want is not one more price but the *same* price on Monday, Tuesday and Wednesday, so
+a drop is visible as a drop. On the real trip that is **31 searches against 85** -- cheap enough to run
+three times a day against a site that answers about 120 per address.
+
+| | prices | when |
+|---|---|---|
+| broad sweep (`--mode sweep`) | the whole window | 02:00 UTC, and on demand from *Map it out* |
+| final sweep (`--mode final`) | only what you narrowed to | 13:00 and 20:00 UTC, and on demand from *Final sweeps* |
+
+Both land in `data/sweeps/<id>/<stamp>/` and are told apart by `status.json`, which now records all
+three constraints rather than the focus alone:
+
+```json
+"narrowing": {"focus": ["2027-01-08", "2027-01-12"],
+              "return_focus": ["2027-02-01", "2027-02-12"],
+              "total_days": [24, 28]}
+```
+
+A broad run writes three `null`s **even on a narrowed trip**, because that is what it searched: the
+field says what happened, not what the trip said at the time. Reading it the other way round is the
+whole of the bug above. Runs committed before the split carry `focus` and no `narrowing`, and
+`narrowing_of` reads them by it -- honest about what they knew, rather than retired or silently
+promoted onto the broad line.
+
+Each population keeps its own alert high-water mark in `best.json` — `cheapest` for a broad sweep,
+`final:cheapest` for a narrowed one. One shared entry was harmless only while every sweep was
+narrowed: after the split a final run recorded 25,967 over the broad runs' 21,445, and the next broad
+sweep would have been announced as a 4,500 CZK drop that no fare ever made. With `notify_quiet` off,
+every sweep posts whatever it found, so three slots is three Discord messages a day; turn it on and
+each population reports only a genuine improvement against its own mark.
+
+The 13:00 and 20:00 slots skip a trip narrowed to nothing rather than sweeping it twice, and unlike the
+old focused slot they carry **no health gate**. That gate existed because the afternoon used to re-run
+the whole window at a site the morning had just shown to be refusing. Thirty-one searches is not that
+run, and the days it prices are the ones a booking decision is waiting on.
+
+### And when you already know roughly when
+
+A focus says when you leave. By the time a broad sweep has been read a few times the decision has
+usually narrowed by things no sweep knows -- the day work starts again, someone else's leave, a flat
+that is let from the 9th -- and what is left is not one date range but three constraints at once:
+
+| Field | Bounds | Example |
+|---|---|---|
+| `focus_start` / `focus_end` | when the **first** leg departs | leave 8-12 January |
+| `return_focus_start` / `return_focus_end` | when the **final** leg departs | home 4-8 February |
+| `total_days` | nights from the first leg's departure to the final leg's | 22-26 |
+
+The planner intersects all three with the window rather than choosing between them, in the one place
+that already decides when a leg may depart (`_leg_window`), and `combine.py` applies all three when
+reading a sweep back. Two of the three is not a smaller version of this — with only the return window
+and the nights band applied, *the cheapest trip that fits your narrowing* meant a trip leaving two
+days outside the window typed into the box above it. On the trip above, a deep sweep of the
+whole window is **198 searches, ~49 min**; with those three set it is **44, ~11**.
+
+**None of it is guessed at the edges.** 8 January is inside the departure window and still never
+searched: at the longest stays it puts you home on the 3rd, a day before the return window opens, so
+every fare found on it would belong to an itinerary that cannot be built. That is the same
+orphan-search bug `_leg_window` was written for, arriving from the other end.
+
+A nights band on its own does **not** shrink the plan, and that is not an oversight. It is a
+relative constraint -- with neither end pinned the first leg may still depart anywhere in the window,
+so every date of every later leg is reachable from some first-leg date and none can be dropped. It
+constrains which chains are valid, not which searches are worth running, and `combine.py` is where
+it bites. Pin either end and it starts narrowing the plan as well.
+
+**A narrowing nothing can satisfy is refused by name**, because the alternative is a sweep that
+spends every search, chains nothing, and reports the same emptiness the site gives when it has no
+seats:
+
+```
+30-35 nights away is unreachable: the stays allow 18-26
+(10-13 at Japan + 8-13 at Philippines); change the nights or the stays
+```
+
+**It is applied inside the traversal, never to the finished list.** Measured on the 21 August sweep:
+with the return window at 4-8 February the unnarrowed traversal kept a 3 February trip and pruned an
+identically priced 6 February one, so filtering afterwards would have reported nothing available at
+all. This is the same reason `from_airport` is applied inside `combine_all` rather than to its
+result.
+
+Reading is separable from searching, on the page as well as in the API. **Ignore my narrowing** in
+the results filter row -- `?window=all` on `/results`, `/by-date` and `/candidates` -- shows every
+trip the sweep can build, including the ones you said you did not want, which is what you gave up by
+narrowing. The tick appears only when there is a narrowing to ignore. A broad sweep committed months
+before any of this existed therefore stays fully readable. It is a lens over legs already on disk
+and never runs a
+search. The narrowing -- all three parts of it, focus included -- is read from the **live** trip
+rather than the sweep's snapshot: the sweeps worth narrowing are precisely the ones that ran before
+you narrowed. What a run actually searched under is in its `status.json`, which is what
+`is_comparable` reads, so nothing that needed the snapshot's copy lost it.
 
 ### How complete was it?
 
@@ -215,8 +329,11 @@ Two changes, because either alone still leaves a way to be misled:
 - **Every sweep records its trip.** `scenario.json` is written into the sweep directory before the
   first search, and Explore, Results and Prices all read a run against *that* — so an old sweep keeps
   showing its flights after you change airports, and the Explore tab says
-  `BER, KRK, KTW, MUC never searched in this run` instead of leaving them out. Runs whose airports
-  differ from the current trip are marked `· different trip` in the picker, before they are opened.
+  `BER, KRK, KTW, MUC never searched in this run` instead of leaving them out. Runs searched under
+  something the trip no longer says are marked in every picker before they are opened, naming which
+  part differs: `· ⚠ different airports · different stays`, or `· ⚠ a different trip` when all of it
+  does. Airports, stay ranges and the window are each checked, because all three drift and a run of
+  one trip read as a run of another is how a headline price ends up thousands out.
   Bag estimate, preferred origins and the alert threshold are still read from the current trip:
   those are how a result is read, not what was searched.
 
@@ -539,10 +656,103 @@ Two conclusions the data supports, both of which contradict the intuition that p
 
 `make ui`, or the **Flight watcher** desktop shortcut ([start-ui.bat](start-ui.bat)).
 
-Five tabs: **Search** (build a trip), **Explore** (which airports are worth searching, and where you
-narrow the trip), **Results** (cheapest same-airport and cheapest open-jaw side by side, then every
-itinerary, expandable into legs), **Prices** (cheapest total by departure date — *when* to fly; best
-total over time — *whether to book now*; and the probe table), **Sources**.
+Three steps and a gear, in the order the work is actually done:
+
+| Step | Holds | Answers |
+|---|---|---|
+| **Map it out** | Search, Explore | what trip is this, and which airports are worth pricing |
+| **Narrow it down** | the narrowing (with the cheapest-by-day chart inside it), every leg priced separately, the itinerary table | *which days, and which trip* |
+| **Final sweeps** | what a narrowed sweep would search and what it costs, the runs it has made, their ranking | *is the trip I chose getting cheaper* |
+| **Follow it** | flights and trips you are following, best total over time, the volatility probe | *is it moving, should I book now* |
+| ⚙ **Setup** | Discord, night sweep, Cloud, Sources | none of the above |
+
+It was seven tabs, one per panel, which read as a list of screens rather than as an order. Two of
+them were the same panel twice: **Prices** and **Watch** both drew a price history and neither said
+which question it was answering. They are split by question now rather than by data — the by-date
+chart says which days and sits with the narrowing, the history chart and the probe say whether to
+book now and sit with what you are following, and neither step shows both.
+
+Sections carry a `data-step`; several share one. `data-panel` stays as each panel's own name, since
+that is what every renderer, test and error box already addresses them by, and `showTab` accepts
+either — asked for a panel it opens that panel's step and scrolls to it, which is what a finished
+sweep opening Results and a save error opening Search both need.
+
+**Narrow it down** and **Final sweeps** draw the same ranking from one set of renderers, pointed at
+different runs. Each is a `resultsView` naming the ids it owns, the run it has selected and the modes
+its picker may offer; the ids differ only by a `final-` prefix, so a panel added to one and forgotten
+in the other shows up as a missing element rather than as the two quietly sharing a control.
+
+**Every step that lists runs owns its selection** — `state.stamp`, `state.finalStamp`,
+`state.watchStamp`, and the probe's `state.exploreStamp`. One shared stamp is how the watch picker
+came to show whichever run another step had last chosen. Narrow it down offers only broad runs and
+Final sweeps only narrowed ones, because reading the wrong one puts a narrowed run's cheapest under a
+heading that says it is the trip's cheapest — and at the same depth on the same day the two are
+indistinguishable in a list. **Follow it** deliberately offers both, prefixed `final ·`, and defaults
+to the newest narrowed run: by the time you are pinning days, that is the freshest pricing of the days
+you care about.
+
+### The explanations are on demand
+
+Every panel here explains itself, and most of those explanations record a failure that cost a day.
+They were also the first paragraph on every panel of a screen already understood, which pushed the
+actual numbers below the fold.
+
+So each panel has a **What this is for** button, and the strip at the top has one switch that sets
+the default for all of them. It starts off. A per-panel choice is remembered; flipping the switch
+clears them, because a choice made against the old default means the opposite under the new one.
+
+The line it holds is between **teaching and telling**:
+
+| | Collapses | Example |
+|---|---|---|
+| `.panel__hint` | yes | *"A sweep of the dates you settled on under Narrow it down, and only those…"* |
+| `.panel__hint--live` | **no** | *"A deep sweep of this is 31 searches (~8 min), against 85…"* |
+| `.notice`, `.badge` | **no** | *"1 cloud run is on the branch but not on this machine"* |
+
+Anything a renderer writes into is an answer about the run in front of you and stays whatever the
+switch says. A panel whose only hints are live ones gets no button at all, because a control that
+does nothing is worse than no control.
+
+The prose is hidden by a class on the panel rather than `hidden` on the paragraph, so it stays in the
+DOM and find-in-page still reaches it.
+
+### Every flight, priced on its own
+
+Every other chart in this app is about the *total*. That is the right shape for choosing a departure
+date and the wrong one for choosing a trip: a total cannot show you that the flight out is flat all
+January while the one home has a single cheap Thursday, and that reading is exactly what lets a
+person pick a combination the ranking would never offer — because the ranking may only offer
+combinations that obey the stay ranges.
+
+So **Narrow it down** draws one chart per leg, stacked on one shared date axis, with a draggable
+marker on each. A vertical slice down the stack is one trip; the readout above says what it costs,
+what split it implies, and how many nights it is.
+
+**Nothing is enforced.** Drag a marker into a fifteen-night Japan stay against a 10-13 range and an
+amber badge names the rule; the price is still totalled, and **Follow this trip** still works. The
+stay ranges exist so a sweep knows what to price, and a range typed a month ago is not evidence that
+a stay is wrong — it is only a statement about where to look. *Snap to the cheapest that fits* is
+there to argue with, and takes its answer from `/results?window=narrow` rather than working one out
+here, so it always lands on exactly the itinerary the table calls cheapest.
+
+The one pick the panel refuses is a leg departing before the one before it has arrived. That is not
+a preference, and no sweep, watch or airline could price it.
+
+Following a rule-breaking pick used to be refused at the save. `_validate_watches` checked the stay
+ranges, on the sound-until-it-wasn't grounds that the combiner could never close such a chain and
+the watch would report nothing every four hours. `watch._admitting` now widens the stays to whatever
+a candidate pinned before pricing it — per candidate, so one watch's widening cannot decide
+another's price — and drops the narrowing entirely, since a watch's dates are already chosen and
+leaving it on would blank every followed trip the moment the window moved.
+
+A leg's name expands into one line per airport pair, capped at six because that is how many chart
+colours were validated in both themes; the rest are counted rather than drawn in a colour that lies.
+
+**A date that sold nothing and a date never asked about do not draw the same.** The first is a fact
+about the route and gets a tick on the floor of the plot; the second is a hole in the sweep and gets
+nothing at all. `/by-leg` reads `searches.jsonl` alongside `legs.jsonl` for exactly this, and the
+line breaks across a gap rather than bridging it — joining the two sides would draw a price for
+every day in between.
 
 **Explore** reads verdicts from any run that still has its legs on disk, not only from probes — a
 full sweep priced the same routes on far more dates, so its verdict is the better one when you have
@@ -619,7 +829,7 @@ src/
   sweep/planner.py        scenario -> searches, and the routes a trip requires
   sweep/runner.py         concurrent execution, sweep quality, comparability
   sweep/explore.py        one probe -> a verdict per airport, and what went unsearched
-  combine.py              legs -> itineraries
+  combine.py              legs -> itineraries, and the narrowing applied to them
   alerts.py               which itineraries are worth reporting
   verify.py               re-price the shortlist on a second site
   probe.py                volatility sampling and report

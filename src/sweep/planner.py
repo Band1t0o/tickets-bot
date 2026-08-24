@@ -103,8 +103,20 @@ def _spread(start: date, end: date, count: int) -> list[date]:
     return sorted(start + timedelta(days=offset) for offset in offsets)
 
 
-def _leg_window(scenario: Scenario, leg_index: int) -> tuple[date, date]:
+def _leg_window(scenario: Scenario, leg_index: int, narrowed: bool = False) -> tuple[date, date]:
     """First and last date leg `leg_index` may depart.
+
+    `narrowed` decides whether the trip's narrowing is one of the bounds. It is
+    the difference between the two sweeps this app runs, and it used not to
+    exist: the narrowing was always applied, so the moment one was saved every
+    sweep became a narrowed sweep - including the nightly one whose whole job is
+    to keep saying what the rest of the window costs. Measured on the committed
+    japan-philippines trip on 24 Aug, the two nightly runs planned 48 searches
+    against a window of 85, and nothing on the page said so.
+
+    Off is the broad sweep and the exploration probe: the window, the stays, and
+    nothing a decision has added since. On is `plan_final`, which prices the
+    decision itself.
 
     Shared by both planners for the same reason `airport_pools` is shared by the
     planner and the combiner: two copies of this arithmetic could disagree about
@@ -120,24 +132,94 @@ def _leg_window(scenario: Scenario, leg_index: int) -> tuple[date, date]:
     neither could complete a trip, so the probe judged three airports on one
     reading instead of three.
 
+    Four things can narrow a leg, and this is the one place they meet:
+
+      window        the horizon above, always
+      focus         when you leave, propagated forward through the stay ranges
+      return focus  when you fly home, propagated *backward* through them
+      total_days    how long you are away, which bounds the two against each other
+
+    They are intersected, never chosen between. That is what stops them
+    contradicting: a leg's window can be narrowed to nothing by a combination
+    that makes no sense, and `Scenario.validate` refuses those by name before a
+    sweep is ever planned. Propagating backward needs `max_stay_after` for the
+    early bound and `remaining_min_stay` for the late one - the longest and
+    shortest a leg can be from the final one - and getting those two the wrong
+    way round widens the plan silently instead of narrowing it, which is why
+    they are named rather than inlined.
+
     `max(start, end)` keeps a degenerate window - one shorter than the stays it
     declares - planning its first date rather than nothing at all. A window that
     tight is rejected by `validate()`, but the planners are also called directly.
     """
     horizon = scenario.window_end + timedelta(days=RETURN_SLACK_DAYS)
-    start = _focus_start(scenario) + timedelta(days=scenario.earliest_departure(leg_index))
+    start = _focus_start(scenario, narrowed) + timedelta(
+        days=scenario.earliest_departure(leg_index)
+    )
     end = horizon - timedelta(days=scenario.remaining_min_stay(leg_index))
+
+    if not narrowed:
+        # The window and the stays are the whole of a broad plan. Returning here
+        # rather than guarding each bound below keeps the three narrowing rules
+        # in one block, where they can go on being read as the one place they
+        # meet - which is what the rest of this docstring is about.
+        return start, max(start, end)
+
     if scenario.focus_end is not None:
         # What a focused first leg can still reach, taking the longest stays.
         # Tighter than the horizon inside a focus and looser outside it, so the
         # binding bound is always the smaller of the two.
         end = min(end, scenario.focus_end + timedelta(days=scenario.max_stay_before(leg_index)))
+
+    if scenario.return_focus_start is not None:
+        # Backward from the day you fly home. The final leg is clamped to the
+        # return window itself; both expressions collapse to exactly that for
+        # it, because `max_stay_after` and `remaining_min_stay` are each zero
+        # there - nothing has to happen after the last leg departs.
+        start = max(
+            start,
+            scenario.return_focus_start - timedelta(days=scenario.max_stay_after(leg_index)),
+        )
+        end = min(
+            end,
+            scenario.return_focus_end - timedelta(days=scenario.remaining_min_stay(leg_index)),
+        )
+
+    if scenario.total_days is not None:
+        low, high = scenario.total_days
+        # A nights band is a statement about the first and last legs together,
+        # so it only bounds a middle leg through whichever end is pinned. With a
+        # focus set it says how late this leg can be and still leave room to get
+        # home inside the band; with a return window set, how early.
+        if scenario.focus_end is not None:
+            end = min(
+                end,
+                scenario.focus_end
+                + timedelta(days=high - scenario.remaining_min_stay(leg_index)),
+            )
+        if scenario.return_focus_start is not None:
+            start = max(
+                start,
+                scenario.return_focus_start
+                - timedelta(days=high - scenario.earliest_departure(leg_index)),
+            )
+        # The floor holds against the window too, not only against a focus: a
+        # leg cannot be earlier than the soonest the first leg could go plus
+        # whatever the band still requires after it.
+        start = max(
+            start,
+            _focus_start(scenario, narrowed)
+            + timedelta(days=max(0, low - scenario.max_stay_after(leg_index))),
+        )
+
     return start, max(start, end)
 
 
-def _focus_start(scenario: Scenario) -> date:
+def _focus_start(scenario: Scenario, narrowed: bool = False) -> date:
     """Where the first leg may start departing: the focus, or the window."""
-    return scenario.focus_start or scenario.window_start
+    if narrowed and scenario.focus_start is not None:
+        return scenario.focus_start
+    return scenario.window_start
 
 
 def _deal(searches: list[LegSearch]) -> list[LegSearch]:
@@ -201,7 +283,14 @@ def _searches_for(scenario: Scenario, dates_by_leg: dict[int, list[date]]) -> li
 
 
 def plan_searches(scenario: Scenario) -> list[LegSearch]:
-    """Every search needed to evaluate `scenario`, deduplicated."""
+    """Every search needed to price `scenario`'s whole window, deduplicated.
+
+    The broad sweep, and broad whatever the trip has been narrowed to since.
+    That independence is the point: the narrowed sweep answers "is the trip I
+    have chosen getting cheaper", and only this one can still answer "is there a
+    better week out there" - which is the question a narrowing was decided
+    against in the first place, and the one that goes stale fastest.
+    """
     step = scenario.step_days
     return _searches_for(
         scenario,
@@ -209,6 +298,51 @@ def plan_searches(scenario: Scenario) -> list[LegSearch]:
             leg_index: _date_range(*_leg_window(scenario, leg_index), step)
             for leg_index in range(scenario.leg_count)
         },
+    )
+
+
+def plan_final(scenario: Scenario) -> list[LegSearch]:
+    """Every search needed to price the decision, rather than the window.
+
+    The same arithmetic as `plan_searches` with the trip's narrowing added to
+    the bounds, which is what `plan_searches` itself did until the two were
+    separated. On the real trip it is 24 searches against 168 - cheap enough to
+    run three times a day against a site that answers about 120 per address,
+    which is exactly what makes it worth having as its own mode.
+
+    Refuses a trip with nothing narrowed rather than quietly returning the broad
+    plan. A run filed as `final` that had in fact priced the whole window would
+    sit in the narrowed trend line, on the wrong axis, for as long as it stayed
+    on disk - and it would have cost an hour to produce the answer the 02:00
+    sweep already had.
+    """
+    if not _has_narrowing(scenario):
+        raise ValueError(
+            "There is nothing to narrow to yet. Set a departure window, a return "
+            "window or a nights band under 'Narrow it down' first - without one, "
+            "a final sweep would price the whole window the broad sweep already does."
+        )
+    step = scenario.step_days
+    return _searches_for(
+        scenario,
+        {
+            leg_index: _date_range(*_leg_window(scenario, leg_index, narrowed=True), step)
+            for leg_index in range(scenario.leg_count)
+        },
+    )
+
+
+def _has_narrowing(scenario: Scenario) -> bool:
+    """Whether anything on the trip says less than its whole window.
+
+    Any one of the three is enough. They are independent constraints - a trip
+    can pin when it flies home without having chosen when it leaves - and
+    requiring a departure window would refuse exactly that case.
+    """
+    return bool(
+        (scenario.focus_start and scenario.focus_end)
+        or (scenario.return_focus_start and scenario.return_focus_end)
+        or scenario.total_days
     )
 
 
@@ -333,6 +467,18 @@ def _chain_position(scenario: Scenario, origin: str, destination: str) -> int:
         if origin in origins and destination in destinations:
             return index
     return 0
+
+
+# Which planner each mode runs. One table, because there used to be three
+# identical copies of it - in `web/app.py`, in `sweep/runner.py` and in `cli.py`
+# - and a mode added to two of them is a mode the estimate prices one way and
+# the sweep runs another. `runner.MODES` names them; this decides what they do.
+PLANS = {
+    "sweep": plan_searches,
+    "explore": plan_exploration,
+    "watch": plan_watch,
+    "final": plan_final,
+}
 
 
 def planned_routes(scenario: Scenario) -> set[tuple[str, str]]:

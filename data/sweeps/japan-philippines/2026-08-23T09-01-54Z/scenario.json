@@ -2,7 +2,8 @@
   "id": "japan-philippines",
   "name": "Europe → Japan → Philippines → Europe",
   "origins": [
-    "VIE"
+    "VIE",
+    "PRG"
   ],
   "stops": [
     {
@@ -13,12 +14,12 @@
         "KIX"
       ],
       "stay_days": [
-        12,
-        14
+        10,
+        13
       ],
       "overland": true,
       "arrive_via": null,
-      "depart_via": "KIX"
+      "depart_via": null
     },
     {
       "label": "Philippines",
@@ -26,8 +27,8 @@
         "MNL"
       ],
       "stay_days": [
-        11,
-        14
+        8,
+        13
       ],
       "overland": false,
       "arrive_via": null,
@@ -35,19 +36,13 @@
     }
   ],
   "window_start": "2027-01-08",
-  "window_end": "2027-02-12",
+  "window_end": "2027-02-02",
   "return_to": null,
   "one_way": false,
-  "focus_start": "2027-01-08",
-  "focus_end": "2027-01-12",
-  "return_focus_start": "2027-02-01",
-  "return_focus_end": "2027-02-12",
-  "total_days": [
-    24,
-    28
-  ],
+  "focus_start": null,
+  "focus_end": null,
   "adults": 1,
-  "depth": "deep",
+  "depth": "standard",
   "currency": "CZK",
   "alert_threshold": null,
   "bag_estimate": 1500,
@@ -72,18 +67,7 @@
     "cheapest",
     "preferred"
   ],
-  "watches": [
-    {
-      "depart_dates": [
-        "2027-01-12",
-        "2027-01-25",
-        "2027-02-06"
-      ],
-      "added_at": "2026-08-23T20:01:54+00:00",
-      "added_price": 26544,
-      "currency": "CZK"
-    }
-  ],
+  "watches": [],
   "leg_watches": [
     {
       "origin": "VIE",

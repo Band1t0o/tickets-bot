@@ -54,32 +54,66 @@ def test_a_dispatched_run_sweeps_only_the_trip_it_names(tmp_path):
     assert choose(directory, wanted="b") == ["b"]
 
 
-def test_the_focused_slot_skips_a_trip_with_nothing_chosen_to_watch(tmp_path):
-    """Sweeping the whole window twice a day is the load that got this client
-    throttled, and there is nothing to watch until dates have been picked."""
+def test_the_final_slot_skips_a_trip_that_has_been_narrowed_to_nothing(tmp_path):
+    """A final sweep of an unnarrowed trip is the broad sweep, run twice."""
     directory = trips(tmp_path, make_scenario(id="a"))
     data = healthy_sweep(tmp_path, "a")
-    assert choose(directory, focused=True, data_dir=data) == []
+    assert choose(directory, final=True, data_dir=data) == []
 
 
-def test_the_focused_slot_runs_a_trip_that_has_a_focus(tmp_path):
+def test_the_final_slot_runs_a_trip_that_has_a_focus(tmp_path):
     directory = trips(tmp_path, focused(id="a"))
     data = healthy_sweep(tmp_path, "a")
-    assert choose(directory, focused=True, data_dir=data) == ["a"]
+    assert choose(directory, final=True, data_dir=data) == ["a"]
 
 
-def test_the_focused_slot_does_not_follow_a_starved_morning(tmp_path):
-    """2.9 legs per search with error_count 0 is what a throttled sweep looks
-    like, and another run is the surest way to make the day's data worse."""
+def test_the_final_slot_runs_a_trip_narrowed_only_by_when_it_flies_home(tmp_path):
+    """Any one of the three is a narrowing, and a departure window is not special.
+
+    Selecting on the focus alone was the old rule, and it would skip exactly the
+    trip whose two nightly runs on 24 Aug were narrowed to 48 searches out of 85
+    by a return window with no focus set.
+    """
+    from datetime import timedelta as delta
+
+    homebound = make_scenario(
+        id="a",
+        return_focus_start=WINDOW_START + delta(days=25),
+        return_focus_end=WINDOW_START + delta(days=30),
+    )
+    directory = trips(tmp_path, homebound)
+    data = healthy_sweep(tmp_path, "a")
+    assert choose(directory, final=True, data_dir=data) == ["a"]
+
+
+def test_the_final_slot_still_runs_after_a_starved_morning(tmp_path):
+    """Deliberately ungated, on the watch slot's reasoning rather than the sweep's.
+
+    A starved morning is a reason not to ask the site for 85 searches again. It
+    is not a reason to skip the 31 the booking decision is actually waiting on -
+    and if the site is still refusing, coverage records that honestly.
+    """
     directory = trips(tmp_path, focused(id="a"))
     data = healthy_sweep(tmp_path, "a", legs_per_search=2.9)
-    assert choose(directory, focused=True, data_dir=data) == []
+    assert choose(directory, final=True, data_dir=data) == ["a"]
 
 
-def test_the_focused_slot_does_not_follow_a_sweep_that_never_finished(tmp_path):
+def test_a_final_slot_sizes_its_runners_from_the_narrowed_plan(tmp_path):
+    """Not from the broad one: a final sweep is a fraction of the searches, and
+    handing it the broad plan's runner count would split 31 searches five ways."""
     directory = trips(tmp_path, focused(id="a"))
-    data = healthy_sweep(tmp_path, "a", state="throttled")
-    assert choose(directory, focused=True, data_dir=data) == []
+    broad = jobs(directory, ["a"], depth="deep")
+    narrowed = jobs(directory, ["a"], depth="deep", final=True)
+
+    assert len(narrowed) < len(broad)
+    assert {entry["shard_count"] for entry in narrowed} == {len(narrowed)}
+
+
+def test_a_dispatch_of_an_unnarrowed_trip_to_the_final_slot_says_why(tmp_path):
+    directory = trips(tmp_path, make_scenario(id="a"))
+    data = healthy_sweep(tmp_path, "a")
+    said = reason_for_nothing(directory, "a", final=True, data_dir=data)
+    assert "narrow" in said.lower()
 
 
 def test_the_broad_slot_is_never_gated(tmp_path):

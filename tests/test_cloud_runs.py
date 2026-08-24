@@ -140,7 +140,7 @@ def test_a_held_run_is_dispatched_once_the_lane_clears(monkeypatch):
     cloud_runs._queue.append({"scenario_id": "jp-ph", "depth": "deep", "error": ""})
     cloud_runs.drain(wait=lambda _seconds: None)
 
-    assert sent == [("jp-ph", "deep")]
+    assert sent == [("jp-ph", "deep", None)]
     assert cloud_runs.queued() == []
 
 

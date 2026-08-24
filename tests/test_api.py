@@ -499,23 +499,64 @@ def test_the_price_chart_of_an_older_sweep_survives_an_edit_to_the_trip(client):
     assert api.get(f"/api/sweeps/jp-ph/{stamp}/by-date").json()
 
 
-def test_the_sweep_listing_flags_runs_that_searched_another_trip(client):
+def _differs(api, stamp) -> list[str]:
+    listed = {s["stamp"]: s for s in api.get("/api/sweeps/jp-ph").json()["sweeps"]}
+    return listed[stamp]["differs"]
+
+
+def test_the_sweep_listing_names_what_a_run_searched_that_the_trip_no_longer_says(client):
     """The picker is where a run is chosen, so it has to say which runs are
     about the trip you are looking at before one is opened and believed."""
     api, data = client
     stamp = seed_explore(data)
     snapshot(data, stamp, searched_trip())
     move_the_trip_to(api, origins=["KRK"], return_to=None)
-    listed = {s["stamp"]: s for s in api.get("/api/sweeps/jp-ph").json()["sweeps"]}
-    assert listed[stamp]["searched_another_trip"] is True
+    assert _differs(api, stamp) == ["airports"]
+
+
+def test_the_listing_flags_a_run_priced_under_other_stays(client):
+    """The edit that drifts fastest and used not to be checked at all.
+
+    `japan-philippines` has twelve sweeps on disk spanning three stay settings,
+    every one of them labelled as though it described the trip as it stands.
+    """
+    api, data = client
+    stamp = seed_explore(data)
+    snapshot(data, stamp, searched_trip())
+    trip = api.get("/api/scenarios/jp-ph").json()
+    trip["stops"][0]["stay_days"] = [10, 11]
+    assert api.put("/api/scenarios/jp-ph", json=trip).status_code == 200
+    assert _differs(api, stamp) == ["stays"]
+
+
+def test_the_listing_flags_a_run_of_another_window(client):
+    api, data = client
+    stamp = seed_explore(data)
+    snapshot(data, stamp, searched_trip())
+    move_the_trip_to(api, window_end="2027-02-20")
+    assert _differs(api, stamp) == ["window"]
+
+
+def test_every_difference_is_named_not_only_the_first(client):
+    """Named rather than a boolean so the row says which part to distrust;
+    naming one of three would put the boolean back under a longer name."""
+    api, data = client
+    stamp = seed_explore(data)
+    snapshot(data, stamp, searched_trip())
+    trip = api.get("/api/scenarios/jp-ph").json()
+    trip["origins"] = ["KRK"]
+    trip["return_to"] = None
+    trip["stops"][0]["stay_days"] = [10, 11]
+    trip["window_end"] = "2027-02-20"
+    assert api.put("/api/scenarios/jp-ph", json=trip).status_code == 200
+    assert _differs(api, stamp) == ["airports", "stays", "window"]
 
 
 def test_a_sweep_of_the_current_trip_is_not_flagged_in_the_listing(client):
     api, data = client
     stamp = seed_explore(data)
     snapshot(data, stamp, searched_trip())
-    listed = {s["stamp"]: s for s in api.get("/api/sweeps/jp-ph").json()["sweeps"]}
-    assert listed[stamp]["searched_another_trip"] is False
+    assert _differs(api, stamp) == []
 
 
 def test_a_sweep_from_before_snapshots_existed_is_read_against_the_live_trip(client):
@@ -696,6 +737,239 @@ def test_results_report_the_currency(client):
     api, data = client
     stamp = seed_sweep(data)
     assert api.get(f"/api/sweeps/jp-ph/{stamp}/results").json()["currency"] == "CZK"
+
+
+def narrow(api, **fields) -> dict:
+    """Put a narrowing on the saved trip, the way the page does."""
+    trip = api.get("/api/scenarios/jp-ph").json()
+    trip.update(fields)
+    return api.put("/api/scenarios/jp-ph", json=trip)
+
+
+def test_a_narrowed_reading_hides_trips_outside_the_return_window(client):
+    api, data = client
+    stamp = seed_sweep(data)
+    # The seeded trips all fly home on 30 January.
+    assert narrow(
+        api, return_focus_start="2027-01-20", return_focus_end="2027-01-25"
+    ).status_code == 200
+
+    narrowed = api.get(f"/api/sweeps/jp-ph/{stamp}/results").json()
+    assert narrowed["itineraries"] == []
+    assert narrowed["window"]["applied"] is True
+
+    everything = api.get(f"/api/sweeps/jp-ph/{stamp}/results?window=all").json()
+    assert everything["itineraries"]
+    assert everything["window"]["applied"] is False
+
+
+def test_a_narrowed_reading_hides_trips_outside_the_nights_band(client):
+    api, data = client
+    stamp = seed_sweep(data)
+    # The seeded trips are 20 nights: 10 in Japan, 10 in the Philippines.
+    narrow(api, total_days=[18, 19])
+    assert api.get(f"/api/sweeps/jp-ph/{stamp}/results").json()["itineraries"] == []
+    assert api.get(f"/api/sweeps/jp-ph/{stamp}/results?window=all").json()["itineraries"]
+
+    narrow(api, total_days=[20, 22])
+    assert api.get(f"/api/sweeps/jp-ph/{stamp}/results").json()["itineraries"]
+
+
+def test_the_departure_window_narrows_a_reading_too(client):
+    """All three parts of the narrowing, or none of them.
+
+    The focus is read from the live trip like the other two, even though the
+    sweep's own snapshot records what it searched under — `is_comparable` reads
+    that from `status.json`, so nothing that needed the snapshot's copy lost it.
+    """
+    api, data = client
+    stamp = seed_sweep(data)  # every seeded trip leaves on 10 January
+    narrow(api, focus_start="2027-01-05", focus_end="2027-01-08")
+    assert api.get(f"/api/sweeps/jp-ph/{stamp}/results").json()["itineraries"] == []
+    assert api.get(f"/api/sweeps/jp-ph/{stamp}/results?window=all").json()["itineraries"]
+
+    narrow(api, focus_start="2027-01-09", focus_end="2027-01-12")
+    body = api.get(f"/api/sweeps/jp-ph/{stamp}/results").json()
+    assert body["itineraries"]
+    assert body["window"]["focus"] == ["2027-01-09", "2027-01-12"]
+
+
+def test_widening_a_narrowing_is_not_served_from_the_cache(client):
+    """Editing a trip does not touch its sweeps, and the memo is keyed on both.
+
+    Keyed on the legs file alone - which is what it was - the second reading
+    below returned the first one's result forever. On screen that is a trip you
+    have just widened still showing nothing, which reads as the sweep having
+    found nothing rather than as a stale answer.
+    """
+    api, data = client
+    stamp = seed_sweep(data)
+    narrow(api, total_days=[18, 19])
+    assert api.get(f"/api/sweeps/jp-ph/{stamp}/results").json()["itineraries"] == []
+
+    narrow(api, total_days=[18, 22])
+    assert api.get(f"/api/sweeps/jp-ph/{stamp}/results").json()["itineraries"]
+
+
+def test_the_narrowing_applies_to_a_sweep_that_predates_it(client):
+    """The sweeps worth narrowing are the ones swept before it existed.
+
+    `_sweep_scenario` takes shape from the run's own snapshot, so a narrowing
+    read from there would only ever apply to sweeps that no longer needed it.
+    """
+    api, data = client
+    stamp = seed_sweep(data)
+    # A snapshot with no narrowing on it, as every committed sweep has.
+    (data / "sweeps" / "jp-ph" / stamp / "scenario.json").write_text(
+        json.dumps(api.get("/api/scenarios/jp-ph").json()), encoding="utf-8"
+    )
+    narrow(api, total_days=[18, 19])
+    assert api.get(f"/api/sweeps/jp-ph/{stamp}/results").json()["itineraries"] == []
+
+
+def test_an_unsatisfiable_narrowing_is_refused_with_a_reason(client):
+    api, _ = client
+    response = narrow(api, total_days=[40, 50])
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert "40-50 nights away is unreachable" in detail
+    assert "9-11 at Japan" in detail
+
+
+def test_a_return_window_outside_the_trip_window_is_refused(client):
+    api, _ = client
+    response = narrow(
+        api, return_focus_start="2027-02-10", return_focus_end="2027-02-14"
+    )
+    assert response.status_code == 400
+    assert "widen the window first" in response.json()["detail"]
+
+
+def test_the_by_date_chart_and_the_table_narrow_together(client):
+    """Two panels on one screen must not report two different populations."""
+    api, data = client
+    stamp = seed_sweep(data)
+    narrow(api, total_days=[18, 19])
+    assert api.get(f"/api/sweeps/jp-ph/{stamp}/by-date").json() == []
+    assert api.get(f"/api/sweeps/jp-ph/{stamp}/by-date?window=all").json()
+
+
+def test_watch_candidates_narrow_too(client):
+    api, data = client
+    stamp = seed_sweep(data)
+    narrow(api, total_days=[18, 19])
+    body = api.get(f"/api/sweeps/jp-ph/{stamp}/candidates").json()
+    assert body["candidates"] == []
+    assert body["window"]["applied"] is True
+    assert api.get(f"/api/sweeps/jp-ph/{stamp}/candidates?window=all").json()["candidates"]
+
+
+# -------------------------------------------------------------------- by-leg
+
+
+def seed_searches(data_dir, rows, stamp="2026-08-06T02-00-00Z"):
+    """What the run asked, whatever it got back."""
+    directory = data_dir / "sweeps" / "jp-ph" / stamp
+    with (directory / "searches.jsonl").open("w") as handle:
+        for origin, destination, when, answered in rows:
+            handle.write(
+                json.dumps(
+                    {
+                        "origin": origin,
+                        "destination": destination,
+                        "depart_date": when,
+                        "answered": answered,
+                    }
+                )
+                + "\n"
+            )
+
+
+def test_by_leg_has_one_series_per_leg_of_the_trip(client):
+    api, data = client
+    stamp = seed_sweep(data)
+    body = api.get(f"/api/sweeps/jp-ph/{stamp}/by-leg").json()
+    assert [leg["label"] for leg in body["legs"]] == [
+        "PRG/VIE → NRT",
+        "NRT → MNL",
+        "MNL → PRG/VIE",
+    ]
+    assert body["stay_days"] == [[9, 11], [9, 11]]
+
+
+def test_by_leg_names_the_airport_pair_that_won_each_date(client):
+    """The pool line is a cheapest-of, so it has to say cheapest of what."""
+    api, data = client
+    stamp = seed_sweep(data)
+    home = api.get(f"/api/sweeps/jp-ph/{stamp}/by-leg").json()["legs"][2]
+    point = next(p for p in home["points"] if p["depart_date"] == "2027-01-30")
+    # Vienna at 11,000 beats Prague at 14,000 on the same day.
+    assert (point["origin"], point["destination"]) == ("MNL", "VIE")
+    assert point["price"] == 11000
+
+
+def test_by_leg_ranks_on_the_bag_inclusive_fare(client):
+    """The same rule the itinerary ranking uses, or the two disagree on screen."""
+    api, data = client
+    stamp = seed_sweep(
+        data,
+        legs=[
+            Leg("T", "PRG", "NRT", date(2027, 1, 10), "QR", None, 1, "CZK", 12000.0, "u",
+                checked_bag=True),
+            Leg("T", "VIE", "NRT", date(2027, 1, 10), "W6", None, 1, "CZK", 11000.0, "u",
+                checked_bag=False),
+        ],
+    )
+    out = api.get(f"/api/sweeps/jp-ph/{stamp}/by-leg").json()["legs"][0]
+    point = next(p for p in out["points"] if p["depart_date"] == "2027-01-10")
+    # 11,000 + a 1,500 bag loses to 12,000 with one included.
+    assert point["origin"] == "PRG"
+    assert point["with_bags"] == 12000
+
+
+def test_by_leg_distinguishes_nothing_sold_from_never_asked(client):
+    """Two opposite facts that would otherwise draw as the same empty gap.
+
+    A date the site answered with no fares is the site having nothing. A date
+    absent from `searches.jsonl` was never asked, which is a hole in the sweep.
+    The first must appear in the series; the second must not.
+    """
+    api, data = client
+    stamp = seed_sweep(data)
+    seed_searches(
+        data,
+        [
+            ("PRG", "NRT", "2027-01-10", True),   # answered, and sold something
+            ("PRG", "NRT", "2027-01-17", True),   # answered, sold nothing
+            # 2027-01-24 deliberately absent: never asked.
+        ],
+    )
+    points = {p["depart_date"]: p for p in api.get(
+        f"/api/sweeps/jp-ph/{stamp}/by-leg"
+    ).json()["legs"][0]["points"]}
+    assert points["2027-01-10"]["price"] == 12000
+    assert points["2027-01-17"]["price"] is None
+    assert points["2027-01-17"]["searched"] is True
+    assert "2027-01-24" not in points
+
+
+def test_by_leg_keeps_a_route_that_returned_nothing_at_all(client):
+    """Derived from the trip's pools, not from the legs that came back.
+
+    An airport that sold nothing is a finding. Building the route list from
+    `legs.jsonl` would delete exactly the routes worth knowing about.
+    """
+    api, data = client
+    stamp = seed_sweep(data)
+    routes = api.get(f"/api/sweeps/jp-ph/{stamp}/by-leg").json()["legs"][0]["routes"]
+    assert [r["route"] for r in routes] == ["PRG→NRT", "VIE→NRT"]
+    vienna = next(r for r in routes if r["route"] == "VIE→NRT")
+    assert vienna["points"] == []
+
+
+def test_by_leg_404s_for_a_sweep_that_is_not_there(client):
+    api, _ = client
+    assert api.get("/api/sweeps/jp-ph/2026-01-01T00-00-00Z/by-leg").status_code == 404
 
 
 def test_by_date_series_has_one_entry_per_departure_date(client):
@@ -1229,23 +1503,74 @@ def test_a_refused_test_message_is_reported_not_raised(client, monkeypatch):
 # chosen days of it.
 
 
-def test_history_marks_a_focused_sweep_incomparable_with_a_broad_trip(client, tmp_path):
+def test_history_marks_a_focused_sweep_incomparable_with_a_broad_trip(client):
     """A focused sweep prices a handful of dates, so its cheapest is the
     cheapest of those days - plotting it beside a broad sweep draws a step no
-    fare ever made."""
+    fare ever made.
+
+    Written against statuses carrying only `focus`, which is what every sweep
+    committed before the narrowing was recorded in full still looks like.
+    """
     from src.sweep.runner import is_comparable
 
+    focused = {"focus": ["2027-01-12", "2027-01-16"], "return_focus": None,
+               "total_days": None}
     broad = {"state": "done", "legs_per_search": 9.0, "focus": None}
-    narrow = {"state": "done", "legs_per_search": 9.0, "focus": ["2027-01-12", "2027-01-16"]}
+    narrow = {"state": "done", "legs_per_search": 9.0, "focus": focused["focus"]}
     assert is_comparable(broad, 21, 21, None)
     assert not is_comparable(narrow, 21, 21, None)
-    assert is_comparable(narrow, 21, 21, ["2027-01-12", "2027-01-16"])
-    assert not is_comparable(broad, 21, 21, ["2027-01-12", "2027-01-16"])
+    assert is_comparable(narrow, 21, 21, focused)
+    assert not is_comparable(broad, 21, 21, focused)
 
 
-def test_a_focused_trip_estimates_far_fewer_searches(client):
+def test_history_separates_the_broad_runs_from_the_narrowed_ones(client):
+    """Two questions, two lines. Joining them draws a step no fare ever made.
+
+    The broad line answers "is there a better week out there"; the narrowed one
+    answers "is the trip I have chosen getting cheaper". A point belongs to
+    whichever of those it measured, and `series` is how the chart is told.
+    """
+    api, data = client
+    broad = seed_quality(data, "2026-08-20T02-00-00Z", mode="sweep")
+    final = seed_quality(
+        data, "2026-08-21T13-00-00Z", mode="final",
+        narrowing={"focus": ["2027-01-10", "2027-01-12"],
+                   "return_focus": None, "total_days": None},
+    )
+
+    points = {p["swept_at"]: p for p in api.get("/api/history/jp-ph").json()}
+
+    assert points[broad]["series"] == "broad"
+    assert points[final]["series"] == "final"
+    assert points[final]["mode"] == "final"
+
+
+def test_a_broad_run_stays_comparable_on_a_trip_that_has_since_been_narrowed(client):
+    """It priced the whole window, and the window has not moved.
+
+    Under the old rule a trip gaining a focus retired every broad sweep behind
+    it, because comparability was measured against the trip's focus rather than
+    against what each run had actually searched.
+    """
+    api, data = client
+    seed_quality(data, "2026-08-20T02-00-00Z", mode="sweep",
+                 narrowing={"focus": None, "return_focus": None, "total_days": None})
+    trip = api.get("/api/scenarios/jp-ph").json()
+    trip["focus_start"], trip["focus_end"] = "2027-01-12", "2027-01-16"
+    assert api.put("/api/scenarios/jp-ph", json=trip).status_code == 200
+
+    point = api.get("/api/history/jp-ph").json()[0]
+    assert point["series"] == "broad"
+    assert point["comparable"] is True
+
+
+def test_a_focused_trip_estimates_far_fewer_searches_as_a_final_sweep(client):
+    """The whole point of narrowing: the same depth, a fraction of the cost.
+
+    Priced as `mode=final`, because that is the only sweep the narrowing binds.
+    Asked as a broad sweep it must come back unchanged - see the test below.
+    """
     client, _ = client
-    """The whole point of narrowing: the same depth, a fraction of the cost."""
     trip = client.get("/api/scenarios/jp-ph").json()
     broad = client.post(
         "/api/scenarios/jp-ph/estimate?depth=deep", json=trip
@@ -1253,10 +1578,54 @@ def test_a_focused_trip_estimates_far_fewer_searches(client):
     trip["focus_start"] = "2027-01-12"
     trip["focus_end"] = "2027-01-16"
     narrow = client.post(
-        "/api/scenarios/jp-ph/estimate?depth=deep", json=trip
+        "/api/scenarios/jp-ph/estimate?depth=deep&mode=final", json=trip
     ).json()
     assert 0 < narrow["searches"] < broad["searches"] / 2
     assert narrow["minutes"] < broad["minutes"]
+
+
+def test_a_focus_does_not_make_the_broad_sweep_any_cheaper(client):
+    """Because it is not supposed to make it any narrower.
+
+    The reading that hid the whole problem: a nightly sweep quoting a fraction
+    of its usual cost looked like a saving rather than like a sweep that had
+    stopped pricing most of the window.
+    """
+    client, _ = client
+    trip = client.get("/api/scenarios/jp-ph").json()
+    broad = client.post("/api/scenarios/jp-ph/estimate?depth=deep", json=trip).json()
+    trip["focus_start"] = "2027-01-12"
+    trip["focus_end"] = "2027-01-16"
+    still_broad = client.post(
+        "/api/scenarios/jp-ph/estimate?depth=deep", json=trip
+    ).json()
+    assert still_broad["searches"] == broad["searches"]
+
+
+def test_a_final_sweep_of_a_trip_with_no_narrowing_is_refused_with_the_reason(client):
+    """400 with the sentence, not a run that prices the window twice."""
+    client, _ = client
+    trip = client.get("/api/scenarios/jp-ph").json()
+    response = client.post("/api/scenarios/jp-ph/estimate?depth=deep&mode=final", json=trip)
+    assert response.status_code == 400
+    assert "narrow" in response.json()["detail"].lower()
+
+
+def test_starting_a_final_run_of_an_unnarrowed_trip_is_refused_before_it_starts(client):
+    """Refused at the endpoint, not thrown inside the worker thread.
+
+    A thread that raises records its traceback in `_failures` and surfaces as
+    "Sweep failed — ValueError: There is nothing to narrow to yet" in the status
+    strip, minutes later and in the voice of a crash. It is not a crash; it is a
+    button that should not have been pressable.
+    """
+    client, _ = client
+    response = client.post("/api/scenarios/jp-ph/run?mode=final")
+
+    assert response.status_code == 400
+    assert "narrow" in response.json()["detail"].lower()
+    # And nothing was started, so the next attempt is not met with a 409.
+    assert client.post("/api/scenarios/jp-ph/run?mode=final").status_code == 400
 
 
 def test_a_focus_outside_the_window_is_refused_with_the_reason(client):
@@ -1416,14 +1785,24 @@ def test_adding_a_day_reports_what_watching_it_will_cost(client):
     assert body["minutes"] > 0
 
 
-def test_a_day_that_could_never_chain_is_refused_with_a_reason(client):
+def test_a_hand_picked_day_outside_the_stays_may_still_be_followed(client):
+    """Four days in Japan against a 9-11 stay: accepted, and priced.
+
+    See `test_a_watch_may_break_the_stay_windows`. What is still refused is a
+    chain that runs backwards, which is an impossibility rather than a taste.
+    """
     api, _ = client
-    response = api.post(
+    assert api.post(
         "/api/watch/jp-ph",
         json={"depart_dates": ["2027-01-10", "2027-01-14", "2027-01-24"]},
+    ).status_code == 201
+
+    backwards = api.post(
+        "/api/watch/jp-ph",
+        json={"depart_dates": ["2027-01-20", "2027-01-14", "2027-01-24"]},
     )
-    assert response.status_code == 400
-    assert "Japan" in response.json()["detail"]
+    assert backwards.status_code == 400
+    assert "order" in backwards.json()["detail"]
 
 
 def test_watching_more_than_the_site_will_answer_is_refused(client, monkeypatch):
@@ -1989,7 +2368,8 @@ def test_the_schedule_comes_from_the_workflow_that_runs_it(client):
     schedule = night(api)["schedule"]
     assert [slot["cron"] for slot in schedule]
     assert all(slot["next"] for slot in schedule)
-    assert any(slot["focused"] for slot in schedule), "the focused slot is missing"
+    assert any(slot["mode"] == "final" for slot in schedule), "the final slot is missing"
+    assert any(slot["mode"] == "sweep" for slot in schedule), "the broad slot is missing"
 
 
 def test_a_trip_the_cloud_has_never_seen_says_so(client, tmp_path):
@@ -2101,7 +2481,7 @@ def test_a_cloud_run_of_a_committed_trip_is_dispatched(client, cloud, monkeypatc
     agreeing(monkeypatch)
     body = app.post("/api/scenarios/jp-ph/run-cloud?depth=deep").json()
     assert body["dispatched"] is True
-    assert cloud == [("jp-ph", "deep")]
+    assert cloud == [("jp-ph", "deep", "sweep")]
 
 
 def test_a_cloud_run_is_refused_when_the_branch_holds_a_different_trip(client, cloud, monkeypatch):
@@ -2141,7 +2521,7 @@ def test_running_it_anyway_dispatches_without_consulting_the_branch(client, clou
     monkeypatch.setattr(app_module, "_fetch_cloud_ref", must_not_run)
     body = app.post("/api/scenarios/jp-ph/run-cloud?force=true").json()
     assert body["dispatched"] is True
-    assert cloud == [("jp-ph", None)]
+    assert cloud == [("jp-ph", None, "sweep")]
 
 
 def test_a_run_asked_for_while_the_lane_is_busy_is_held_not_fired(client, cloud, monkeypatch):
@@ -2196,3 +2576,326 @@ def test_the_cloud_listing_reports_the_runs_and_what_is_held(client, cloud, monk
     assert body["runs"][0]["swept_nothing"] is True
     assert body["busy"] is False
     assert [e["scenario_id"] for e in body["queued"]] == ["jp-ph"]
+
+
+# --------------------------------------------------- results on this machine
+
+
+def test_the_sync_endpoint_says_it_cannot_tell_rather_than_nothing_missing(client):
+    """Without git this cannot see the branch, and must not imply completeness.
+
+    The whole point of the panel is that "no runs missing" and "cannot check"
+    look different. Answering 200 with a zero count for both would rebuild the
+    blind spot it was written to remove.
+    """
+    app, _ = client
+    body = app.get("/api/cloud-sync").json()
+    assert body["known"] is False
+    assert body["reason"]
+    assert body["missing_count"] == 0
+    assert body["can_fast_forward"] is False
+
+
+def test_reading_the_sync_state_never_waits_on_the_network(client, monkeypatch):
+    """Drawing the page must not block on a remote - the rule since `_git`.
+
+    A synchronous fetch here would put a laptop that is briefly offline between
+    the user and the Results tab, on every load.
+    """
+    from src.web import branch_sync
+
+    def must_not_run():
+        raise AssertionError("the read path fetched synchronously")
+
+    monkeypatch.setattr(branch_sync, "fetch", must_not_run)
+    app, _ = client
+    assert app.get("/api/cloud-sync").status_code == 200
+
+
+def test_a_refused_sync_is_409_carrying_the_reason_verbatim(client, monkeypatch):
+    """A checkout with its own commits is not a broken app.
+
+    409, not 500, and git's own sentence rather than a summary of it: when git
+    refuses it names the files, and that is the only part worth reading.
+    """
+    from src.web import branch_sync
+
+    monkeypatch.setattr(
+        branch_sync, "pull",
+        lambda *a: {"synced": False, "reason": "Your local changes to src/web/app.py "
+                                               "would be overwritten", "gained": {}},
+    )
+    response = client[0].post("/api/cloud-sync")
+    assert response.status_code == 409
+    assert "src/web/app.py" in response.json()["detail"]
+
+
+def test_a_sync_that_brought_runs_across_reports_them(client, monkeypatch):
+    from src.web import branch_sync
+
+    monkeypatch.setattr(
+        branch_sync, "pull",
+        lambda *a: {"synced": True, "reason": "", "commits": 7,
+                    "gained": {"jp-ph": ["2026-08-22T20-30-46Z"]}},
+    )
+    body = client[0].post("/api/cloud-sync").json()
+    assert body["synced"] is True
+    assert body["gained"]["jp-ph"] == ["2026-08-22T20-30-46Z"]
+
+
+def test_the_branch_is_asked_about_every_saved_trip_not_only_swept_ones(client, monkeypatch):
+    """A trip whose runs are *all* still on the branch has no directory here.
+
+    Listing the trips to ask about from the sweeps on disk would leave that trip
+    out of exactly the case this exists for.
+    """
+    from src.web import branch_sync
+
+    asked = []
+    monkeypatch.setattr(
+        branch_sync, "state",
+        lambda data_dir, ids: asked.append(ids) or {"known": True, "missing_count": 0},
+    )
+    client[0].get("/api/cloud-sync")
+    assert asked and "jp-ph" in asked[0]
+
+
+def test_the_runs_can_be_taken_without_the_merge_that_was_refused(client, monkeypatch):
+    """The two refusals are different, and only one of them was ever meant.
+
+    A checkout ahead of the branch cannot fast-forward, and should not. It can
+    still be handed run directories it does not have, because copying those
+    moves no history and overwrites no file.
+    """
+    from src.web import branch_sync
+
+    monkeypatch.setattr(
+        branch_sync, "take",
+        lambda *a: {"took": True, "reason": "",
+                    "taken": {"jp-ph": ["2026-08-22T20-30-46Z"]},
+                    "can_fast_forward": False, "missing_count": 0},
+    )
+    body = client[0].post("/api/cloud-sync/take").json()
+    assert body["took"] is True
+    assert body["taken"]["jp-ph"] == ["2026-08-22T20-30-46Z"]
+    # Still diverged afterwards, and still saying so.
+    assert body["can_fast_forward"] is False
+
+
+def test_taking_the_runs_reports_a_refusal_the_same_way_a_sync_does(client, monkeypatch):
+    from src.web import branch_sync
+
+    monkeypatch.setattr(
+        branch_sync, "take",
+        lambda *a: {"took": False, "reason": "git would not copy jp-ph 2026-08-22T20-30-46Z",
+                    "taken": {}},
+    )
+    response = client[0].post("/api/cloud-sync/take")
+    assert response.status_code == 409
+    assert "2026-08-22T20-30-46Z" in response.json()["detail"]
+
+
+def test_taking_when_there_is_nothing_to_take_is_not_an_error(client, monkeypatch):
+    from src.web import branch_sync
+
+    monkeypatch.setattr(
+        branch_sync, "take",
+        lambda *a: {"took": False, "already_current": True, "reason": "", "taken": {}},
+    )
+    assert client[0].post("/api/cloud-sync/take").status_code == 200
+
+
+# ------------------------------------------------------- airport verdicts
+#
+# The Explore tab used to open on a picker of runs by date and time: you chose
+# "23 Aug, 10:46 · probe · 48 searches" and only then found out what it said
+# about Vienna. That is backwards, and it threw work away - a probe the site
+# refused halfway has nothing to say about the airports it never reached, while
+# yesterday's complete sweep, on disk, does.
+
+
+def seed_verdict_run(data_dir, stamp, priced, *, searches=3):
+    """One run pricing exactly `priced`: {(origin, destination): amount}."""
+    directory = data_dir / "sweeps" / "jp-ph" / stamp
+    directory.mkdir(parents=True)
+    with (directory / "legs.jsonl").open("w") as handle:
+        for (origin, destination), amount in priced.items():
+            leg = Leg(
+                "T", origin, destination,
+                date(2027, 1, 10) if destination != "PRG" and destination != "VIE" else date(2027, 1, 30),
+                "QR", None, 1, "CZK", float(amount), "u",
+            )
+            handle.write(json.dumps(leg.to_dict()) + "\n")
+    (directory / "status.json").write_text(json.dumps({
+        "state": "done", "mode": "sweep", "depth": "deep", "coverage": 1.0,
+        "route_searches": {f"{o}->{d}": searches for o, d in priced},
+        "route_errors": {},
+    }))
+    return stamp
+
+
+def test_every_airport_of_the_trip_is_judged_without_choosing_a_run(client):
+    api, data = client
+    seed_verdict_run(data, "2026-08-06T02-00-00Z", {
+        ("PRG", "NRT"): 12000, ("VIE", "NRT"): 24000,
+        ("NRT", "MNL"): 4000, ("MNL", "PRG"): 14000, ("MNL", "VIE"): 15000,
+    })
+
+    body = api.get("/api/scenarios/jp-ph/airport-verdicts").json()
+    # Per pool, never flattened: Prague and Vienna each stand in two places -
+    # flying out and coming home - and are ranked separately in each, because
+    # cheap to leave from and dear to come back to is not a cheap airport.
+    out = {
+        row["iata"]: row["verdict"]
+        for row in next(p for p in body["pools"] if p["index"] == 0)["airports"]
+    }
+    assert out["PRG"] == "best"
+    # 24,000 against 12,000 on the same hop is 100% dearer.
+    assert out["VIE"] == "poor"
+
+    home = {
+        row["iata"]: row["verdict"]
+        for row in body["pools"][-1]["airports"]
+    }
+    assert home["PRG"] == "best"       # 14,000 against Vienna's 15,000
+    assert home["VIE"] == "close"      # and only 7% behind it
+    assert body["runs_read"] == 1
+
+
+def test_a_whole_pool_comes_from_one_run_so_its_percentages_compare(client):
+    """The verdicts in a pool are scored against the cheapest of that pool, so
+    rows taken from different runs would be percentages against different
+    baselines printed as though they were one table."""
+    api, data = client
+    # Older run: both origins priced, and Vienna is the dear one.
+    seed_verdict_run(data, "2026-08-05T02-00-00Z", {
+        ("PRG", "NRT"): 12000, ("VIE", "NRT"): 24000,
+        ("NRT", "MNL"): 4000, ("MNL", "PRG"): 14000, ("MNL", "VIE"): 15000,
+    })
+    # Newer run reached only Vienna. Taken on its own it would call Vienna the
+    # cheapest airport there is, because it is the only one it looked at.
+    seed_verdict_run(data, "2026-08-07T02-00-00Z", {
+        ("VIE", "NRT"): 24000, ("NRT", "MNL"): 4000, ("MNL", "VIE"): 15000,
+    })
+
+    body = api.get("/api/scenarios/jp-ph/airport-verdicts").json()
+    origins = next(p for p in body["pools"] if p["index"] == 0)
+    assert origins["measured_by"]["stamp"] == "2026-08-05T02-00-00Z"
+    assert {row["iata"] for row in origins["airports"]} == {"PRG", "VIE"}
+    assert {row["iata"]: row["verdict"] for row in origins["airports"]}["VIE"] == "poor"
+
+
+def test_recency_breaks_a_tie_between_runs_that_measured_as_much(client):
+    api, data = client
+    seed_verdict_run(data, "2026-08-05T02-00-00Z", {
+        ("PRG", "NRT"): 12000, ("VIE", "NRT"): 24000,
+        ("NRT", "MNL"): 4000, ("MNL", "PRG"): 14000, ("MNL", "VIE"): 15000,
+    })
+    seed_verdict_run(data, "2026-08-09T02-00-00Z", {
+        ("PRG", "NRT"): 11000, ("VIE", "NRT"): 23000,
+        ("NRT", "MNL"): 4000, ("MNL", "PRG"): 14000, ("MNL", "VIE"): 15000,
+    })
+
+    body = api.get("/api/scenarios/jp-ph/airport-verdicts").json()
+    for pool in body["pools"]:
+        assert pool["measured_by"]["stamp"] == "2026-08-09T02-00-00Z"
+
+
+def test_an_airport_no_run_has_ever_priced_is_named_not_omitted(client):
+    """The absence of a row is not an answer to "what about this one?".
+
+    A run with no snapshot is read as having searched the trip as it stands, so
+    an airport added since gets a row of its own saying nothing was measured -
+    which is the honest answer, and the one the tab already knows how to draw.
+    What it must never be is missing.
+    """
+    api, data = client
+    api.put("/api/scenarios/jp-ph", json={
+        **api.get("/api/scenarios/jp-ph").json(),
+        "origins": ["PRG", "VIE", "KRK"],
+    })
+    seed_verdict_run(data, "2026-08-06T02-00-00Z", {
+        ("PRG", "NRT"): 12000, ("VIE", "NRT"): 24000,
+        ("NRT", "MNL"): 4000, ("MNL", "PRG"): 14000, ("MNL", "VIE"): 15000,
+    })
+
+    body = api.get("/api/scenarios/jp-ph/airport-verdicts").json()
+    origins = next(p for p in body["pools"] if p["index"] == 0)
+    krakow = next(row for row in origins["airports"] if row["iata"] == "KRK")
+    assert krakow["total_min"] is None
+    # "Unproven", never "no offers": the site was not asked enough times to
+    # support a claim about the market.
+    assert krakow["verdict"] == "unproven"
+
+
+def test_an_airport_added_since_the_run_is_named_under_its_pool(client):
+    """The other way an airport can be missing: the run recorded a snapshot,
+    and that snapshot has no such airport, so there is no row to put it in."""
+    api, data = client
+    stamp = seed_verdict_run(data, "2026-08-06T02-00-00Z", {
+        ("PRG", "NRT"): 12000, ("VIE", "NRT"): 24000,
+        ("NRT", "MNL"): 4000, ("MNL", "PRG"): 14000, ("MNL", "VIE"): 15000,
+    })
+    searched = api.get("/api/scenarios/jp-ph").json()
+    (data / "sweeps" / "jp-ph" / stamp / "scenario.json").write_text(
+        json.dumps(searched), encoding="utf-8"
+    )
+    api.put("/api/scenarios/jp-ph", json={**searched, "origins": ["PRG", "VIE", "KRK"]})
+
+    body = api.get("/api/scenarios/jp-ph/airport-verdicts").json()
+    origins = next(p for p in body["pools"] if p["index"] == 0)
+    assert origins["not_searched"] == ["KRK"]
+    assert "KRK" not in {row["iata"] for row in origins["airports"]}
+
+
+def test_a_run_of_a_differently_shaped_trip_is_skipped_rather_than_lined_up(client):
+    """Pools are positional. Lining up pool 2 of a two-stop trip with pool 2 of
+    a three-stop one is how a probe of Prague came to be presented as the
+    verdict for a trip flying out of Katowice."""
+    api, data = client
+    stamp = seed_verdict_run(data, "2026-08-06T02-00-00Z", {
+        ("PRG", "NRT"): 12000, ("VIE", "NRT"): 24000,
+        ("NRT", "MNL"): 4000, ("MNL", "PRG"): 14000, ("MNL", "VIE"): 15000,
+    })
+    # The run records that it searched a trip with an extra stop.
+    trip = api.get("/api/scenarios/jp-ph").json()
+    trip["stops"] = [*trip["stops"], {"airports": ["DPS"], "stay_days": [3, 5], "label": "Bali"}]
+    (data / "sweeps" / "jp-ph" / stamp / "scenario.json").write_text(
+        json.dumps(trip), encoding="utf-8"
+    )
+
+    body = api.get("/api/scenarios/jp-ph/airport-verdicts").json()
+    assert body["runs_read"] == 0
+    assert all(pool["measured_by"] is None for pool in body["pools"])
+    assert all(pool["not_searched"] for pool in body["pools"])
+
+
+def test_the_verdicts_endpoint_is_fine_with_a_trip_nothing_has_swept(client):
+    api, _ = client
+    body = api.get("/api/scenarios/jp-ph/airport-verdicts").json()
+    assert body["runs_read"] == 0
+    assert body["pools"] and all(pool["airports"] == [] for pool in body["pools"])
+
+
+def test_the_verdicts_endpoint_404s_on_a_trip_that_does_not_exist(client):
+    api, _ = client
+    assert api.get("/api/scenarios/nope/airport-verdicts").status_code == 404
+
+
+# ---------------------------------------------------------- booking a follow
+
+
+def test_a_followed_flight_carries_a_link_to_buy_it(client):
+    """The watch records a price and never the offer's URL, so the search is
+    rebuilt from the three things that define the watch."""
+    api, _ = client
+    api.post("/api/watch/jp-ph/legs", json={
+        "origin": "PRG", "destination": "NRT",
+        "depart_date": "2027-01-14", "currency": "CZK",
+    })
+
+    leg = api.get("/api/watch/jp-ph").json()["legs"][0]
+    assert leg["book_url"].startswith("https://")
+    # The three things that define the watch are all in it.
+    assert "PRG" in leg["book_url"] and "NRT" in leg["book_url"]
+    assert "2027_1_14" in leg["book_url"]

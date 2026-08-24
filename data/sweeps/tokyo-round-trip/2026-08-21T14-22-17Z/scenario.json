@@ -1,0 +1,52 @@
+{
+  "id": "tokyo-round-trip",
+  "name": "Tokyo round trip",
+  "origins": [
+    "VIE",
+    "PRG",
+    "FRA",
+    "BER",
+    "KRK",
+    "KTW",
+    "MUC"
+  ],
+  "stops": [
+    {
+      "label": "Japan",
+      "airports": [
+        "NRT",
+        "HND",
+        "KIX"
+      ],
+      "stay_days": [
+        16,
+        21
+      ],
+      "overland": false,
+      "arrive_via": null,
+      "depart_via": null
+    }
+  ],
+  "window_start": "2027-01-05",
+  "window_end": "2027-02-08",
+  "return_to": null,
+  "one_way": false,
+  "focus_start": null,
+  "focus_end": null,
+  "adults": 1,
+  "depth": "quick",
+  "currency": "CZK",
+  "alert_threshold": null,
+  "bag_estimate": 1500,
+  "enabled": false,
+  "notes": "Simpler comparison case: straight return to Japan, no Philippines leg.",
+  "preferred_origins": [],
+  "notify": [
+    "cheapest",
+    "preferred"
+  ],
+  "watches": [],
+  "leg_watches": [],
+  "probe_both_orders": false,
+  "notify_quiet": true
+}

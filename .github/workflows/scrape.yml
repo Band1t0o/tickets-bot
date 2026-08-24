@@ -1,6 +1,18 @@
 name: sweep
 
-# One deep sweep per day, and an optional focused watch in the afternoon.
+# One broad sweep of the whole window per day, and two cheap re-prices of what
+# the trip has been narrowed to.
+#
+# The three slots answer two different questions and must not be confused. 02:00
+# prices the window: "is there a better week out there", the question a narrowing
+# was decided against and the one that goes stale fastest. 13:00 and 20:00 price
+# only the narrowing: "is the trip I have chosen getting cheaper".
+#
+# Until 24 Aug there was one question. `plan_searches` read the narrowing off the
+# trip file, so saving one silently narrowed every slot - the 02:00 run included.
+# Measured that morning on japan-philippines: two nightly runs of 48 searches
+# against a window of 85, both recorded as broad sweeps because a status only
+# ever wrote down the focus and this trip was narrowed by a return window.
 #
 # The repo is public, so Actions minutes are free and depth is not rationed by
 # budget. What constrains it is pelikan.cz, and the shape of that constraint is
@@ -40,10 +52,14 @@ on:
   schedule:
     - cron: '0 2 * * *'
     - cron: '0 13 * * *'
+    - cron: '0 20 * * *'
   workflow_dispatch:
     inputs:
       scenario:
         description: 'Scenario id (default: every enabled scenario)'
+        required: false
+      mode:
+        description: 'sweep (the whole window) | final (only the narrowing)'
         required: false
       depth:
         description: 'quick | standard | deep (default: deep)'
@@ -81,6 +97,7 @@ jobs:
       scenarios: ${{ steps.pick.outputs.scenarios }}
       jobs: ${{ steps.pick.outputs.jobs }}
       depth: ${{ steps.pick.outputs.depth }}
+      mode: ${{ steps.pick.outputs.mode }}
       reason: ${{ steps.pick.outputs.reason }}
     steps:
       - uses: actions/checkout@v4
@@ -90,20 +107,29 @@ jobs:
       - id: pick
         env:
           INPUT_SCENARIO: ${{ inputs.scenario }}
+          INPUT_MODE: ${{ inputs.mode }}
           INPUT_DEPTH: ${{ inputs.depth }}
           INPUT_SHARDS: ${{ inputs.shards }}
         run: |
           set -euo pipefail
           DEPTH="${INPUT_DEPTH:-deep}"
           echo "depth=$DEPTH" >> "$GITHUB_OUTPUT"
-          FOCUSED=""
-          if [ "${{ github.event.schedule }}" = "0 13 * * *" ]; then
-            FOCUSED="--focused"
+          # The slot decides the mode; a dispatch may override it. Both afternoon
+          # crons re-price the narrowing, and only 02:00 prices the window.
+          MODE="${INPUT_MODE:-sweep}"
+          case "${{ github.event.schedule }}" in
+            "0 13 * * *"|"0 20 * * *") MODE="final" ;;
+          esac
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+          FINAL=""
+          if [ "$MODE" = "final" ]; then
+            FINAL="--final"
           fi
           # --depth is the depth the sweep will run at, not the one on the file.
           # Sizing a trip saved as `quick` and dispatched as `deep` from the file
-          # would hand a seven-times bigger plan to one runner.
-          python scripts/plan_sweep.py --depth "$DEPTH" --shards "${INPUT_SHARDS:-0}" --only "${INPUT_SCENARIO:-}" $FOCUSED >> "$GITHUB_OUTPUT"
+          # would hand a seven-times bigger plan to one runner. --final sizes it
+          # from the narrowed plan for the same reason, in the other direction.
+          python scripts/plan_sweep.py --depth "$DEPTH" --shards "${INPUT_SHARDS:-0}" --only "${INPUT_SCENARIO:-}" $FINAL >> "$GITHUB_OUTPUT"
           cat "$GITHUB_OUTPUT"
 
   # A dispatch that named a trip and planned nothing for it is a failure, and
@@ -167,7 +193,7 @@ jobs:
 
       - name: Report the planned cost before spending it
         run: |
-          python -m src.cli sweep --scenario "${{ matrix.scenario }}" --depth "${{ needs.plan.outputs.depth }}" --shard "${{ matrix.shard }}/${{ matrix.shard_count }}" --dry-run || true
+          python -m src.cli sweep --scenario "${{ matrix.scenario }}" --mode "${{ needs.plan.outputs.mode }}" --depth "${{ needs.plan.outputs.depth }}" --shard "${{ matrix.shard }}/${{ matrix.shard_count }}" --dry-run || true
 
       - name: Sweep this shard
         env:
@@ -178,7 +204,7 @@ jobs:
           SWEEP_BUDGET_MIN: 140
         run: |
           set -euo pipefail
-          python -m src.cli sweep --scenario "${{ matrix.scenario }}" --depth "${{ needs.plan.outputs.depth }}" --shard "${{ matrix.shard }}/${{ matrix.shard_count }}" --data-dir shard-out --max-minutes "$SWEEP_BUDGET_MIN"
+          python -m src.cli sweep --scenario "${{ matrix.scenario }}" --mode "${{ needs.plan.outputs.mode }}" --depth "${{ needs.plan.outputs.depth }}" --shard "${{ matrix.shard }}/${{ matrix.shard_count }}" --data-dir shard-out --max-minutes "$SWEEP_BUDGET_MIN"
 
       - name: Hand the shard to the merge
         # Always: legs are appended as they are found, so there is nearly always
