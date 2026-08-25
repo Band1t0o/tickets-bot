@@ -1,0 +1,69 @@
+{
+  "scenario_id": "japan-philippines",
+  "state": "done",
+  "mode": "final",
+  "total": 31,
+  "completed": 31,
+  "current": "",
+  "legs_found": 271,
+  "errors": [],
+  "error_count": 0,
+  "legs_per_search": 8.74,
+  "route_coverage": 1.0,
+  "routes_planned": 5,
+  "routes_with_legs": 5,
+  "routes_with_no_results": [],
+  "route_searches": {
+    "VIE->NRT": 5,
+    "VIE->HND": 5,
+    "VIE->KIX": 5,
+    "KIX->MNL": 7,
+    "MNL->VIE": 9
+  },
+  "route_legs": {
+    "VIE->NRT": 50,
+    "VIE->HND": 50,
+    "VIE->KIX": 48,
+    "KIX->MNL": 70,
+    "MNL->VIE": 53
+  },
+  "route_errors": {
+    "VIE->NRT": 0,
+    "VIE->HND": 0,
+    "VIE->KIX": 0,
+    "KIX->MNL": 0,
+    "MNL->VIE": 0
+  },
+  "answered": 31,
+  "planned": 31,
+  "coverage": 1.0,
+  "unanswered": 0,
+  "shard": null,
+  "shards": [
+    [
+      0,
+      1
+    ]
+  ],
+  "focus": [
+    "2027-01-08",
+    "2027-01-12"
+  ],
+  "narrowing": {
+    "focus": [
+      "2027-01-08",
+      "2027-01-12"
+    ],
+    "return_focus": [
+      "2027-02-01",
+      "2027-02-12"
+    ],
+    "total_days": [
+      24,
+      28
+    ]
+  },
+  "started_at": "2026-08-25T13:49:00+00:00",
+  "finished_at": "2026-08-25T13:54:00+00:00",
+  "depth": "deep"
+}
