@@ -2496,14 +2496,14 @@ def open_narrow(page):
     page.wait_for_timeout(900)
 
 
-def drag_marker(page, leg_index, fraction):
+def drag_marker(page, leg_index, fraction, host="#leg-charts"):
     """Drag one leg's marker to `fraction` across the shared date axis.
 
     By fraction of the rendered box rather than to a date, for the same reason
     `chart_point` clicks that way: the SVG scales to its container, so the only
     honest way to land near a point is to compute from the box on screen.
     """
-    svg = page.locator("#leg-charts .leg-chart").nth(leg_index).locator("svg").first
+    svg = page.locator(f"{host} .leg-chart").nth(leg_index).locator("svg").first
     # Scrolled into view first, for the reason `chart_point` gives above:
     # `page.mouse` takes viewport coordinates and does not scroll, so a chart
     # below the fold is dragged at coordinates pointing at something else and
@@ -3342,8 +3342,11 @@ def test_the_step_says_what_a_final_sweep_would_search_and_what_it_costs(ui):
     said = page.locator("#final-narrowing").inner_text()
     assert "2027-01-08" in said and "2027-01-12" in said, said
     assert not page.locator("#final-run-btn").is_disabled()
-    cost = page.locator("#final-cost").inner_text()
-    assert "searches" in cost and "minutes" in cost, cost
+    # In the badge, beside the title, exactly where the sibling Run panel on
+    # Map it out puts the same figure. It used to be a third line under the
+    # sentence, while the badge repeated that sentence word for word.
+    cost = page.locator("#final-state").inner_text()
+    assert "searches" in cost and "min" in cost, cost
     assert not errors
 
 
@@ -3406,17 +3409,24 @@ def test_the_final_step_ranks_the_trips_the_narrowed_run_found(ui):
     assert not errors
 
 
-def test_a_row_of_the_final_ranking_is_not_offered_to_the_broad_charts(ui):
-    """The leg charts draw a broad run, so lifting a narrowed trip onto them
-    would put the markers on another run's prices."""
+def test_a_row_of_the_final_ranking_goes_onto_the_final_charts(ui):
+    """It used to be refused, on the grounds that the only charts in the app
+    drew a broad run and a narrowed trip would land on another run's prices.
+    That was true while this step had no charts of its own. It has."""
     page, scenarios, errors = ui
     narrow_the_trip(scenarios, focus_start="2027-01-08", focus_end="2027-01-14")
-    seed_sweep(scenarios.parent / "data", "2026-08-21T13-00-00Z", status=final_status())
+    seed_a_narrowed_week(scenarios.parent / "data")
     page.reload(wait_until="networkidle")
     open_final(page)
 
-    table = page.locator("#final-results-table")
-    assert "Put on the charts" not in table.inner_text()
+    row = page.locator("#final-results-table tbody tr[data-dates]").first
+    dates = row.get_attribute("data-dates").split(",")
+    row.locator("button", has_text="Put on the charts").click()
+    page.wait_for_timeout(700)
+
+    readout = page.locator("#final-cursor-readout").inner_text()
+    for when in dates:
+        assert when in readout, (when, readout)
     assert not errors
 
 
@@ -3444,4 +3454,234 @@ def test_the_follow_step_offers_both_kinds_of_run_and_names_which(ui):
         "el => el.options[el.selectedIndex].textContent"
     )
     assert "final" in chosen, chosen
+    assert not errors
+
+
+# ------------------------------------------- the narrowed run, priced per leg
+#
+# The charts, the cursor and the three buttons under them used to exist only on
+# "Narrow it down", reading only broad runs. That was right while the question
+# was *which week*, and wrong for the question this step asks: which exact
+# flights, at today's price. The final sweeps run twice a day against the broad
+# sweep's once a night, so the freshest per-leg prices in the app were the ones
+# with no chart.
+
+
+def seed_a_narrowed_week(data_dir, stamp="2026-08-21T13-00-00Z", **status):
+    """A final run over five departures, the shape a real one has.
+
+    Measured on the live trip: leg 0 got 5 dates, leg 1 got 7, leg 2 got 9, and
+    they do not overlap - three tight clusters on one 21-column axis rather than
+    the broad run's ~33 columns of everything against everything.
+    """
+    legs = []
+    for offset in range(5):
+        out = date(2027, 1, 8) + timedelta(days=offset)
+        legs += [
+            ("PRG", "NRT", out.isoformat(), 12000.0 + offset * 100),
+            ("NRT", "MNL", (out + timedelta(days=10)).isoformat(), 4000.0),
+            ("MNL", "PRG", (out + timedelta(days=20)).isoformat(), 14000.0),
+        ]
+    seed_sweep(data_dir, stamp, status=final_status(legs_found=len(legs), **status),
+               legs=legs)
+
+
+def open_final_charts(page):
+    open_final(page)
+    page.locator("#final-leg-charts").scroll_into_view_if_needed()
+    page.wait_for_timeout(300)
+
+
+def test_the_final_step_draws_the_narrowed_run_one_chart_per_leg(ui):
+    page, scenarios, errors = ui
+    narrow_the_trip(scenarios)
+    seed_a_narrowed_week(scenarios.parent / "data")
+    page.reload(wait_until="networkidle")
+    open_final_charts(page)
+
+    charts = page.locator("#final-leg-charts .leg-chart")
+    assert charts.count() == 3, page.locator("#final-leg-charts").inner_text()
+    # One shared axis, the same rule the broad charts follow: three charts
+    # scaled to their own dates would put three different days in one slice.
+    widths = [charts.nth(i).locator("svg").first.get_attribute("width") for i in range(3)]
+    assert len(set(widths)) == 1, widths
+    assert not errors
+
+
+def test_the_final_step_reads_plan_then_pick_then_rank(ui):
+    """The same rhythm as the step before it. Order is the argument."""
+    page, _, errors = ui
+    panels = page.locator('section[data-step="final"]').evaluate_all(
+        "els => els.map((e) => e.dataset.panel)"
+    )
+    assert panels == ["final-plan", "final-charts", "final-results"], panels
+    assert not errors
+
+
+def test_the_final_charts_offer_only_the_narrowed_runs(ui):
+    page, scenarios, errors = ui
+    narrow_the_trip(scenarios)
+    seed_sweep(scenarios.parent / "data", "2026-08-20T02-00-00Z", status=broad_status())
+    seed_a_narrowed_week(scenarios.parent / "data")
+    page.reload(wait_until="networkidle")
+    open_final_charts(page)
+
+    offered = page.locator("#final-sweep-charts").evaluate(
+        "el => [...el.options].map((o) => o.textContent)"
+    )
+    assert len(offered) == 1, offered
+    assert "final" in offered[0], offered
+    # And the broad step is still not offered the narrowed one.
+    open_narrow(page)
+    broad = page.locator("#narrow-sweep").evaluate(
+        "el => [...el.options].map((o) => o.textContent)"
+    )
+    assert all("final" not in row for row in broad), broad
+    assert not errors
+
+
+def test_the_two_steps_keep_their_own_pick(ui):
+    """Two populations, two cursors. A drag on the narrowed charts moving the
+    broad ones would be the toggle this deliberately is not."""
+    page, scenarios, errors = ui
+    narrow_the_trip(scenarios)
+    seed_a_week_of_dates(scenarios.parent / "data")
+    seed_a_narrowed_week(scenarios.parent / "data")
+    page.reload(wait_until="networkidle")
+
+    open_narrow(page)
+    before = page.locator("#cursor-readout").inner_text()
+
+    open_final_charts(page)
+    drag_marker(page, 0, 0.9, host="#final-leg-charts")
+
+    open_narrow(page)
+    assert page.locator("#cursor-readout").inner_text() == before
+    assert not errors
+
+
+def test_following_a_trip_from_the_final_charts_reaches_the_watch(ui):
+    """The whole reason these charts belong on this step: the booking decision
+    is made against the freshest prices, and this is where they are."""
+    page, scenarios, errors = ui
+    narrow_the_trip(scenarios)
+    seed_a_narrowed_week(scenarios.parent / "data")
+    page.reload(wait_until="networkidle")
+    open_final_charts(page)
+
+    page.locator("#final-cursor-watch").click()
+    page.wait_for_timeout(1200)
+
+    open_watch(page)
+    assert page.locator("#watch-table tbody tr").count() == 1
+    assert not errors
+
+
+def test_a_pick_on_the_final_charts_is_found_in_the_final_ranking(ui):
+    """And in the final one - pointing at the broad table from this step would
+    send you hunting through a run these prices did not come from."""
+    page, scenarios, errors = ui
+    narrow_the_trip(scenarios)
+    seed_a_week_of_dates(scenarios.parent / "data")
+    seed_a_narrowed_week(scenarios.parent / "data")
+    page.reload(wait_until="networkidle")
+    open_final_charts(page)
+
+    page.locator("#final-cursor-snap").click()
+    page.wait_for_timeout(900)
+    page.locator("#final-cursor-in-table").click()
+    page.wait_for_timeout(700)
+
+    assert page.locator("#final-results-table tbody tr.is-cursor").count() == 1
+    assert page.locator("#results-table tbody tr.is-cursor").count() == 0
+    assert not errors
+
+
+def test_the_final_step_says_when_cloud_runs_are_waiting(ui):
+    """It is the step the cloud files two runs a day into, and it was the one
+    step that could not say any had arrived."""
+    page, scenarios, errors = ui
+    narrow_the_trip(scenarios)
+    page.route("**/api/cloud-sync", lambda route: route.fulfill(
+        status=200, content_type="application/json",
+        body=json.dumps({
+            "known": True, "missing_count": 1, "can_fast_forward": True,
+            "blocked_by": "", "missing": {"jp-ph": ["2026-08-21T13-00-00Z"]},
+        }),
+    ))
+    page.reload(wait_until="networkidle")
+    open_final(page)
+
+    notice = page.locator("#final-cloud-sync")
+    assert notice.is_visible(), notice.inner_text()
+    assert "not on this machine" in notice.inner_text()
+    assert page.locator("#final-cloud-sync-get").is_visible()
+    assert not errors
+
+
+# ---------------------------------------------------------- one line, one row
+#
+# `.row` centred its children, and a `label.field` is a two-line column - a 12px
+# label stacked over its control. Centring a ~49px column against ~35px buttons
+# put their bottom edges seven pixels apart, in every run row and every filter
+# row on every tab. Measured rather than eyeballed, so it cannot drift back.
+
+
+def bottom_of(page, selector: str) -> float:
+    box = page.locator(selector).bounding_box()
+    return box["y"] + box["height"]
+
+
+@pytest.mark.parametrize(
+    ("field", "button"),
+    [("#depth", "#run-local-btn"), ("#final-depth", "#final-run-btn")],
+)
+def test_a_control_and_the_button_beside_it_sit_on_one_line(ui, field, button):
+    page, scenarios, errors = ui
+    narrow_the_trip(scenarios)
+    page.reload(wait_until="networkidle")
+    if field.startswith("#final"):
+        open_final(page)
+
+    assert abs(bottom_of(page, field) - bottom_of(page, button)) <= 1.0, (
+        f"{field} and {button} do not share a bottom edge"
+    )
+    assert not errors
+
+
+def test_the_same_control_is_the_same_size_on_every_step(ui):
+    """The two selects already agree, because `label.field` sets the size and
+    the extra `.small` on one of them changes nothing. Pinned so that stripping
+    the redundant class - or adding a size to one panel - cannot quietly make
+    the same control two different sizes on two tabs."""
+    page, scenarios, errors = ui
+    narrow_the_trip(scenarios)
+    page.reload(wait_until="networkidle")
+    open_final(page)
+
+    sizes = {
+        which: page.locator(which).evaluate("el => getComputedStyle(el).fontSize")
+        for which in ("#depth", "#final-depth")
+    }
+    assert len(set(sizes.values())) == 1, sizes
+    assert not errors
+
+
+def test_the_trend_says_it_is_counting_rather_than_showing_nothing(ui):
+    """`/api/history` re-combines every sweep on disk - measured at 7.0s for a
+    trip with twelve of them. For all seven seconds the panel was a heading over
+    nothing, which is what a trip with no sweeps looks like."""
+    page, scenarios, errors = ui
+    for day in range(20, 24):
+        seed_sweep(scenarios.parent / "data", f"2026-08-{day}T02-00-00Z", status=broad_status())
+    page.reload(wait_until="networkidle")
+
+    page.locator('#tabs button[data-tab="follow"]').click()
+    # Read immediately, before the request can have come back.
+    said = page.locator("#chart-history").inner_text()
+    assert "Reading every sweep" in said, said
+
+    # And it is replaced by the chart, not left there.
+    page.wait_for_timeout(4000)
+    assert page.locator("#chart-history svg").count() == 1
     assert not errors
