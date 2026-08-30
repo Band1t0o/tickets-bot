@@ -206,17 +206,27 @@ line on the trend chart. `plan_searches` prices the window and nothing on the tr
 `_leg_window(scenario, leg_index, narrowed)` in [src/sweep/planner.py](src/sweep/planner.py) is still
 the one place the four constraints meet.
 
-### Final sweeps
+### Narrow sweeps
 
-The step after narrowing, and the reason narrowing is worth doing more than once. Once the decision has
-settled, what you want is not one more price but the *same* price on Monday, Tuesday and Wednesday, so
-a drop is visible as a drop. On the real trip that is **31 searches against 85** -- cheap enough to run
-three times a day against a site that answers about 120 per address.
+The reason narrowing is worth doing more than once. Once the decision has settled, what you want is
+not one more price but the *same* price on Monday, Tuesday and Wednesday, so a drop is visible as a
+drop. On the real trip that is **31 searches against 85** -- cheap enough to run three times a day
+against a site that answers about 120 per address.
 
 | | prices | when |
 |---|---|---|
 | broad sweep (`--mode sweep`) | the whole window | 02:00 UTC, and on demand from *Map it out* |
-| final sweep (`--mode final`) | only what you narrowed to | 13:00 and 20:00 UTC, and on demand from *Final sweeps* |
+| narrow sweep (`--mode final`) | only what you narrowed to | 13:00 and 20:00 UTC when the trip asks for it, and on demand from *Narrow it down* |
+
+**Asking for it is a tick, not a side effect of narrowing.** `sweep_narrowing` on the trip decides
+whether the two afternoon slots run at all; `plan_sweep --final` selects on it as well as on there
+being a narrowing to run. Narrowing a trip in order to *read* the window through it is an ordinary
+thing to do, and it used to be indistinguishable from asking for two more runs a day. The boxes
+filter the charts either way; the searches are the part worth choosing about. It defaults to true,
+which is what every trip committed before the field existed was already getting.
+
+The mode is still called `final` on disk, in `status.json` and in `--mode`. Renaming it would make
+every run ever committed look like a run of something else, which is a worse lie than an old name.
 
 Both land in `data/sweeps/<id>/<stamp>/` and are told apart by `status.json`, which now records all
 three constraints rather than the focus alone:
@@ -412,6 +422,28 @@ alphabetically put Narita 22nd, behind Aomori and Saga. By runway, NRT/KIX/NGO/H
 Airports you already use appear as one-click chips beside the picker, split by direction — derived
 from your saved trips and `airport_notes.json`, not hardcoded, so it follows you somewhere new.
 
+### Your airports
+
+**How easy an airport is to get to is a third axis, and nothing knew it.** Brno is a tram ride,
+Prague is a morning, Vienna is a coach — and frequency cannot discover that, because the usual
+reason a convenient airport goes unused is that it has no long-haul inventory. (`BRQ` is exactly
+that: convenient, and flagged *no inventory* by `viability.py` in the same chip.)
+
+So `data/home_airports.json` is a single ordered list, most convenient first, edited under ⚙ Setup:
+
+```json
+{ "airports": ["BRQ", "PRG", "VIE", "FRA"] }
+```
+
+It replaces the frequency-derived chips under **Depart from** and **Back to**, in your order.
+Destinations are untouched — there is no convenient end to a trip to Japan. Shaped like
+`sources.py`: the defaults live in code and the file only overrides, so a missing or hand-mangled
+one costs you the ordering of some chips rather than the ability to build a trip.
+
+Distinct from `Scenario.preferred_origins`, which ranks which airport **Discord** should report
+about and lives per trip. This one is about the journey to the airport and nothing else; which
+airport is *cheapest* is what a sweep finds out.
+
 **Whether an airport is worth using is derived from your own sweeps**, not hand-written:
 [src/viability.py](src/viability.py) reads sweep history and flags routes that were searched
 repeatedly and never returned a single offer. That is breakage or genuinely absent inventory, and
@@ -528,8 +560,9 @@ The repo is **public**, so Actions minutes are free and depth is no longer ratio
 
 | Job | Schedule | Runtime |
 |---|---|---:|
-| Sweep ([scrape.yml](.github/workflows/scrape.yml)) | daily 02:00 UTC, `deep` | ~119 min |
-| Focused watch (same workflow) | daily 13:00 UTC, only with a focus set | ~48 min |
+| Broad sweep ([scrape.yml](.github/workflows/scrape.yml)) | daily 02:00 UTC, `deep` | ~119 min |
+| Narrow sweep (same workflow) | 13:00 and 20:00 UTC, only for trips that asked | ~8 min |
+| Preference check ([watch.yml](.github/workflows/watch.yml)) | every 4 h | ~4 min |
 | Volatility probe ([probe.yml](.github/workflows/probe.yml)) | every 2 h | ~2 min |
 | Tests ([test.yml](.github/workflows/test.yml)) | every push | ~1 min |
 
@@ -652,6 +685,78 @@ Two conclusions the data supports, both of which contradict the intuition that p
 
 ---
 
+## Preferences
+
+A **preference** is one of the two or three trips you are actually deciding between: the leg dates
+you picked off the charts, a name, and a couple of days' slack either side of each. They are ranked
+in the order you would take them, they are what *Follow it* draws, and they replaced the pinned
+watch -- a watch was a preference with no slack.
+
+A sweep answers "what is this window worth?" once a day at hundreds of searches. Once it has shown
+which days are cheap, the question changes to "are *those* moving?", and re-sweeping the window to
+answer it is the load pelikan.cz throttles this client for. A preference prices the days it pinned
+instead: on `japan-philippines` that is **15 searches at the default slack** against 483 for a deep
+sweep, which is what lets it run every four hours.
+
+**Two numbers come back, and keeping them apart is the whole discipline of it.**
+
+| | is | drawn as |
+|---|---|---|
+| `total` | the chain on the dates you pinned | the line on the chart |
+| `nearby_total` | the cheapest chain anywhere inside the slack | a sentence under the row, with a button |
+
+The line must never move. `record_observations` filters the run's legs to the pinned dates *at their
+own position in the chain* before combining -- positionally, via `leg_pools`, because a preference
+leaving on the 12th and flying on the 25th admits both dates and a set-membership test would chain a
+VIE-HND leg on the 25th into a trip nobody pinned. Without that filter `best_by_date` hands back the
+cheapest chain leaving on the pinned morning, which once the slack has priced the later legs is a
+*different trip*: it would draw as your trip falling by four thousand, with nothing on screen saying
+the dates had changed underneath you.
+
+The neighbour is the return on the slack, and measured on the 30 August sweep it is real: the
+committed preference costs **24,187 CZK** on 12 Jan → 25 Jan → 6 Feb, and **22,770** for the same
+trip flying home on the 8th instead. That is the answer a decision is waiting on, and no pinned
+watch could ever have given it. *Move it to those dates* is a `PATCH`, not a new preference -- the
+series belongs to the decision, and starting a fresh one on every shift would leave you unable to
+see that the trip has fallen since you began looking.
+
+**A substituted day is a hole, not a price.** pelikan.cz answers the 25th with the 26th when it has
+nothing on the 25th; `record_leg_observations` allows that slack, because a leg watch asks about one
+ticket. Here it would mean quietly pricing a trip you did not pick, so `total` is `None` for that
+check and `nearby_total` reports the 26th by name, with an offer to move to it.
+
+`nearby` deliberately includes the pinned days themselves, so a preference already sitting on the
+cheapest day in its window reports no saving rather than being offered a move to something dearer.
+At zero slack it is `null` and not the pinned total: "nothing nearby is cheaper" is a claim that run
+did not pay to make.
+
+**Discord hears about `total` only.** A cheaper neighbouring day would need a high-water mark of its
+own or it would be re-reported every four hours, and it would mix two populations in one alert the
+way `best.json` once mixed broad and narrowed sweeps. The page says it instead.
+
+### Following a preference follows its flights
+
+Saving one from the charts also follows each of its legs, one search each -- and they cost nothing,
+because `plan_watch` dedupes them against the preference's own searches. They are tagged with the
+preference in the flights table and are dropped by dropping it; a route you picked by hand carries
+an empty `source` and survives.
+
+They are **stored** rather than derived at read time. A preference pins dates and not airports --
+deliberately, so a check can still find that Frankfurt undercut Vienna overnight -- so a derived row
+would have no stable key on a leg with several airport pairs, and `leg_report` keys an entire series
+on that string. A key that moved would start a new series and abandon the old one, silently.
+
+### What the cap is really on
+
+`MAX_PREFERENCES = 4` is the cheap guard that needs no planner. The one that binds is
+`WATCH_SEARCH_CAP = 110` in `web/app.py`, applied to the whole planned run -- preferences and
+followed flights together -- because what a preference costs depends on its slack and on how many
+airport pairs each leg has, neither of which a row count can see. Measured: three preferences at ±2
+days is **45 searches** on a trip whose crossing is pinned, and **315** on one with three departure
+airports and two in Japan. The count is the same; the run is not.
+
+---
+
 ## The UI
 
 `make ui`, or the **Flight watcher** desktop shortcut ([start-ui.bat](start-ui.bat)).
@@ -661,10 +766,9 @@ Three steps and a gear, in the order the work is actually done:
 | Step | Holds | Answers |
 |---|---|---|
 | **Map it out** | Search, Explore | what trip is this, and which airports are worth pricing |
-| **Narrow it down** | the narrowing (with the cheapest-by-day chart inside it), every leg priced separately, the itinerary table | *which days, and which trip* |
-| **Final sweeps** | what a narrowed sweep would search and what it costs, every leg of a narrowed run priced separately, their ranking | *is the trip I chose getting cheaper* |
-| **Follow it** | flights and trips you are following, best total over time, the volatility probe | *is it moving, should I book now* |
-| ⚙ **Setup** | Discord, night sweep, Cloud, Sources | none of the above |
+| **Narrow it down** | the narrowing (with the cheapest-by-day chart and the narrow sweep's own controls inside it), every leg priced separately, the itinerary table — over the whole window or over just what you chose | *which days, and which trip* |
+| **Follow it** | your preferences, the flights you are following, best total over time, the volatility probe | *is it moving, should I book now* |
+| ⚙ **Setup** | your airports, Discord, night sweep, Cloud, Sources | none of the above |
 
 It was seven tabs, one per panel, which read as a list of screens rather than as an order. Two of
 them were the same panel twice: **Prices** and **Watch** both drew a price history and neither said
@@ -672,26 +776,82 @@ which question it was answering. They are split by question now rather than by d
 chart says which days and sits with the narrowing, the history chart and the probe say whether to
 book now and sit with what you are following, and neither step shows both.
 
-Sections carry a `data-step`; several share one. `data-panel` stays as each panel's own name, since
-that is what every renderer, test and error box already addresses them by, and `showTab` accepts
-either — asked for a panel it opens that panel's step and scrolls to it, which is what a finished
-sweep opening Results and a save error opening Search both need.
+**Final sweeps used to be a fourth step, and was the same mistake again.** It held a copy of Narrow
+it down's two panels drawn over the narrowed runs instead of the broad ones, which is one step read
+two ways. The code had been saying so since the day it was written: both pairs are one set of
+renderers behind an id prefix. It is a `[the whole window | just what I chose]` switch inside the
+step now, and the run buttons it also held sit beside the boxes that decide what they would search.
 
-**Narrow it down** and **Final sweeps** draw the same ranking *and the same leg charts* from one set
-of renderers, pointed at different runs. Each is a `resultsView` and a `legView` naming the ids it
-owns, the run it has selected and the modes its picker may offer; the ids differ only by a `final-`
-prefix, so a panel added to one and forgotten in the other shows up as a missing element rather than
-as the two quietly sharing a control. The cursors are deliberately separate: a drag on one moving the
-other would be the broad/final toggle these two steps exist instead of.
+### Which trip opens
+
+The picker used to open `scenarios[0]`, which is alphabetical by id and so is nobody's answer. On a
+machine holding both `eu-phil-japan-eu` ("EU - Phil - Japan - EU", switched off, never swept) and
+`japan-philippines` ("Europe → Japan → Philippines → Europe", the trip actually being decided), it
+opened the first — two names a word apart, and the one that opened drew empty charts, which is
+indistinguishable from a trip whose data has gone.
+
+It opens the **last trip you had open** (remembered in `localStorage`, wrapped in try/catch because
+a private window throws on access), then **the first trip that is switched on**, then alphabetical
+order for a fresh checkout where neither applies.
+
+Switching trips goes through `openScenario`, and the order in it is the point: `loadScenario` refills
+the route editor, `pollStatus` refreshes `state.sweeps`, and only then does `showTab` redraw the
+step you are standing on. Redrawing earlier painted the new trip's boxes over the *previous* trip's
+list of runs and left "no broad sweep with flights on disk yet" above a trip with thirteen of them.
+Not redrawing at all — which is what it did — left the charts, the ranking and the whole preference
+list describing the trip you had just left, changing only the name in the picker.
+
+### Saying it where it can be read
+
+Explanations collapse by default — `.panel__hint` is prose about how a mechanic works, and it is
+hidden until *What this is for* is pressed. That is right for teaching and it is a trap for anything
+the step is unusable without. Narrow it down fell into it exactly: every word about what the date
+boxes *do* was collapsible prose, so the default view of the step was a pile of date boxes, a
+checkbox and four buttons, with nothing on screen saying whether the boxes filter what you read, or
+buy searches, or both — or whether the nightly sweep still covers the window once you narrow.
+
+So the answer is a **live** line (`#narrow-role`), written by the renderer from the trip in front of
+you and never collapsed, under the boxes it is about:
+
+> These dates filter the charts and the ranking on this step, and they are what the narrow sweep
+> prices at 13:00 and 20:00. The broad sweep is untouched either way: it goes on pricing every date
+> in the window at 02:00, and it is the only thing that can still find a cheaper week outside what
+> you chose.
+
+The rule this follows: **anything a reader must know to use a control belongs in a heading, a
+label, a button's name or a live line — never in prose that hides.** The same reason the switch
+carries `#population-note` ("every date in the window, swept at 02:00 every night"), the narrow
+sweep's controls are fenced under a heading that names them, and its two buttons are called *Run a
+narrow sweep here* and *Run one in the cloud* rather than repeating *Run it in the cloud* from
+Map it out — two identically named buttons running different modes was the single most confusing
+thing on the page.
+
+The switch shows one pair of panels and hides the other, rather than merging them, because **each
+population keeps its own selected run** — flipping across and back must not lose the run you were
+reading. A hidden section measures its container at zero width, so the newly visible pair is
+re-drawn and not merely unhidden.
+
+Sections carry a `data-step`; several share one, and the two pairs above also carry a
+`data-population`. `data-panel` stays as each panel's own name, since that is what every renderer,
+test and error box already addresses them by, and `showTab` accepts either — asked for a panel it
+opens that panel's step, switches to the population that panel belongs to, and scrolls to it, which
+is what a finished sweep opening Results and a save error opening Search both need.
+
+The two pairs draw the same ranking *and* the same leg charts from one set of renderers, pointed at
+different runs. Each is a `resultsView` and a `legView` naming the ids it owns, the run it has
+selected and the modes its picker may offer; the ids differ only by a `final-` prefix, so a panel
+added to one and forgotten in the other shows up as a missing element rather than as the two quietly
+sharing a control. The cursors are deliberately separate: a drag on one moving the other would
+collapse the distinction the switch exists to keep.
 
 **Every step that lists runs owns its selection** — `state.stamp`, `state.finalStamp`,
 `state.watchStamp`, and the probe's `state.exploreStamp`. One shared stamp is how the watch picker
-came to show whichever run another step had last chosen. Narrow it down offers only broad runs and
-Final sweeps only narrowed ones, because reading the wrong one puts a narrowed run's cheapest under a
-heading that says it is the trip's cheapest — and at the same depth on the same day the two are
-indistinguishable in a list. **Follow it** deliberately offers both, prefixed `final ·`, and defaults
-to the newest narrowed run: by the time you are pinning days, that is the freshest pricing of the days
-you care about.
+came to show whichever run another step had last chosen. The broad population offers only broad runs
+and the narrow one only narrowed runs, because reading the wrong one puts a narrowed run's cheapest
+under a heading that says it is the trip's cheapest — and at the same depth on the same day the two
+are indistinguishable in a list. **Follow it** deliberately offers both, prefixed `final ·`, and
+defaults to the newest narrowed run: by the time you are pinning days, that is the freshest pricing
+of the days you care about.
 
 ### The explanations are on demand
 
@@ -730,22 +890,22 @@ So **Narrow it down** draws one chart per leg, stacked on one shared date axis, 
 marker on each. A vertical slice down the stack is one trip; the readout above says what it costs,
 what split it implies, and how many nights it is.
 
-**Final sweeps draws them too, over its own runs.** The two steps ask different questions of the same
-picture: which week, against which exact flights at today's price. For a while only the first had
-charts, on the argument that picking needs the whole window on the axis — true for picking a
+**The narrow population draws them too, over its own runs.** The two ask different questions of the
+same picture: which week, against which exact flights at today's price. For a while only the broad
+one had charts, on the argument that picking needs the whole window on the axis — true for picking a
 narrowing, and false for picking a flight. It left the app's freshest per-leg prices as the only ones
-with no chart, since a final sweep runs twice a day and the broad sweep once a night, and it pointed
-**Follow this trip** at the stalest data in the app.
+with no chart, since a narrow sweep runs twice a day and the broad sweep once a night, and it pointed
+**Save as preference** at the stalest data in the app.
 
 A narrowed run's legs barely overlap — measured on `japan-philippines`, five departures, seven
 middles and nine returns, a 21-column axis of three tight clusters against the broad run's ~33
 columns of everything against everything. Denser and easier to read, not degenerate. Nothing about
-the readout is special-cased for it: everything a final sweep priced already obeys the narrowing, so
+the readout is special-cased for it: everything a narrow sweep priced already obeys the narrowing, so
 no badge can fire on its own, but a marker dragged past a stay range still trips one — which is
 exactly the case worth naming.
 
 **Nothing is enforced.** Drag a marker into a fifteen-night Japan stay against a 10-13 range and an
-amber badge names the rule; the price is still totalled, and **Follow this trip** still works. The
+amber badge names the rule; the price is still totalled, and **Save as preference** still works. The
 stay ranges exist so a sweep knows what to price, and a range typed a month ago is not evidence that
 a stay is wrong — it is only a statement about where to look. *Snap to the cheapest that fits* is
 there to argue with, and takes its answer from `/results?window=narrow` rather than working one out
@@ -754,12 +914,12 @@ here, so it always lands on exactly the itinerary the table calls cheapest.
 The one pick the panel refuses is a leg departing before the one before it has arrived. That is not
 a preference, and no sweep, watch or airline could price it.
 
-Following a rule-breaking pick used to be refused at the save. `_validate_watches` checked the stay
-ranges, on the sound-until-it-wasn't grounds that the combiner could never close such a chain and
-the watch would report nothing every four hours. `watch._admitting` now widens the stays to whatever
-a candidate pinned before pricing it — per candidate, so one watch's widening cannot decide
-another's price — and drops the narrowing entirely, since a watch's dates are already chosen and
-leaving it on would blank every followed trip the moment the window moved.
+Following a rule-breaking pick used to be refused at the save. `_validate_preferences` checked the
+stay ranges, on the sound-until-it-wasn't grounds that the combiner could never close such a chain
+and the check would report nothing every four hours. `watch._admitting` now widens the stays to
+whatever a preference pinned before pricing it — per preference, so one preference's widening cannot
+decide another's price — and drops the narrowing entirely, since a preference's dates are already
+chosen and leaving it on would blank every followed trip the moment the window moved.
 
 A leg's name expands into one line per airport pair, capped at six because that is how many chart
 colours were validated in both themes; the rest are counted rather than drawn in a colour that lies.
@@ -840,6 +1000,7 @@ scripts/build_airports.py regenerates the airport catalogue from OurAirports
 src/
   scenario.py             schema, validation, load/save, migration
   airports.py             catalogue lookup and search
+  home_airports.py        your airports, ranked by how easy each is to reach
   viability.py            what sweep history says about a route or airport
   sources.py              per-site URL grammar and selectors, with the defaults
   sweep/planner.py        scenario -> searches, and the routes a trip requires
@@ -849,6 +1010,7 @@ src/
   alerts.py               which itineraries are worth reporting
   verify.py               re-price the shortlist on a second site
   probe.py                volatility sampling and report
+  watch.py                preferences: what they cost now, and what is cheaper nearby
   notify_discord.py       price + health alerts
   webhook_store.py        the Discord webhook, kept where `git add` cannot reach
   providers/
@@ -861,10 +1023,12 @@ data/airports.json        4,161 airports: code, city, country, size, aliases
 data/countries.json       ISO code -> country name, so "Japan" is searchable
 data/airport_notes.json   hand-measured findings no sweep can reproduce
 data/sources.json         overrides for src/sources.py; delete to restore defaults
+data/home_airports.json   your airport ranking; delete to fall back to your trips
 .secrets/discord.json     the webhook URL — gitignored, never committed
 data/sweeps/<id>/<ts>/    legs.jsonl, status.json, scenario.json (the trip it
                           searched), best.json, verify.json
 data/probe/               observations.jsonl
+data/watch/<id>/          observations.jsonl (preferences), leg-observations.jsonl
 docs/superpowers/specs/   design documents
 ```
 

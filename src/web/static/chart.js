@@ -10,7 +10,7 @@
  * - `lineChart` is one series against an index of evenly spaced labels. The
  *   price-by-date and best-over-time charts are both that shape, and it has
  *   no legend because the panel title names the series.
- * - `multiLineChart` is several series against *time*. The watched days are
+ * - `multiLineChart` is several series against *time*. The preferences are
  *   that shape: each is added at a different moment and has its own number of
  *   observations, so an index axis would draw two candidates recorded hours
  *   apart as though they had been measured together.
@@ -366,7 +366,7 @@ export function lineChart(points, opts = {}) {
 
 /* Series colours, in the order they are handed out. Six tokens exist and were
    validated in both themes; a seventh series would wrap and two lines would
-   share a colour, which is why the API refuses a seventh watched day long
+   share a colour, which is why the API caps preferences well below that long
    before it gets here. */
 const SERIES_COLORS = [
   'var(--color-chart1)', 'var(--color-chart2)', 'var(--color-chart3)',

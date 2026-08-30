@@ -5,5 +5,26 @@
     "recorded_at": "2026-08-24T07:45:36+00:00",
     "best_total": 22056.0,
     "best_at": "2026-08-24T07:45:36+00:00"
+  },
+  "legwatch:KIX-MNL@2027-01-26": {
+    "last_total": 4230.0,
+    "currency": "CZK",
+    "recorded_at": "2026-08-30T17:00:42+00:00",
+    "best_total": 4230.0,
+    "best_at": "2026-08-30T17:00:42+00:00"
+  },
+  "legwatch:MNL-VIE@2027-02-08": {
+    "last_total": 6916.0,
+    "currency": "CZK",
+    "recorded_at": "2026-08-30T17:00:42+00:00",
+    "best_total": 6916.0,
+    "best_at": "2026-08-30T17:00:42+00:00"
+  },
+  "legwatch:VIE-HND@2027-01-16": {
+    "last_total": 10430.0,
+    "currency": "CZK",
+    "recorded_at": "2026-08-30T17:00:42+00:00",
+    "best_total": 10430.0,
+    "best_at": "2026-08-30T17:00:42+00:00"
   }
 }

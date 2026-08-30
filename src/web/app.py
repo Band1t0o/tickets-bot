@@ -22,9 +22,18 @@ from fastapi.staticfiles import StaticFiles
 from ..airports import describe, frequent_airports, lookup
 from ..airports import search_with_meta as search_airports
 from ..combine import combine_all, series_from_result
+from ..home_airports import load_ranking, save_ranking
 from ..notify_discord import COLOR_INFO, post
 from ..providers.pelikan_url import build_search_url
-from ..scenario import LegWatch, Scenario, Watch, load_scenario, read_scenarios, save_scenario
+from ..scenario import (
+    DEFAULT_SLACK_DAYS,
+    LegWatch,
+    Preference,
+    Scenario,
+    load_scenario,
+    read_scenarios,
+    save_scenario,
+)
 from ..sources import DEFAULTS as DEFAULT_SOURCES
 from ..sources import (
     Source,
@@ -81,8 +90,10 @@ SAFE_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # reports the cheapest of the half.
 #
 # Checked here rather than in `Scenario.validate` because the count depends on
-# the planner, and `scenario.py` cannot import it without a cycle. `MAX_WATCHES`
-# is the cheap guard that needs no planner; this is the one that actually binds.
+# the planner, and `scenario.py` cannot import it without a cycle. It is also the
+# only figure that can see what a preference really costs, since that depends on
+# its slack and on how many airport pairs each leg has. `MAX_PREFERENCES` is the
+# cheap guard that needs no planner; this is the one that actually binds.
 WATCH_SEARCH_CAP = 110
 
 # The branch the scheduled sweep runs from, and commits its results to. Defined
@@ -116,7 +127,7 @@ FORCED_DEPTH = re.compile(r"INPUT_DEPTH:-(\w+)")
 # and 400s for things it needs, and renders them as emptiness - which is
 # indistinguishable from "you have no saved trips". `static/app.js` carries the
 # same number and refuses to render until they match.
-API_CONTRACT = 14
+API_CONTRACT = 15
 
 app = FastAPI(title="Flight scenario watcher")
 
@@ -202,8 +213,58 @@ def airport_search(q: str = "", limit: int = 20) -> dict:
 
 @app.get("/api/airports/frequent")
 def airport_frequent() -> dict:
-    """Airports you already use, for one-click chips beside the typeahead."""
-    return frequent_airports(SCENARIO_DIR, data_dir=DATA_DIR)
+    """Airports for the one-click chips beside the typeahead.
+
+    `origins` is your convenience ranking when you have set one, in your own
+    order - Brno before Prague before Vienna, because that is the order you
+    would rather leave from. It falls back to counting the airports your saved
+    trips already use, which is what this always did and is still the best
+    guess available before anyone has ranked anything.
+
+    The two are different questions and the ranking wins on purpose: frequency
+    cannot discover that an airport is convenient, because the usual reason a
+    convenient airport goes unused is that it has no inventory.
+
+    `destinations` is untouched. There is no convenient end to a trip to Japan.
+    """
+    frequent = frequent_airports(SCENARIO_DIR, data_dir=DATA_DIR)
+    ranked = load_ranking(DATA_DIR)
+    if not ranked:
+        return {**frequent, "ranked": False}
+
+    found = (lookup(code, data_dir=DATA_DIR) for code in ranked)
+    return {
+        **frequent,
+        "origins": [airport for airport in found if airport],
+        # So the chip row can label itself honestly. "Yours, in order" is a
+        # different claim from "airports you have used", and a row that made the
+        # first claim while showing the second would be the page lying quietly.
+        "ranked": True,
+    }
+
+
+@app.get("/api/home-airports")
+def get_home_airports() -> dict:
+    """The ranking, with each code described, so the page can show cities."""
+    ranked = load_ranking(DATA_DIR)
+    return {
+        "airports": ranked,
+        "described": [
+            airport for code in ranked if (airport := lookup(code, data_dir=DATA_DIR))
+        ],
+    }
+
+
+@app.put("/api/home-airports")
+def put_home_airports(payload: dict = Body(...)) -> dict:
+    codes = payload.get("airports")
+    if not isinstance(codes, list):
+        raise HTTPException(400, "airports must be a list of IATA codes, most convenient first")
+    try:
+        save_ranking(codes, DATA_DIR)
+    except (ValueError, OSError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return get_home_airports()
 
 
 @app.get("/api/airports/{code}")
@@ -300,7 +361,20 @@ def _cloud_state(live: Scenario, forced_depth: str) -> dict:
     """
     cloud = _cloud_scenario(live.id)
     if cloud is None:
-        return {"known": False, "differs": [], "included": None, "searches": None}
+        # Two different answers used to share this one. "The branch has no such
+        # trip" is certain and actionable - a cloud run of it plans nothing and
+        # the workflow fails it twenty seconds later - while "this app cannot
+        # read the branch at all" is genuinely unknown. Collapsed together, the
+        # first was reported in the second's words and offered an override that
+        # could only produce a red run.
+        readable = _git("rev-parse", "--verify", "--quiet", CLOUD_REF) is not None
+        return {
+            "known": False,
+            "on_branch": False if readable else None,
+            "differs": [],
+            "included": None,
+            "searches": None,
+        }
 
     differs = []
     if cloud.enabled != live.enabled:
@@ -315,6 +389,7 @@ def _cloud_state(live: Scenario, forced_depth: str) -> dict:
         differs.append("how finely it prices")
     return {
         "known": True,
+        "on_branch": True,
         "differs": differs,
         "included": cloud.enabled,
         # What the cloud will really spend the night doing. On 21 Aug that was
@@ -707,6 +782,19 @@ def run_in_cloud(
     if not force:
         _fetch_cloud_ref()
         cloud = _cloud_state(scenario, _night_depth())
+        if cloud.get("on_branch") is False:
+            # No override offered, because there is nothing on the other side of
+            # one: `plan` reads the branch's own scenario files, so a name it
+            # does not have plans no searches, the two sweep jobs skip, and
+            # `dispatched-nothing` fails the run. Refused here rather than as a
+            # red run in Actions twenty seconds from now.
+            raise HTTPException(
+                400,
+                f"'{scenario_id}' is not on {CLOUD_REF}. The cloud sweeps the trips "
+                f"committed to that branch, so it has never seen this one and a run "
+                f"would sweep nothing. Commit and push "
+                f"scenarios/{scenario_id}.json first.",
+            )
         if not cloud["known"]:
             raise HTTPException(
                 400,
@@ -1575,7 +1663,7 @@ def sweep_candidates(
 ) -> dict:
     """The cheapest trip on each departure date this sweep priced, cheapest first.
 
-    The Watch tab's source list. It differs from `by-date`, which draws the
+    The Follow step's source list. It differs from `by-date`, which draws the
     chart, in carrying every leg's date: pinning a candidate means pinning the
     trip that won the day, not merely the day.
     """
@@ -1610,7 +1698,7 @@ def sweep_candidates(
 
 
 def _watch_payload(scenario: Scenario) -> dict:
-    """Every watched day and leg, the series each has traced, and what a check costs.
+    """Every preference and followed leg, their series, and what a check costs.
 
     One payload for both because they share one budget: the searches figure and
     the cap below are for the whole planned run, and reporting them separately
@@ -1622,18 +1710,28 @@ def _watch_payload(scenario: Scenario) -> dict:
     report = watch_report(_watch_dir(scenario.id))
     legs_recorded = leg_report(_watch_dir(scenario.id))["legs"]
     searches = plan_watch(scenario)
-    candidates = []
-    for watch in scenario.watches:
-        recorded = report["candidates"].get(watch.key, {})
-        candidates.append(
+    preferences = []
+    for rank, preference in enumerate(scenario.preferences):
+        recorded = report["candidates"].get(preference.key, {})
+        preferences.append(
             {
-                "depart_date": watch.key,
-                "depart_dates": [d.isoformat() for d in watch.depart_dates],
-                "added_at": watch.added_at,
+                "depart_date": preference.key,
+                "depart_dates": [d.isoformat() for d in preference.depart_dates],
+                # The label as it will be shown - `describe()` rather than the
+                # raw field, so a preference saved without one is named by its
+                # shape here instead of every reader inventing its own fallback.
+                "label": preference.describe(),
+                # And the raw one beside it, because an edit box pre-filled with
+                # a derived name turns the next save into a typed-in label.
+                "raw_label": preference.label,
+                "slack_days": preference.slack_days,
+                "rank": rank,
+                "nights": preference.nights,
+                "added_at": preference.added_at,
                 # What it cost when it was picked, so the very first observation
                 # can already say which way it has gone.
-                "added_price": watch.added_price,
-                "currency": recorded.get("currency", watch.currency),
+                "added_price": preference.added_price,
+                "currency": recorded.get("currency", preference.currency),
                 "route": recorded.get("route"),
                 "has_overland": recorded.get("has_overland", False),
                 "series": recorded.get("series", []),
@@ -1641,6 +1739,13 @@ def _watch_payload(scenario: Scenario) -> dict:
                 "first": recorded.get("first"),
                 "latest": recorded.get("latest"),
                 "latest_with_bags": recorded.get("latest_with_bags"),
+                # The cheapest trip inside this preference's slack, and where it
+                # flies. Reported beside the pinned price and never as it - the
+                # line on the chart is the trip that was chosen.
+                "nearby_total": recorded.get("nearby_total"),
+                "nearby_total_with_bags": recorded.get("nearby_total_with_bags"),
+                "nearby_dates": recorded.get("nearby_dates"),
+                "nearby_route": recorded.get("nearby_route"),
                 "net_change": recorded.get("net_change", 0),
                 "net_change_pct": recorded.get("net_change_pct", 0.0),
                 "low": recorded.get("low"),
@@ -1676,6 +1781,11 @@ def _watch_payload(scenario: Scenario) -> dict:
             "exact": recorded.get("exact", True),
             "found_date": recorded.get("found_date"),
             "off_trip": (watch.origin, watch.destination) not in trip_routes,
+            # Which preference brought this row along, or "" when you picked it
+            # yourself. The table tags it and suppresses its unfollow button -
+            # a preference's legs are dropped by dropping the preference, or the
+            # two lists could disagree about what is being followed.
+            "source": watch.source,
             # Where to go and buy it. The watch records a price and never the
             # offer's URL - `record_leg` keeps what it needs to compare, and a
             # deep link scraped four hours ago is not that - so the search is
@@ -1696,7 +1806,7 @@ def _watch_payload(scenario: Scenario) -> dict:
 
     return {
         "scenario_id": scenario.id,
-        "candidates": candidates,
+        "preferences": preferences,
         "legs": watched_legs,
         "searches": len(searches),
         "minutes": estimate_minutes(searches),
@@ -1713,11 +1823,23 @@ def get_watch(scenario_id: str) -> dict:
 
 @app.post("/api/watch/{scenario_id}", status_code=201)
 def add_watch(scenario_id: str, payload: dict = Body(...)) -> dict:
-    """Start watching one candidate trip.
+    """Save one preference, and follow each of its legs with it.
 
-    Refused on two counts, both in words the page shows verbatim: a candidate
+    Refused on two counts, both in words the page shows verbatim: a preference
     the combiner could never chain, and a plan that would run past what the
     site answers.
+
+    The legs come along automatically, from `routes` - the origin/destination
+    the page actually picked on the charts, which is the one thing a preference
+    does not itself pin. They are stored rather than derived for the reason
+    written on `LegWatch.source`: a derived row would have no stable key on a
+    leg with several airport pairs, and an entire price series is keyed on that
+    string. They cost nothing extra, because `plan_watch` dedupes them against
+    the preference's own searches.
+
+    `routes` is optional. Without it the preference is saved with no legs
+    followed, which is what the by-hand form sends - it knows the dates and not
+    which airports will win them.
     """
     scenario = _scenario_or_404(scenario_id)
     raw = payload.get("depart_dates") or []
@@ -1728,13 +1850,54 @@ def add_watch(scenario_id: str, payload: dict = Body(...)) -> dict:
     except ValueError as exc:
         raise HTTPException(400, f"depart_dates must be YYYY-MM-DD: {exc}") from exc
 
-    candidate = Watch(
+    slack = payload.get("slack_days")
+    try:
+        slack = DEFAULT_SLACK_DAYS if slack is None else int(slack)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(400, f"slack_days must be a whole number of days: {exc}") from exc
+
+    now = datetime.now(UTC).isoformat(timespec="seconds")
+    candidate = Preference(
         depart_dates=dates,
-        added_at=datetime.now(UTC).isoformat(timespec="seconds"),
+        label=str(payload.get("label") or "").strip(),
+        slack_days=slack,
+        added_at=now,
         added_price=payload.get("added_price"),
         currency=payload.get("currency") or scenario.currency,
     )
-    proposed = replace(scenario, watches=[*scenario.watches, candidate])
+
+    followed = list(scenario.leg_watches)
+    seen = {w.key for w in followed}
+    for index, route in enumerate(payload.get("routes") or []):
+        if index >= len(dates):
+            break
+        try:
+            origin = str(route["origin"]).strip().upper()
+            destination = str(route["destination"]).strip().upper()
+        except (KeyError, TypeError) as exc:
+            raise HTTPException(400, "each route needs an origin and a destination") from exc
+        leg = LegWatch(
+            origin=origin,
+            destination=destination,
+            depart_date=dates[index],
+            added_at=now,
+            added_price=route.get("price"),
+            currency=payload.get("currency") or scenario.currency,
+            source=candidate.key,
+        )
+        # A route you had already picked by hand stays yours: it keeps its own
+        # empty `source`, so dropping the preference later leaves it followed.
+        # Re-adding it under the preference would make one flight two rows
+        # writing to one series key.
+        if leg.key not in seen:
+            seen.add(leg.key)
+            followed.append(leg)
+
+    proposed = replace(
+        scenario,
+        preferences=[*scenario.preferences, candidate],
+        leg_watches=followed,
+    )
     try:
         proposed.validate()
     except ValueError as exc:
@@ -1744,9 +1907,104 @@ def add_watch(scenario_id: str, payload: dict = Body(...)) -> dict:
     if planned > WATCH_SEARCH_CAP:
         raise HTTPException(
             400,
-            f"watching that day as well would be {planned} searches every few hours, "
+            f"that preference as well would be {planned} searches every few hours, "
             f"and pelikan.cz stops answering this client after about "
-            f"{WATCH_SEARCH_CAP}. Stop watching a day first, or narrow the trip.",
+            f"{WATCH_SEARCH_CAP}. Drop a preference, or give this one less slack.",
+        )
+
+    save_scenario(proposed, SCENARIO_DIR)
+    return _watch_payload(proposed)
+
+
+def _leg_index_of(preference: Preference, when: date) -> int | None:
+    """Which leg of `preference` departs on `when`, if any."""
+    for index, pinned in enumerate(preference.depart_dates):
+        if pinned == when:
+            return index
+    return None
+
+
+@app.patch("/api/watch/{scenario_id}/{depart_date}")
+def edit_watch(scenario_id: str, depart_date: str, payload: dict = Body(...)) -> dict:
+    """Rename a preference, change its slack, move its dates, or reorder it.
+
+    Moving the dates is what the "two days later is cheaper" line does, and it
+    is a genuine move rather than a new preference: the series belongs to this
+    decision, and starting a fresh one every time you shift a day would leave
+    you unable to see that the trip has fallen four thousand since you began.
+
+    The key changes with the first date, so the leg watches that came with it
+    are re-pointed in the same write - otherwise they would be orphaned rows
+    that no deletion could ever find.
+    """
+    scenario = _scenario_or_404(scenario_id)
+    if not SAFE_DATE.match(depart_date):
+        raise HTTPException(400, f"{depart_date!r} is not a date")
+
+    current = next((p for p in scenario.preferences if p.key == depart_date), None)
+    if current is None:
+        raise HTTPException(404, f"no preference leaves on {depart_date}")
+
+    changes: dict = {}
+    if "label" in payload:
+        changes["label"] = str(payload.get("label") or "").strip()
+    if "slack_days" in payload:
+        try:
+            changes["slack_days"] = int(payload["slack_days"])
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(400, f"slack_days must be a whole number: {exc}") from exc
+    if "depart_dates" in payload:
+        try:
+            changes["depart_dates"] = [
+                date.fromisoformat(str(value)) for value in payload["depart_dates"] or []
+            ]
+        except ValueError as exc:
+            raise HTTPException(400, f"depart_dates must be YYYY-MM-DD: {exc}") from exc
+
+    moved = replace(current, **changes)
+    preferences = [moved if p.key == depart_date else p for p in scenario.preferences]
+
+    # Rank is position, so reordering is a move within the list rather than a
+    # field on the row - which is what stops two preferences ever claiming the
+    # same rank.
+    if "rank" in payload:
+        try:
+            wanted = int(payload["rank"])
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(400, f"rank must be a whole number: {exc}") from exc
+        preferences.remove(moved)
+        preferences.insert(max(0, min(wanted, len(preferences))), moved)
+
+    legs = []
+    for watch in scenario.leg_watches:
+        index = _leg_index_of(current, watch.depart_date)
+        if watch.source == depart_date and index is not None:
+            legs.append(
+                replace(watch, depart_date=moved.depart_dates[index], source=moved.key)
+            )
+        elif watch.source == depart_date:
+            # Its preference moved but this row is not on any of the days the
+            # preference used to fly - so it is no longer that preference's leg.
+            # Kept, and handed back to you: it is still a flight someone chose,
+            # and deleting it here would be this endpoint quietly unfollowing
+            # something nobody asked it to.
+            legs.append(replace(watch, source=""))
+        else:
+            legs.append(watch)
+
+    proposed = replace(scenario, preferences=preferences, leg_watches=legs)
+    try:
+        proposed.validate()
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    planned = len(plan_watch(proposed))
+    if planned > WATCH_SEARCH_CAP:
+        raise HTTPException(
+            400,
+            f"that change would be {planned} searches every few hours, and pelikan.cz "
+            f"stops answering this client after about {WATCH_SEARCH_CAP}. Give it less "
+            f"slack, or drop another preference.",
         )
 
     save_scenario(proposed, SCENARIO_DIR)
@@ -1755,16 +2013,25 @@ def add_watch(scenario_id: str, payload: dict = Body(...)) -> dict:
 
 @app.delete("/api/watch/{scenario_id}/{depart_date}")
 def remove_watch(scenario_id: str, depart_date: str) -> dict:
+    """Drop a preference, and the leg watches that came with it.
+
+    Its own legs only. A route you picked by hand carries an empty `source` and
+    survives, because you asked for it independently of any trip.
+    """
     scenario = _scenario_or_404(scenario_id)
     if not SAFE_DATE.match(depart_date):
         raise HTTPException(400, f"{depart_date!r} is not a date")
-    kept = [w for w in scenario.watches if w.key != depart_date]
-    if len(kept) == len(scenario.watches):
-        raise HTTPException(404, f"{depart_date} is not being watched")
-    updated = replace(scenario, watches=kept)
+    kept = [p for p in scenario.preferences if p.key != depart_date]
+    if len(kept) == len(scenario.preferences):
+        raise HTTPException(404, f"no preference leaves on {depart_date}")
+    updated = replace(
+        scenario,
+        preferences=kept,
+        leg_watches=[w for w in scenario.leg_watches if w.source != depart_date],
+    )
     save_scenario(updated, SCENARIO_DIR)
     # The observations stay. They were real measurements that cost real
-    # searches, and un-picking a day is not a request to forget what it did -
+    # searches, and un-picking a trip is not a request to forget what it did -
     # the same reason deleting a trip leaves its sweeps behind.
     return _watch_payload(updated)
 
@@ -1810,7 +2077,7 @@ def add_leg_watch(scenario_id: str, payload: dict = Body(...)) -> dict:
             400,
             f"following that flight as well would be {planned} searches every few "
             f"hours, and pelikan.cz stops answering this client after about "
-            f"{WATCH_SEARCH_CAP}. That budget covers the watched days and the "
+            f"{WATCH_SEARCH_CAP}. That budget covers the preferences and the "
             f"watched flights together, so stop following one of either first.",
         )
 
@@ -1833,15 +2100,15 @@ def remove_leg_watch(scenario_id: str, key: str) -> dict:
 
 @app.post("/api/watch/{scenario_id}/run")
 def run_watch_now(scenario_id: str) -> dict:
-    """Check the watched days now, on this machine.
+    """Re-price the preferences and followed flights now, on this machine.
 
     The scheduled workflow is what keeps the series going; this is for when an
     answer is wanted before the next slot comes round. Threaded exactly like a
     local sweep, so the status strip reports it the same way.
     """
     scenario = _scenario_or_404(scenario_id)
-    if not scenario.watches and not scenario.leg_watches:
-        raise HTTPException(400, "nothing is being watched yet, so there is nothing to check")
+    if not scenario.preferences and not scenario.leg_watches:
+        raise HTTPException(400, "nothing is being followed yet, so there is nothing to check")
     key = _watch_key(scenario_id)
     if _is_running(key):
         raise HTTPException(409, "a check is already running for this trip")

@@ -602,8 +602,9 @@ def run_sweep(
 
     `mode="explore"` runs the reconnaissance plan instead: every route on a
     handful of dates, to find out which airports are worth pricing at all.
-    `mode="watch"` runs the pinned candidates of `scenario.watches` and writes
-    to `data/watch/` rather than `data/sweeps/`.
+    `mode="watch"` runs the preferences of `scenario.preferences`, with the
+    slack each one asks for, and writes to `data/watch/` rather than
+    `data/sweeps/`.
     Deliberately a separate argument from `depth` rather than a fourth depth -
     depth is saved on the scenario and read by the nightly cloud workflow, so an
     "explore" depth could be persisted and quietly turn the daily sweep into a
@@ -788,11 +789,21 @@ def run_sweep(
             # the trip said at the time. Reading it the other way is how two
             # runs of 48 searches out of 85 were charted as broad ones.
             "narrowing": narrowing,
-            # The candidates this run was following, so a watch directory says
-            # what it is a watch *of* without needing the trip beside it - the
-            # trip is edited, and the run is not.
+            # The preferences this run was following, so a watch directory says
+            # what it is a check *of* without needing the trip beside it - the
+            # trip is edited, and the run is not. The slack travels with them
+            # because it decides what was searched, and two runs of the same
+            # preference at different slacks are not the same plan.
+            #
+            # `watches` is the key every status ever written uses, and every one
+            # of those runs is a run of what are now preferences. Renaming it
+            # would make each of them look like a run that followed nothing.
             "watches": [
-                [d.isoformat() for d in watch.depart_dates] for watch in scenario.watches
+                {
+                    "depart_dates": [d.isoformat() for d in preference.depart_dates],
+                    "slack_days": preference.slack_days,
+                }
+                for preference in scenario.preferences
             ],
             "started_at": result.started_at,
             "finished_at": result.finished_at,

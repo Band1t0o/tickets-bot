@@ -283,11 +283,13 @@ def run_watch_command(
         raise SystemExit(2)
 
     scenario = load_scenario(path)
-    if not scenario.watches and not scenario.leg_watches:
+    if not scenario.preferences and not scenario.leg_watches:
         # Not an error condition so much as nothing to do, but it exits non-zero
         # so a workflow that dispatched this by mistake says so instead of
-        # committing an empty run that reads as a watch which found nothing.
-        print(f"[{scenario_id}] nothing is being watched; pick days on the Watch tab first")
+        # committing an empty run that reads as a check which found nothing.
+        print(
+            f"[{scenario_id}] nothing is being followed; save a preference on Follow it first"
+        )
         raise SystemExit(2)
 
     result = run_sweep_command(
@@ -324,7 +326,10 @@ def run_watch_command(
         print(f"[{scenario_id}] nothing fell far enough to be worth a message")
         return result
 
-    print(f"[{scenario_id}] {len(fell)} watched day(s) and {len(legs_fell)} watched leg(s) got cheaper")
+    print(
+        f"[{scenario_id}] {len(fell)} preference(s) and {len(legs_fell)} "
+        f"watched leg(s) got cheaper"
+    )
     if notify:
         from .notify_discord import notify_watch
 
@@ -531,7 +536,7 @@ def main():
     p_watch.add_argument("--no-notify", action="store_true")
 
     p_watch_report = sub.add_parser(
-        "watch-report", help="Show how each watched day has moved"
+        "watch-report", help="Show how each preference has moved"
     )
     p_watch_report.add_argument("--scenario", required=True)
     p_watch_report.add_argument("--data-dir", default="data")

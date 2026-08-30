@@ -61,6 +61,28 @@ def test_the_final_slot_skips_a_trip_that_has_been_narrowed_to_nothing(tmp_path)
     assert choose(directory, final=True, data_dir=data) == []
 
 
+def test_the_final_slot_skips_a_narrowed_trip_that_asked_it_not_to(tmp_path):
+    """Two different questions, and they used to have one answer.
+
+    `has_narrowing` asks whether there is anything to sweep. `sweep_narrowing`
+    asks whether you want it swept - and narrowing a trip in order to *read* the
+    window through it is an ordinary thing to do that was indistinguishable
+    from asking for two more runs a day.
+    """
+    directory = trips(tmp_path, focused(id="a", sweep_narrowing=False))
+    data = healthy_sweep(tmp_path, "a")
+    assert choose(directory, final=True, data_dir=data) == []
+
+
+def test_a_dispatch_of_a_trip_that_opted_out_says_which_of_the_two_it_is(tmp_path):
+    """Not the same sentence as an unnarrowed trip, because it is not the same
+    problem: one needs a narrowing typed, the other needs a box ticked."""
+    directory = trips(tmp_path, focused(id="a", sweep_narrowing=False))
+    data = healthy_sweep(tmp_path, "a")
+    said = reason_for_nothing(directory, "a", final=True, data_dir=data)
+    assert "switched off" in said
+
+
 def test_the_final_slot_runs_a_trip_that_has_a_focus(tmp_path):
     directory = trips(tmp_path, focused(id="a"))
     data = healthy_sweep(tmp_path, "a")
@@ -132,11 +154,11 @@ def test_the_broad_slot_is_never_gated(tmp_path):
 def watching(**overrides):
     from datetime import date
 
-    from src.scenario import Watch
+    from src.scenario import Preference
 
     return make_scenario(
-        watches=[
-            Watch(depart_dates=[date(2027, 1, 10), date(2027, 1, 20), date(2027, 1, 30)])
+        preferences=[
+            Preference(depart_dates=[date(2027, 1, 10), date(2027, 1, 20), date(2027, 1, 30)])
         ],
         **overrides,
     )
@@ -316,7 +338,7 @@ def test_a_dispatch_of_a_trip_with_nothing_to_watch_says_that_instead(tmp_path):
     directory = trips(tmp_path, make_scenario(id="plain"))
     reason = reason_for_nothing(directory, "plain", watching=True)
     assert "plain" in reason
-    assert "watch" in reason.lower()
+    assert "following" in reason.lower()
 
 
 def test_nothing_to_explain_when_the_dispatch_planned_something(tmp_path):

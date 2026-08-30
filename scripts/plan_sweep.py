@@ -36,6 +36,18 @@ def has_narrowing(scenario) -> bool:
     )
 
 
+def sweeps_its_narrowing(scenario) -> bool:
+    """Whether the 13:00/20:00 slots should re-price this trip's narrowing.
+
+    Two conditions, and they are different questions. `has_narrowing` asks
+    whether there is anything to sweep; `sweep_narrowing` asks whether you want
+    it swept. Narrowing a trip in order to *read* the window through it is an
+    ordinary thing to do - the boxes filter the charts either way - and it used
+    to be indistinguishable from asking for two more runs a day.
+    """
+    return has_narrowing(scenario) and scenario.sweep_narrowing
+
+
 def choose(
     directory: Path,
     wanted: str = "",
@@ -83,9 +95,9 @@ def choose(
         # - but the watch is 63, and the days it follows are the ones a booking
         # decision is actually waiting on. If the site is refusing, the watch
         # records that honestly through coverage and says nothing.
-        return [s.id for s in trips if s.watches or s.leg_watches]
+        return [s.id for s in trips if s.preferences or s.leg_watches]
     if final:
-        trips = [s for s in trips if has_narrowing(s)]
+        trips = [s for s in trips if sweeps_its_narrowing(s)]
     return [s.id for s in trips]
 
 
@@ -109,9 +121,9 @@ def reason_for_nothing(
     if not wanted or choose(directory, wanted, final, data_dir, watching):
         return ""
 
-    known = [s.id for s in load_scenarios(directory)]
-    if wanted not in known:
-        listed = ", ".join(sorted(known)) or "none at all"
+    trips = {s.id: s for s in load_scenarios(directory)}
+    if wanted not in trips:
+        listed = ", ".join(sorted(trips)) or "none at all"
         return (
             f"No trip is called {wanted!r}. The trips on this branch are: {listed}. "
             "The cloud sweeps the committed branch, so a trip saved only on your "
@@ -119,10 +131,15 @@ def reason_for_nothing(
         )
     if watching:
         return (
-            f"{wanted!r} is not watching anything, so a watch of it would price "
-            "nothing. Pin some days or follow a flight on the Watch tab first."
+            f"{wanted!r} is not following anything, so a check of it would price "
+            "nothing. Save a preference or follow a flight on the Follow it step first."
         )
     if final:
+        if has_narrowing(trips[wanted]):
+            return (
+                f"{wanted!r} is narrowed, but has 'Also sweep just these' switched off, "
+                "so its narrowing filters what you read and costs no searches."
+            )
         return (
             f"{wanted!r} has not been narrowed to anything - no departure window, "
             "no return window, no nights band - so a final sweep of it would price "

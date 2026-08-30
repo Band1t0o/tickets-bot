@@ -1,0 +1,74 @@
+"""Tests for the convenience ranking of the airports near home.
+
+The axis nothing else measures. `frequent_airports` counts what the saved trips
+use, and `preferred_origins` ranks what Discord should report - neither can say
+that Brno is a tram ride and Vienna is a coach, and neither could learn it,
+because the usual reason a convenient airport goes unused is that it has no
+long-haul inventory at all.
+
+So the things under test are the ones that keep it from getting in the way: that
+a missing or broken file costs you the ordering and never the page, and that a
+typo typed into the form is refused by name rather than silently dropped.
+"""
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from src.home_airports import load_ranking, save_ranking
+
+
+def test_a_ranking_round_trips_in_the_order_it_was_given(tmp_path):
+    """Position is rank, so the order is the entire content of the file."""
+    save_ranking(["BRQ", "PRG", "VIE"], tmp_path)
+    assert load_ranking(tmp_path) == ["BRQ", "PRG", "VIE"]
+
+
+def test_codes_are_taken_however_they_are_typed(tmp_path):
+    save_ranking([" brq ", "Prg"], tmp_path)
+    assert load_ranking(tmp_path) == ["BRQ", "PRG"]
+
+
+def test_no_file_is_no_ranking_rather_than_an_error(tmp_path):
+    """Empty means "no ranking", and every caller falls back to what it did
+    before. It is the normal state of a fresh checkout."""
+    assert load_ranking(tmp_path) == []
+
+
+def test_a_corrupt_file_costs_the_ordering_and_not_the_page(tmp_path):
+    """The same rule as a corrupt `sources.json`: degrade to the default.
+
+    A hand-edited file with a trailing comma should cost you the order of some
+    chips, not the ability to build a trip at all.
+    """
+    (tmp_path / "home_airports.json").write_text("{ nonsense,", encoding="utf-8")
+    assert load_ranking(tmp_path) == []
+
+
+def test_a_bad_code_already_on_disk_is_skipped_rather_than_fatal(tmp_path):
+    (tmp_path / "home_airports.json").write_text(
+        json.dumps({"airports": ["BRQ", "nonsense", "PRG"]}), encoding="utf-8"
+    )
+    assert load_ranking(tmp_path) == ["BRQ", "PRG"]
+
+
+def test_a_repeated_code_on_disk_keeps_its_first_place(tmp_path):
+    """Rank is position, so one airport twice would have two ranks and the
+    reading would depend on which loop found it first."""
+    (tmp_path / "home_airports.json").write_text(
+        json.dumps({"airports": ["BRQ", "PRG", "BRQ"]}), encoding="utf-8"
+    )
+    assert load_ranking(tmp_path) == ["BRQ", "PRG"]
+
+
+def test_a_typo_typed_into_the_form_is_refused_by_name(tmp_path):
+    """Unlike the read path, which repairs. Nobody typed what is on disk; they
+    did type this, and it is a mistake worth being told about."""
+    with pytest.raises(ValueError, match="Brno"):
+        save_ranking(["BRQ", "Brno"], tmp_path)
+
+
+def test_the_same_airport_twice_in_one_save_is_refused(tmp_path):
+    with pytest.raises(ValueError, match="twice"):
+        save_ranking(["BRQ", "PRG", "BRQ"], tmp_path)

@@ -1046,3 +1046,128 @@ tr.is-cursor > td:first-child { font-weight: 600; }
    step of the work — it is the drawer the work is configured from. */
 .tabs .spacer { flex: 1; }
 .tabs__gear { font-size: 16px; line-height: 1; }
+
+/* ---------------------------------------------------- the population switch
+
+   Which runs the narrowing step is reading: the whole window, or only what you
+   narrowed to. Deliberately not styled like `.tabs` - it is a switch inside one
+   step and not a fourth step, and the tab bar above it is already saying where
+   you are. A segmented control, sitting on the panel background rather than
+   under a rule, so the two never read as the same level of navigation. */
+
+.switch {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 14px;
+  padding: 3px;
+  border: 1px solid var(--color-tableBorder);
+  border-radius: 8px;
+  background: var(--color-tableRowAlternate);
+}
+
+.switch button {
+  border: none;
+  background: none;
+  border-radius: 6px;
+  color: var(--color-pageTextLight);
+  padding: 5px 12px;
+  font-weight: 500;
+}
+
+.switch button:hover:not(:disabled) {
+  background: var(--color-pageBackground);
+  color: var(--color-pageText);
+}
+
+.switch button.is-active {
+  background: var(--color-pageBackground);
+  color: var(--color-accentText);
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 8%);
+}
+
+.switch .spacer { flex: 1; }
+.switch .small { padding-right: 8px; }
+
+/* Reordering arrows on a chip, used only by the airport ranking - the one chip
+   row where position means something. Sized and coloured like `.chip__remove`
+   beside them, so a chip reads as one control and not as three. */
+.chip__move {
+  border: none;
+  background: none;
+  padding: 0 3px;
+  color: var(--color-pageTextLight);
+  font-size: 11px;
+  line-height: 1;
+}
+
+.chip__move:hover:not(:disabled) { color: var(--color-pageText); background: none; }
+.chip__move:disabled { opacity: 0.3; }
+
+/* The rank number in front of a preference's name. */
+.rank {
+  display: inline-block;
+  min-width: 18px;
+  margin-right: 6px;
+  color: var(--color-pageTextLight);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+/* The row under a preference offering a cheaper set of dates inside its slack.
+   Indented and unruled, so it reads as a note on the row above rather than as
+   another preference. */
+.pref-offer td {
+  border-top: none;
+  padding-top: 0;
+  padding-left: 26px;
+  font-size: 12px;
+}
+
+.pref-offer button { margin-left: 6px; }
+
+.pref-actions { white-space: nowrap; }
+.pref-actions > * { margin-left: 4px; }
+
+/* The word before the two switch buttons. Without it they read as an unlabelled
+   pair of modes; with it the row is a sentence - "reading: the whole window". */
+.switch__label {
+  padding-left: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-tableHeaderText);
+}
+
+/* How many runs are on the side you are not looking at. An empty population and
+   one that failed to draw look identical, and pressing it to find out is the
+   confusion the switch caused; this answers before the press. */
+.switch__count {
+  font-weight: 400;
+  color: var(--color-pageTextSubdued);
+}
+
+/* A fenced group inside a panel, for a decision that has its own controls and
+   its own consequences. The narrow sweep's checkbox, depth and two run buttons
+   sat loose in the panel's Save row, which put two identically named "run it in
+   the cloud" buttons in one app with nothing saying which was which. */
+.subpanel {
+  margin-top: 18px;
+  padding: 14px 16px 4px;
+  border: 1px solid var(--color-tableBorder);
+  border-radius: 8px;
+  background: var(--color-tableRowAlternate);
+}
+
+.subpanel .subhead { margin-top: 0; }
+
+/* Prose bullets, at the hint's own size and colour. Two things the dates do,
+   which as one sentence was the paragraph nobody could hold in their head. */
+.panel__hint--list {
+  margin: 0 0 10px;
+  padding-left: 20px;
+}
+
+.panel__hint--list li { margin-bottom: 3px; }

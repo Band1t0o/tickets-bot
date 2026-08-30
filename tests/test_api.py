@@ -11,7 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.models import Leg
-from src.scenario import Scenario, Stop, save_scenario
+from src.scenario import DEFAULT_SLACK_DAYS, Scenario, Stop, save_scenario
 
 AIRPORTS = [
     {"iata": "PRG", "name": "Vaclav Havel", "city": "Prague", "country": "CZ", "rank": 0,
@@ -1757,7 +1757,7 @@ def test_candidates_offer_the_cheapest_trip_per_departure_date(client):
 def test_a_trip_starts_out_watching_nothing(client):
     api, _ = client
     body = api.get("/api/watch/jp-ph").json()
-    assert body["candidates"] == []
+    assert body["preferences"] == []
     assert body["searches"] == 0
 
 
@@ -1769,20 +1769,38 @@ def test_adding_a_day_writes_it_to_the_trip(client):
     )
     assert response.status_code == 201
     trip = api.get("/api/scenarios/jp-ph").json()
-    assert trip["watches"][0]["depart_dates"] == ["2027-01-10", "2027-01-20", "2027-01-30"]
-    assert trip["watches"][0]["added_price"] == 27000
-    assert trip["watches"][0]["added_at"]
+    saved = trip["preferences"][0]
+    assert saved["depart_dates"] == ["2027-01-10", "2027-01-20", "2027-01-30"]
+    assert saved["added_price"] == 27000
+    assert saved["added_at"]
+    assert saved["slack_days"] == DEFAULT_SLACK_DAYS
 
 
 def test_adding_a_day_reports_what_watching_it_will_cost(client):
     api, _ = client
     body = api.post(
         "/api/watch/jp-ph",
-        json={"depart_dates": ["2027-01-10", "2027-01-20", "2027-01-30"]},
+        json={"depart_dates": ["2027-01-10", "2027-01-20", "2027-01-30"], "slack_days": 0},
     ).json()
-    # 2 origins x 1 Japanese airport, 1 x 1, 1 x 2 = 2 + 1 + 2 per candidate.
+    # 2 origins x 1 Japanese airport, 1 x 1, 1 x 2 = 2 + 1 + 2 per preference.
     assert body["searches"] == 5
     assert body["minutes"] > 0
+
+
+def test_slack_multiplies_what_a_preference_costs(client):
+    """Five dates a leg instead of one, and the badge has to say so.
+
+    The count is what the cap is applied to, so a preference whose cost the
+    payload under-reported would be one the page offered to add and the run
+    could not afford.
+    """
+    api, _ = client
+    body = api.post(
+        "/api/watch/jp-ph",
+        json={"depart_dates": ["2027-01-10", "2027-01-20", "2027-01-30"], "slack_days": 2},
+    ).json()
+    assert body["searches"] == 5 * 5
+    assert body["preferences"][0]["slack_days"] == 2
 
 
 def test_a_hand_picked_day_outside_the_stays_may_still_be_followed(client):
@@ -1817,9 +1835,13 @@ def test_watching_more_than_the_site_will_answer_is_refused(client, monkeypatch)
 
     monkeypatch.setattr(app_module, "WATCH_SEARCH_CAP", 6)
     api, _ = client
-    api.post("/api/watch/jp-ph", json={"depart_dates": ["2027-01-10", "2027-01-20", "2027-01-30"]})
+    api.post(
+        "/api/watch/jp-ph",
+        json={"depart_dates": ["2027-01-10", "2027-01-20", "2027-01-30"], "slack_days": 0},
+    )
     response = api.post(
-        "/api/watch/jp-ph", json={"depart_dates": ["2027-01-12", "2027-01-22", "2027-02-01"]}
+        "/api/watch/jp-ph",
+        json={"depart_dates": ["2027-01-12", "2027-01-22", "2027-02-01"], "slack_days": 0},
     )
     assert response.status_code == 400
     assert "10" in response.json()["detail"]  # the count it would have reached
@@ -1829,7 +1851,7 @@ def test_a_watched_day_can_be_dropped(client):
     api, _ = client
     api.post("/api/watch/jp-ph", json={"depart_dates": ["2027-01-10", "2027-01-20", "2027-01-30"]})
     assert api.delete("/api/watch/jp-ph/2027-01-10").status_code == 200
-    assert api.get("/api/scenarios/jp-ph").json()["watches"] == []
+    assert api.get("/api/scenarios/jp-ph").json()["preferences"] == []
 
 
 def test_dropping_a_day_that_is_not_watched_is_a_404(client):
@@ -1858,7 +1880,7 @@ def test_the_watch_reports_the_series_it_has_recorded(client):
             }) + "\n")
 
     body = api.get("/api/watch/jp-ph").json()
-    candidate = body["candidates"][0]
+    candidate = body["preferences"][0]
     assert candidate["depart_date"] == "2027-01-10"
     assert candidate["latest"] == 28500
     assert candidate["net_change"] == -1500
@@ -1866,6 +1888,140 @@ def test_the_watch_reports_the_series_it_has_recorded(client):
     # Carried through from the trip so the tab can say "down 1,500 since you
     # picked it" rather than only "down since the first observation".
     assert candidate["added_price"] == 30000
+
+
+# ------------------------------------------- a preference brings its legs along
+#
+# Following a trip follows each of its flights, because that is how the decision
+# is actually read: the trip line says whether to keep waiting, the leg lines say
+# which flight is the one moving. They cost nothing extra - `plan_watch` dedupes
+# them against the preference's own searches.
+
+
+PREF = {
+    "depart_dates": ["2027-01-10", "2027-01-20", "2027-01-30"],
+    "routes": [
+        {"origin": "PRG", "destination": "NRT", "price": 12000},
+        {"origin": "NRT", "destination": "MNL", "price": 4000},
+        {"origin": "MNL", "destination": "PRG", "price": 14000},
+    ],
+}
+
+
+def test_saving_a_preference_follows_each_of_its_flights(client):
+    api, _ = client
+    body = api.post("/api/watch/jp-ph", json=PREF).json()
+    assert [leg["key"] for leg in body["legs"]] == [
+        "PRG-NRT@2027-01-10", "NRT-MNL@2027-01-20", "MNL-PRG@2027-01-30"
+    ]
+    # Tagged with the preference that brought them, so the table can say so and
+    # can suppress an unfollow that would leave the two lists disagreeing.
+    assert {leg["source"] for leg in body["legs"]} == {"2027-01-10"}
+
+
+def test_a_preferences_legs_cost_nothing_on_top_of_it(client):
+    """The dedup is the whole reason this is affordable.
+
+    Every route/date a preference's legs name is one the preference already
+    searches, so following them adds no searches at all.
+    """
+    api, _ = client
+    with_legs = api.post("/api/watch/jp-ph", json={**PREF, "slack_days": 0}).json()["searches"]
+    api.delete("/api/watch/jp-ph/2027-01-10")
+    bare = api.post(
+        "/api/watch/jp-ph",
+        json={"depart_dates": PREF["depart_dates"], "slack_days": 0},
+    ).json()["searches"]
+    assert with_legs == bare
+
+
+def test_dropping_a_preference_drops_its_legs_and_leaves_yours(client):
+    """Its own legs only.
+
+    A route you picked by hand was asked for independently of any trip, and
+    un-picking the trip is not a request to stop following it.
+    """
+    api, _ = client
+    api.post(
+        "/api/watch/jp-ph/legs",
+        json={"origin": "FRA", "destination": "NRT", "depart_date": "2027-01-15"},
+    )
+    api.post("/api/watch/jp-ph", json=PREF)
+
+    body = api.delete("/api/watch/jp-ph/2027-01-10").json()
+    assert body["preferences"] == []
+    assert [leg["key"] for leg in body["legs"]] == ["FRA-NRT@2027-01-15"]
+
+
+def test_a_flight_you_already_followed_stays_yours(client):
+    """One flight, one row, one series.
+
+    Adding it a second time under the preference would give one ticket two rows
+    writing to the same series key - and dropping the preference would then take
+    a flight you had picked yourself with it.
+    """
+    api, _ = client
+    api.post(
+        "/api/watch/jp-ph/legs",
+        json={"origin": "PRG", "destination": "NRT", "depart_date": "2027-01-10"},
+    )
+    body = api.post("/api/watch/jp-ph", json=PREF).json()
+
+    rows = [leg for leg in body["legs"] if leg["key"] == "PRG-NRT@2027-01-10"]
+    assert len(rows) == 1
+    assert rows[0]["source"] == ""
+
+
+def test_moving_a_preference_takes_its_legs_with_it(client):
+    """What the "two days later is cheaper" line does.
+
+    A move rather than a new preference: the series belongs to this decision,
+    and starting a fresh one on every shift would leave you unable to see that
+    the trip has fallen since you began. The key moves with the first date, so
+    the legs are re-pointed in the same write or they are orphans no deletion
+    could find.
+    """
+    api, _ = client
+    api.post("/api/watch/jp-ph", json=PREF)
+    body = api.patch(
+        "/api/watch/jp-ph/2027-01-10",
+        json={"depart_dates": ["2027-01-12", "2027-01-22", "2027-02-01"]},
+    ).json()
+
+    assert body["preferences"][0]["depart_date"] == "2027-01-12"
+    assert [leg["key"] for leg in body["legs"]] == [
+        "PRG-NRT@2027-01-12", "NRT-MNL@2027-01-22", "MNL-PRG@2027-02-01"
+    ]
+    assert {leg["source"] for leg in body["legs"]} == {"2027-01-12"}
+
+
+def test_a_preference_can_be_renamed_and_its_slack_changed(client):
+    api, _ = client
+    api.post("/api/watch/jp-ph", json={**PREF, "slack_days": 0})
+    body = api.patch(
+        "/api/watch/jp-ph/2027-01-10", json={"label": "the good one", "slack_days": 2}
+    ).json()
+    assert body["preferences"][0]["label"] == "the good one"
+    assert body["preferences"][0]["slack_days"] == 2
+    # And the badge moves with it, because the cap is applied to this figure.
+    assert body["searches"] == 25
+
+
+def test_widening_the_slack_past_what_the_site_answers_is_refused(client, monkeypatch):
+    """The cap binds on a change, not only on an addition.
+
+    A preference added inside the budget and then widened would otherwise walk
+    straight past the cliff, which is silent: the site simply stops answering
+    part way through.
+    """
+    import src.web.app as app_module
+
+    monkeypatch.setattr(app_module, "WATCH_SEARCH_CAP", 6)
+    api, _ = client
+    api.post("/api/watch/jp-ph", json={**PREF, "slack_days": 0})
+    response = api.patch("/api/watch/jp-ph/2027-01-10", json={"slack_days": 2})
+    assert response.status_code == 400
+    assert "25" in response.json()["detail"]
 
 
 # ------------------------------------------------------- results: narrowing
@@ -2899,3 +3055,105 @@ def test_a_followed_flight_carries_a_link_to_buy_it(client):
     # The three things that define the watch are all in it.
     assert "PRG" in leg["book_url"] and "NRT" in leg["book_url"]
     assert "2027_1_14" in leg["book_url"]
+
+
+# ------------------------------------------------------- the airport ranking
+#
+# A global list, ranked by how easy each airport is to reach. It replaces the
+# frequency-derived suggestions in the chip row when it is set, because
+# frequency cannot discover convenience - the usual reason a convenient airport
+# goes unused is that it has no inventory.
+
+
+def test_without_a_ranking_the_chips_are_what_your_trips_use(client):
+    """The behaviour this always had, and the fallback it degrades to."""
+    api, _ = client
+    body = api.get("/api/airports/frequent").json()
+    assert body["ranked"] is False
+
+
+def test_a_ranking_replaces_the_chips_and_keeps_its_order(client):
+    api, _ = client
+    api.put("/api/home-airports", json={"airports": ["BRQ", "PRG", "VIE"]})
+
+    body = api.get("/api/airports/frequent").json()
+    assert [airport["iata"] for airport in body["origins"]] == ["BRQ", "PRG", "VIE"]
+    # So the row can label itself honestly - "yours, in order" is a different
+    # claim from "airports you have used".
+    assert body["ranked"] is True
+
+
+def test_the_ranking_does_not_touch_the_destination_chips(client):
+    """There is no convenient end to a trip to Japan."""
+    api, _ = client
+    before = api.get("/api/airports/frequent").json()["destinations"]
+    api.put("/api/home-airports", json={"airports": ["BRQ"]})
+    assert api.get("/api/airports/frequent").json()["destinations"] == before
+
+
+def test_the_ranking_comes_back_described_so_the_page_can_show_cities(client):
+    api, _ = client
+    body = api.put("/api/home-airports", json={"airports": ["PRG"]}).json()
+    assert body["airports"] == ["PRG"]
+    assert body["described"][0]["city"]
+
+
+def test_a_mistyped_airport_is_refused_with_words_the_page_can_show(client):
+    api, _ = client
+    response = api.put("/api/home-airports", json={"airports": ["Brno"]})
+    assert response.status_code == 400
+    assert "Brno" in response.json()["detail"]
+
+
+def test_a_trip_the_branch_has_never_seen_is_refused_by_name(client, cloud, monkeypatch):
+    """A dispatch of an uncommitted trip cannot do anything but fail.
+
+    `plan` filters on the branch's own scenario files, so an unknown name plans
+    nothing, and `dispatched-nothing` then fails the run twenty seconds later.
+    That happened for real to a trip saved only on this machine. The sentence
+    the workflow printed is the one the app can print before spending a run, so
+    it says it here - and offers no override, because there is nothing on the
+    other side of one.
+    """
+    app, _ = client
+    import src.web.app as app_module
+
+    monkeypatch.setattr(app_module, "_fetch_cloud_ref", lambda: None)
+    monkeypatch.setattr(
+        app_module, "_cloud_state",
+        lambda *a: {"known": False, "on_branch": False, "differs": [],
+                    "included": None, "searches": None},
+    )
+
+    response = app.post("/api/scenarios/jp-ph/run-cloud")
+    detail = response.json()["detail"]
+    assert response.status_code == 400
+    assert "jp-ph" in detail
+    assert "scenarios/jp-ph.json" in detail
+    # No escape hatch: the page offers "run it anyway" on that phrase, and a
+    # forced dispatch here is a guaranteed red run.
+    assert "run it anyway" not in detail.lower()
+    assert cloud == []
+
+
+def test_a_branch_that_cannot_be_read_still_offers_the_override(client, cloud, monkeypatch):
+    """"Cannot say" and "definitely not there" are different answers.
+
+    Sweeping the branch's version on purpose is a real thing to want when this
+    app simply cannot see the branch; it is not a thing to want when the trip is
+    known to be absent from it.
+    """
+    app, _ = client
+    import src.web.app as app_module
+
+    monkeypatch.setattr(app_module, "_fetch_cloud_ref", lambda: None)
+    monkeypatch.setattr(
+        app_module, "_cloud_state",
+        lambda *a: {"known": False, "on_branch": None, "differs": [],
+                    "included": None, "searches": None},
+    )
+
+    response = app.post("/api/scenarios/jp-ph/run-cloud")
+    assert response.status_code == 400
+    assert "run it anyway" in response.json()["detail"].lower()
+    assert cloud == []

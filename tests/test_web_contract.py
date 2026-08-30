@@ -113,3 +113,26 @@ def test_every_colour_the_stylesheets_use_is_a_token_that_exists():
         defined |= set(re.findall(r"(--[\w-]+)\s*:", body))
         used |= set(re.findall(r"var\((--[\w-]+)", body))
     assert not (used - defined), f"used but never defined: {sorted(used - defined)}"
+
+
+# The tab bar lost a step and four paragraphs went on describing it. "The step
+# after this one" named a tab that no longer exists, "a step back" and "the step
+# before" named the switch you had just flipped, and "run one above" pointed at
+# buttons on the other side of it. The page was the only documentation of a
+# layout it had stopped having.
+STALE_STEP_WORDING = [
+    "step after this",
+    "a step back",
+    "the step before",
+    "Run one above",
+    "run one above",
+]
+
+
+def test_the_narrowing_step_does_not_describe_a_step_that_was_merged_into_it():
+    markup = (STATIC / "index.html").read_text(encoding="utf-8")
+    # Comments record why wording is what it is, including wording that was
+    # replaced, and those quotations are not on screen.
+    visible = re.sub(r"<!--.*?-->", "", markup, flags=re.S)
+    found = [phrase for phrase in STALE_STEP_WORDING if phrase in visible]
+    assert not found, f"index.html still points at the merged step: {found}"

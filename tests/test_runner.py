@@ -1123,11 +1123,17 @@ def test_without_recycling_a_session_limit_stops_the_sweep_dead(tmp_path):
 
 
 def watched_scenario(**overrides) -> Scenario:
-    from src.scenario import Watch
+    from src.scenario import Preference
 
     defaults = dict(
-        watches=[
-            Watch(depart_dates=[date(2027, 1, 10), date(2027, 1, 20), date(2027, 1, 30)]),
+        preferences=[
+            Preference(
+                depart_dates=[date(2027, 1, 10), date(2027, 1, 20), date(2027, 1, 30)],
+                # No slack: these tests are about where a watch run's output
+                # lands and what its status records, not about how wide a
+                # preference searches. `test_planner` owns the slack.
+                slack_days=0,
+            ),
         ]
     )
     defaults.update(overrides)
@@ -1157,7 +1163,11 @@ def test_a_watch_run_records_what_it_was_watching(tmp_path):
     )
     status = json.loads((result.directory / "status.json").read_text(encoding="utf-8"))
     assert status["mode"] == "watch"
-    assert status["watches"] == [["2027-01-10", "2027-01-20", "2027-01-30"]]
+    # The slack travels with the dates, because two runs of the same preference
+    # at different slacks did not plan the same thing.
+    assert status["watches"] == [
+        {"depart_dates": ["2027-01-10", "2027-01-20", "2027-01-30"], "slack_days": 0}
+    ]
 
 
 def test_a_sweep_records_that_it_was_watching_nothing(tmp_path):

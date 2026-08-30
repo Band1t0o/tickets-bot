@@ -5,10 +5,16 @@ searches. Once it has shown which departure dates are cheap, the question
 changes to "are *those* moving?" - and re-sweeping the window to answer it is
 the load pelikan.cz throttles this client for.
 
-So a watch prices the candidates instead: the exact leg dates of the trip that
-won each chosen day, every airport pair still priced on them. That is 21
-searches a candidate on the Japan/Philippines trip against 483 for a deep
+So a check prices the preferences instead: the leg dates of the trip you chose,
+plus a couple of days either side, every airport pair still priced on them. That
+is 15 searches a preference on the Japan/Philippines trip against 483 for a deep
 sweep, which is what lets it run every four hours.
+
+Two numbers come back per preference, and keeping them apart is the point.
+`total` is the trip you pinned - the series a decision watches. `nearby_total`
+is the cheapest trip anywhere in the slack, which is how the app can say that
+leaving two days later is two thousand cheaper instead of only that your Tuesday
+has not moved.
 
 Deliberately modelled on `src/probe.py`, down to the append-only
 `observations.jsonl`: it is a proven shape here, it survives a killed run, and
@@ -74,11 +80,11 @@ def _comparable(status: dict) -> bool:
 
 
 def _admitting(scenario: Scenario, watch) -> Scenario:
-    """`scenario`, relaxed enough to price the trip this watch actually pinned.
+    """`scenario`, relaxed enough to price the trip this preference pinned.
 
-    Two relaxations, and both exist because a watch names its dates outright
-    while the stay ranges and the narrowing are statements about which trips a
-    *sweep* should look for.
+    Two relaxations, and both exist because a preference names its dates
+    outright while the stay ranges and the narrowing are statements about which
+    trips a *sweep* should look for.
 
     The stays are widened to the union of what the trip declares and what this
     candidate implies. Widened rather than replaced, so a candidate pinned to
@@ -89,7 +95,7 @@ def _admitting(scenario: Scenario, watch) -> Scenario:
 
     Without this a hand-picked trip could be followed and never priced. The
     charts exist so that a fifteen-night stay four thousand cheaper than any
-    legal one can be seen and then followed; a watch that refused to chain it
+    legal one can be seen and then followed; a check that refused to chain it
     would report "nothing found" every four hours, which reads as the site
     having no seats rather than as the tool declining to look.
 
@@ -117,24 +123,93 @@ def _admitting(scenario: Scenario, watch) -> Scenario:
     )
 
 
+def _on_pinned_dates(legs: list[Leg], scenario: Scenario, preference) -> list[Leg]:
+    """The legs that sit on a pinned date *at their own position in the chain*.
+
+    The filter has to be positional, not merely "departs on one of these days".
+    A preference leaving on the 12th and flying on the 25th admits both dates;
+    matching on the set alone would keep a VIE-HND leg on the 25th, and the
+    combiner would chain it happily into a trip nobody pinned.
+
+    `leg_pools` is what decides which position a leg belongs to - the same
+    property `plan_watch` expands and the combiner walks - so a leg can never be
+    kept here at a position the sweep would not have searched it for.
+    """
+    pools = scenario.leg_pools
+    wanted = {
+        (index, depart)
+        for index, depart in enumerate(preference.depart_dates)
+    }
+    kept = []
+    for leg in legs:
+        if leg.depart_date is None:
+            continue
+        # Every position it could occupy, not merely the first. A route can be
+        # legal at two points of a chain - a trip that passes through the same
+        # pool twice - and stopping at the first match would drop a leg that is
+        # pinned at the second, which reads as the site having no seats.
+        if any(
+            (index, leg.depart_date) in wanted
+            for index, (origins, destinations) in enumerate(pools)
+            if leg.origin in origins and leg.destination in destinations
+        ):
+            kept.append(leg)
+    return kept
+
+
+def _cheapest(combined, bag: float):
+    """The cheapest itinerary in a combined result, whatever day it leaves.
+
+    `best_by_date` is keyed on the first leg's departure, which is the right
+    shape for a chart and the wrong one here: the whole point of the slack is
+    that the answer may leave on a different day from the one you pinned.
+
+    Ranked bag-inclusive, which is how `combine_all` itself picked the entries
+    being compared. Ranking these on the headline fare instead would let a
+    bagless low-cost total win a comparison it lost inside the traversal, so the
+    "cheaper nearby" line would name a trip the ranking beside it calls dearer.
+    """
+    trips = list(combined.best_by_date.values())
+    return min(trips, key=lambda trip: trip.total_with_bags(bag)) if trips else None
+
+
 def record_observations(
     legs: list[Leg],
     scenario: Scenario,
     status: dict,
     directory: Path | str = DEFAULT_WATCH_DIR,
 ) -> list[dict]:
-    """Append one row per watched candidate and return them.
+    """Append one row per followed preference and return them.
 
-    The chain is rebuilt rather than read off the pinned dates, because pinning
-    dates is not pinning airports: the whole point of still pricing every
-    airport pair is that Frankfurt may have undercut Vienna overnight, or that
-    arriving Haneda and leaving Kansai now beats both. `found_dates` and `route`
-    therefore record what actually won, which can differ from what was pinned.
+    **`total` is the trip you pinned, and only that.** The legs it is built from
+    are filtered to the pinned dates first, because the run also priced the
+    slack either side of them and `best_by_date` would happily hand back a
+    cheaper chain leaving the same morning on different later dates. A series
+    that quietly moved onto a neighbouring trip would look like a fall in yours,
+    which is the one thing a followed price must never do.
 
-    Rebuilt once per candidate rather than once for all of them, because each
+    The chain is still *rebuilt* rather than read off the pinned dates, because
+    pinning dates is not pinning airports: the whole point of still pricing
+    every airport pair is that Frankfurt may have undercut Vienna overnight, or
+    that arriving Haneda and leaving Kansai now beats both. `route` therefore
+    records what actually won, which the pinned dates cannot say.
+
+    The dates are exact, and a substituted day is a hole rather than a price.
+    pelikan.cz answers the 25th with the 26th when it has nothing on the 25th,
+    and `record_leg_observations` allows that slack because a leg watch asks
+    about one ticket. Here it would mean quietly pricing a trip you did not
+    pick, so `total` is None for that check and `nearby_total` reports the
+    26th - by name, with the days it flies, and an offer to move to it.
+
+    `nearby_*` is the other half, and the whole reason the slack is spent: the
+    cheapest chain anywhere inside this preference's window, so the page can say
+    "the same trip two days later is 1 890 cheaper" and offer to move it. It is
+    reported beside the pinned price and never as it.
+
+    Rebuilt once per preference rather than once for all of them, because each
     is chained against a scenario widened to admit its own pinned stays - see
-    `_admitting`. One shared traversal would let one candidate's widening decide
-    another candidate's price.
+    `_admitting`. One shared traversal would let one preference's widening
+    decide another preference's price.
     """
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
@@ -144,25 +219,47 @@ def record_observations(
     ts = _now()
 
     rows: list[dict] = []
-    for watch in scenario.watches:
-        combined = combine_all(legs, _admitting(scenario, watch), limit=None, narrowed=False)
-        best = combined.best_by_date.get(watch.key)
+    for preference in scenario.preferences:
+        admitting = _admitting(scenario, preference)
+        pinned = _on_pinned_dates(legs, scenario, preference)
+        best = _cheapest(combine_all(pinned, admitting, limit=None, narrowed=False), bag)
+
+        # The whole neighbourhood, including the pinned days themselves - so a
+        # preference already sitting on the cheapest day in its window reports
+        # `nearby` equal to `total` rather than to the best of the days it is
+        # not on, which would name a saving of zero as though it were one.
+        nearby = None
+        if preference.slack_days:
+            nearby = _cheapest(combine_all(legs, admitting, limit=None, narrowed=False), bag)
+
         rows.append(
             {
                 "ts": ts,
                 "scenario_id": scenario.id,
-                "depart_date": watch.key,
-                "pinned_dates": [d.isoformat() for d in watch.depart_dates],
+                "depart_date": preference.key,
+                "label": preference.describe(),
+                "slack_days": preference.slack_days,
+                "pinned_dates": [d.isoformat() for d in preference.depart_dates],
                 "found_dates": (
                     [leg.depart_date.isoformat() for leg in best.legs] if best else None
                 ),
                 "route": best.route if best else None,
-                # None, never 0. A candidate that found nothing means the search
+                # None, never 0. A preference that found nothing means the search
                 # broke or the site refused - not a free flight - and a zero
                 # averaged into the series would put the cheapest trip you ever
                 # saw at the bottom of the chart.
                 "total": best.total_price if best else None,
                 "total_with_bags": best.total_with_bags(bag) if best else None,
+                # The cheapest trip inside the slack, and which days it flies.
+                # Appended columns on an append-only file: every row written
+                # before this existed simply has none, and every reader uses
+                # `.get`.
+                "nearby_total": nearby.total_price if nearby else None,
+                "nearby_total_with_bags": nearby.total_with_bags(bag) if nearby else None,
+                "nearby_dates": (
+                    [leg.depart_date.isoformat() for leg in nearby.legs] if nearby else None
+                ),
+                "nearby_route": nearby.route if nearby else None,
                 "currency": best.currency if best else scenario.currency,
                 "has_overland": best.has_overland if best else False,
                 # Travels with the price, so a starved run can be dimmed rather
@@ -331,7 +428,7 @@ def leg_report(directory: Path | str = DEFAULT_WATCH_DIR) -> dict:
 
 
 def watch_report(directory: Path | str = DEFAULT_WATCH_DIR) -> dict:
-    """Each candidate's series and how far it has moved.
+    """Each preference's series and how far it has moved.
 
     Points with no price are dropped - there is nothing to draw - but points
     from a starved run are kept and flagged, because the gap in the record is
@@ -358,6 +455,16 @@ def watch_report(directory: Path | str = DEFAULT_WATCH_DIR) -> dict:
         trusted = [row for row in rows if row.get("comparable")]
         summary = {
             "depart_date": key,
+            "label": (trusted or rows)[-1].get("label", ""),
+            "slack_days": (trusted or rows)[-1].get("slack_days", 0),
+            # The cheaper day inside the slack, from the latest trustworthy
+            # reading. Read off `last` rather than min-ed across the series: it
+            # is an offer to act on now, and the best it was on Tuesday is not
+            # one. Absent on every row written before the slack existed.
+            "nearby_total": None,
+            "nearby_total_with_bags": None,
+            "nearby_dates": None,
+            "nearby_route": None,
             "series": [
                 {
                     "ts": row["ts"],
@@ -384,6 +491,10 @@ def watch_report(directory: Path | str = DEFAULT_WATCH_DIR) -> dict:
             summary["first"] = prices[0]
             summary["latest"] = prices[-1]
             summary["latest_with_bags"] = trusted[-1]["total_with_bags"]
+            summary["nearby_total"] = trusted[-1].get("nearby_total")
+            summary["nearby_total_with_bags"] = trusted[-1].get("nearby_total_with_bags")
+            summary["nearby_dates"] = trusted[-1].get("nearby_dates")
+            summary["nearby_route"] = trusted[-1].get("nearby_route")
             summary["low"] = min(prices)
             summary["high"] = max(prices)
             summary["net_change"] = round(prices[-1] - prices[0], 2)
@@ -478,7 +589,14 @@ def drops(
     directory: Path | str = DEFAULT_WATCH_DIR,
     min_drop_pct: float = MEANINGFUL_DROP_PCT,
 ) -> list[dict]:
-    """Candidates that have genuinely fallen since anything was last said.
+    """Preferences that have genuinely fallen since anything was last said.
+
+    Fired on `total` - the trip you pinned - and deliberately not on
+    `nearby_total`. A cheaper neighbouring day is worth knowing and is not a
+    fall in the thing being followed; reporting it here would need a
+    high-water mark of its own or it would be re-reported every four hours,
+    and it would mix two populations in one alert the way `best.json` once
+    mixed broad and narrowed sweeps. The page says it instead.
 
     Measured against the last level actually *reported*, not against the last
     observation. That distinction is what stops a slow slide staying silent
@@ -494,7 +612,7 @@ def drops(
     buy.
     """
     directory = Path(directory)
-    added = {watch.key: watch.added_price for watch in scenario.watches}
+    added = {pref.key: pref.added_price for pref in scenario.preferences}
     threshold = scenario.alert_threshold
 
     found: list[dict] = []
