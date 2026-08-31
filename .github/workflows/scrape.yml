@@ -59,7 +59,7 @@ on:
         description: 'Scenario id (default: every enabled scenario)'
         required: false
       mode:
-        description: 'sweep (the whole window) | final (only the narrowing)'
+        description: 'sweep (the whole window) | final (only the narrowing) | explore (a probe)'
         required: false
       depth:
         description: 'quick | standard | deep (default: deep)'
@@ -129,7 +129,11 @@ jobs:
           # Sizing a trip saved as `quick` and dispatched as `deep` from the file
           # would hand a seven-times bigger plan to one runner. --final sizes it
           # from the narrowed plan for the same reason, in the other direction.
-          python scripts/plan_sweep.py --depth "$DEPTH" --shards "${INPUT_SHARDS:-0}" --only "${INPUT_SCENARIO:-}" $FINAL >> "$GITHUB_OUTPUT"
+          # --mode as well as --final, because a probe is dispatched by hand
+          # rather than by a slot and is a fraction of the size: grand-tour is
+          # 660 searches swept and 36 probed, and sizing the probe from the
+          # sweep would deal 36 searches across seven runners.
+          python scripts/plan_sweep.py --depth "$DEPTH" --shards "${INPUT_SHARDS:-0}" --only "${INPUT_SCENARIO:-}" --mode "$MODE" $FINAL >> "$GITHUB_OUTPUT"
           cat "$GITHUB_OUTPUT"
 
   # A dispatch that named a trip and planned nothing for it is a failure, and

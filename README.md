@@ -140,14 +140,14 @@ final leg, so 132 of those searches could not produce an itinerary however good 
 proven on the committed data, where the quick sweep of 10 August searched 2 February and yielded
 nothing from it.
 
-### Explore first
+### The probe
 
 Depth decides how finely a trip is priced. It does nothing about the other multiplier — the number
 of airports — and that is usually where a sweep's cost goes. Three origins, three Japanese airports
 and two Philippine ones is 21 routes, and a deep sweep prices every one of them on every date
 whether or not it could ever win.
 
-**Explore first** (`--mode explore`) searches every route on three spread-out dates: **63 searches,
+**Probe** (`--mode explore`) searches every route on three spread-out dates: **63 searches,
 ~16 min**, against 483 and ~119. It will not find you a trip. It tells you, per airport, what the
 cheapest flight in and out of it costs against the alternatives standing in the same place — so the
 real sweep can leave the hopeless ones out. On the trip above it says Frankfurt is the benchmark and
@@ -162,19 +162,44 @@ Verdicts distinguish **measured** from **unmeasured**, which is the only part th
 | `no_offers` | Asked at least three times, answered every time, nothing sold |
 | `unproven` | The site never answered — **not** a verdict on the airport |
 
-The probe never edits a trip. Removing an airport is a button in **Explore** that drops the chip in
-the route editor and gathers it in a pending bar for you to confirm. Three sampled dates is enough
-to show you an airport is hopeless and nowhere near enough for a tool to narrow your trip on its own.
+The probe never edits a trip. Removing an airport is a button under **Probe results** that drops the
+chip in the route editor and gathers it in a pending bar for you to confirm. Three sampled dates is
+enough to show you an airport is hopeless and nowhere near enough for a tool to narrow your trip on
+its own.
+
+#### Keeping an airport probed after you stop searching it
+
+Acting on the probe used to destroy the probe. The verdict table filtered to the trip's own
+airports, so the row you narrowed *by* — "Cebu is 65% dearer" — vanished the moment you took Cebu
+out, and the next probe never asked about it again either. The one measurement that justified the
+decision could not be checked afterwards.
+
+So the probe has a list of its own, `probe_extra` on the trip, keyed by role — `origins`,
+`stop:0`, `return_to` — rather than by position, because adding a stop renumbers every pool after
+it. **Remove from trip** and **Keep probing it** are offered side by side on the row, and the second
+does both things in one pending edit: the airport leaves the trip and joins the probe list, so the
+sweep stops pricing it and the probe goes on doing so.
+
+Nothing lands there implicitly. A list that grew whenever you edited a route would walk a 50-search
+probe up toward the cost of the sweep it exists to avoid, so keeping an airport is always a button
+someone presses, and both figures on the Run row move before anything is saved. Keeping one that was
+already in the trip makes the **sweep** cheaper and leaves the probe where it was — it was pricing
+that airport either way; adding one the trip has never held is what makes the probe dearer.
+
+A probe-only airport shows greyed, reading *not in this trip · still probed*, with **Stop probing**
+and **Put it back** beside it. Each group also has an **Also probe** row for adding an airport the
+trip has never had — a nearby one you want measured before you would consider it. An entry naming a
+stop the trip no longer has is kept on disk and reported as kept-but-unused, because a stop removed
+for an afternoon should not cost a year of list.
 
 ### Then focus on the dates that won
 
-Explore narrows a trip by airport. A **focus** narrows it by date, and it is the other half of the
+The probe narrows a trip by airport. A **focus** narrows it by date, and it is the other half of the
 same idea: once a broad sweep has drawn the price-by-date curve, most of the window is not worth
 pricing again tonight.
 
 It is the **Leave between** pair in *When you actually want to go*, on **Narrow it down**. Type the
-two dates, or click two points on the cheapest-by-day chart in the same panel to fill them, and press
-**Save**. That writes `focus_start` and `focus_end` onto the trip, and the planner bounds the *first*
+two dates and press **Save**. That writes `focus_start` and `focus_end` onto the trip, and the planner bounds the *first*
 leg to them -- the later legs follow through the stay ranges, so the three can never contradict each
 other and a focused sweep can still complete a whole trip. Five departure days on the trip above is
 **195 searches, ~48 min**, against 483 and ~119.
@@ -325,20 +350,20 @@ trip was priced to find it.
 ### A run searches the trip on screen
 
 The route editor keeps its edits in the browser, and a run reads the trip from disk. Nothing joined
-those two facts up, so two probes were spent searching the *previous day's* airports and the Explore
-tab reported their verdicts as the answer for a trip that no longer contained them — Prague, Vienna
+those two facts up, so two probes were spent searching the *previous day's* airports and the
+verdict table reported them as the answer for a trip that no longer contained them — Prague, Vienna
 and Frankfurt priced in detail, Katowice and Kraków not mentioned at all.
 
 Two changes, because either alone still leaves a way to be misled:
 
-- **Run saves first.** Pressing *Explore first*, *Run locally* or *Run in cloud* writes the trip
+- **Run saves first.** Pressing *Probe*, *Quick sweep*, *Deep sweep* or *Sweep narrowed* writes the trip
   before starting, so what is on screen is what gets searched. A trip that will not save does not
   run, and the reason appears on whichever tab you pressed the button from. An `Unsaved changes`
-  marker sits beside the buttons in the meantime, and the cost badge prices the edited trip rather
-  than the last saved one.
+  marker sits beside *Save trip* in the meantime, and each button's cost prices the edited trip
+  rather than the last saved one.
 - **Every sweep records its trip.** `scenario.json` is written into the sweep directory before the
-  first search, and Explore, Results and Prices all read a run against *that* — so an old sweep keeps
-  showing its flights after you change airports, and the Explore tab says
+  first search, and every panel reads a run against *that* — so an old sweep keeps
+  showing its flights after you change airports, and Probe results says
   `BER, KRK, KTW, MUC never searched in this run` instead of leaving them out. Runs searched under
   something the trip no longer says are marked in every picker before they are opened, naming which
   part differs: `· ⚠ different airports · different stays`, or `· ⚠ a different trip` when all of it
@@ -373,7 +398,8 @@ pelikan.cz throttles *this connection*. It is not the scraper, not concurrency, 
 the trip — a local run fails about half its searches whatever you do, while the cloud sweeps the
 same routes without a single timeout at 14.7 s/search.
 
-Local runs are for the Explore probe and for spot checks. Anything long belongs in Actions.
+Local runs are for spot checks with `make run`. Everything the app starts goes to Actions,
+the probe included.
 
 ### What a throttled run does now
 
@@ -429,20 +455,30 @@ Prague is a morning, Vienna is a coach — and frequency cannot discover that, b
 reason a convenient airport goes unused is that it has no long-haul inventory. (`BRQ` is exactly
 that: convenient, and flagged *no inventory* by `viability.py` in the same chip.)
 
-So `data/home_airports.json` is a single ordered list, most convenient first, edited under ⚙ Setup:
+So `data/home_airports.json` is one ranked list, **in tiers**, edited under ⚙ Setup:
 
 ```json
-{ "airports": ["BRQ", "PRG", "VIE", "FRA"] }
+{ "tiers": [["BRQ"], ["PRG", "VIE"], ["FRA"]] }
 ```
 
-It replaces the frequency-derived chips under **Depart from** and **Back to**, in your order.
-Destinations are untouched — there is no convenient end to a trip to Japan. Shaped like
-`sources.py`: the defaults live in code and the file only overrides, so a missing or hand-mangled
-one costs you the ordering of some chips rather than the ability to build a trip.
+Tiers because two airports can be equally awkward — Prague and Vienna are both a morning — and
+forcing a strict order on them invents a preference nobody holds. Flattened, it replaces the
+frequency-derived chips under **Depart from** and **Back to**, in your order; a row of buttons has
+no way to show two airports at one rank. Destinations are untouched — there is no convenient end to
+a trip to Japan. Shaped like `sources.py`: the defaults live in code and the file only overrides, so
+a missing or hand-mangled one costs you the ordering of some chips rather than the ability to build
+a trip. `{"airports": [...]}` is still read, as one airport per tier, so nothing needs migrating.
 
-Distinct from `Scenario.preferred_origins`, which ranks which airport **Discord** should report
-about and lives per trip. This one is about the journey to the airport and nothing else; which
-airport is *cheapest* is what a sweep finds out.
+**This is also what Discord reports by.** It used to be a second list: `preferred_origins` on each
+trip, on a different panel, in a different shape — a list of tiers against a flat one — and each
+panel spent a paragraph explaining that it was not the other one. Two controls that can only be
+described by their difference from each other belong next to each other.
+
+Tiering the global list made them the same kind of object, so a trip that says nothing inherits it
+verbatim (`Scenario.reporting_tiers`). Inherited at read time, never written into the trip file: the
+point is that a trip which never expressed a preference follows the list *as the list changes*, and
+copying today's answer in would both freeze it and make every trip claim a preference nobody chose
+for it. A trip that does want its own order still has one, behind a disclosure on the same panel.
 
 **Whether an airport is worth using is derived from your own sweeps**, not hand-written:
 [src/viability.py](src/viability.py) reads sweep history and flags routes that were searched
@@ -765,10 +801,59 @@ Three steps and a gear, in the order the work is actually done:
 
 | Step | Holds | Answers |
 |---|---|---|
-| **Map it out** | Search, Explore | what trip is this, and which airports are worth pricing |
-| **Narrow it down** | the narrowing (with the cheapest-by-day chart and the narrow sweep's own controls inside it), every leg priced separately, the itinerary table — over the whole window or over just what you chose | *which days, and which trip* |
+| **Map it out** | *Search options* (When, Route, Run), *Probe results*, *Search results* | what trip is this, which airports are worth pricing, and what a sweep of it found |
+| **Narrow it down** | the trip read-only, the dates and stays you actually want, then the narrowed runs — per leg, then ranked | *which days, and which trip* |
 | **Follow it** | your preferences, the flights you are following, best total over time, the volatility probe | *is it moving, should I book now* |
-| ⚙ **Setup** | your airports, Discord, night sweep, Cloud, Sources | none of the above |
+| ⚙ **Setup** | Discord, your airports, scheduled sweeping, the cloud, sources | none of the above |
+
+**Map it out has a second nav row**, because it holds a form and the two kinds of answer a run gives
+back. *Probe results* is which airports are worth keeping; *Search results* is what a sweep found —
+every leg priced on its own, then the itineraries ranked. Both used to be somewhere else: the probe's
+verdicts on a tab of their own, and the sweep's results on **Narrow it down**, behind a switch.
+
+### The gear holds five panels, and each subject once
+
+It held nine, and two subjects were configured in two places each: a Discord webhook was set on one
+panel while what Discord is told was ticked on another, three panels apart, and the airports near
+home were ranked on one panel while which of them Discord should report about was ranked on another.
+Each of those four carried a paragraph whose only job was to say it was not the other one. **That
+paragraph is the tell** — two controls that can only be described by their difference from each
+other belong next to each other, where the difference is visible instead of asserted.
+
+| Panel | Was | Holds |
+|---|---|---|
+| **Discord** | two panels | the webhook, then what gets sent |
+| **Your airports** | two panels, two shapes | one tiered list, with a per-trip override behind a click |
+| **Scheduled sweeping** | one panel of controls | what fires tonight, read-only, plus *Edit the schedule* |
+| **The cloud** | four panels | the schedule and any warning; the queue and the run list behind disclosures |
+| **Where the prices come from** | one panel | unchanged, and folded shut — you need it when a site breaks and never otherwise |
+
+Four of the nine were the cloud, which is one subject in four boxes. What that panel is *read* for
+is the schedule and the "your checkout is behind" warning; what it is *consulted* for is the queue
+and the run list, and those are long. So the first two stay open and the last two are a click.
+
+### The schedule is one editor with three ways in
+
+**Scheduled sweeping** appears on the Run row, on the narrowing step, and behind the gear. All three
+used to call `showTab('night')`, which opened the whole gear — nine panels, one of them about
+scheduling. A button naming one subject should open that subject and nothing else.
+
+It is a `<dialog>`, not an expander under each button, because the same four controls are wanted
+from three places and three copies would be three sets of the same ids: `#enabled` existing twice is
+a checkbox that reads whichever the DOM found first and saves the other. The gear's panel keeps the
+part you go there to read — the list of what fires tonight — and an **Edit the schedule** button
+that opens the same dialog. It prices both scheduled runs live as you tick them, so the trade
+between a nightly deep sweep and a twice-daily narrow one is a number rather than a guess.
+
+### One population per step
+
+There was a `[the whole window | just what I chose]` switch on the narrowing step, and four panels
+existed twice over because of it — once per side. It is gone. The broad runs answer under *Search
+results*, beside the buttons that start them; **Narrow it down** draws the narrowed runs and nothing
+else. Nothing about how the two populations are stored or planned changed: `status.mode` still tells
+them apart, and `legView`/`resultsView` are still one set of renderers behind an id prefix. What
+changed is that the results of a sweep over the whole window are no longer read on the tab named for
+cutting the window down.
 
 It was seven tabs, one per panel, which read as a list of screens rather than as an order. Two of
 them were the same panel twice: **Prices** and **Watch** both drew a price history and neither said
@@ -778,9 +863,41 @@ book now and sit with what you are following, and neither step shows both.
 
 **Final sweeps used to be a fourth step, and was the same mistake again.** It held a copy of Narrow
 it down's two panels drawn over the narrowed runs instead of the broad ones, which is one step read
-two ways. The code had been saying so since the day it was written: both pairs are one set of
-renderers behind an id prefix. It is a `[the whole window | just what I chose]` switch inside the
-step now, and the run buttons it also held sit beside the boxes that decide what they would search.
+two ways. It became a switch on that step, and then stopped being a switch at all: see *One
+population per step* above.
+
+### Starting a run
+
+The Run row is one button per kind of run, each carrying its own cost:
+
+| Button | Mode | Where it runs |
+|---|---|---|
+| **Probe** | `explore` | the cloud |
+| **Quick sweep** | `sweep --depth quick` | the cloud |
+| **Deep sweep** | `sweep --depth deep` | the cloud |
+| **Sweep narrowed** (on *Narrow it down*) | `final` | the cloud |
+| **Scheduled sweeping** | — | opens the schedule editor |
+
+Depth was a select and the destination two more buttons: three controls for one decision, and the
+two with their own controls were the two that mattered least. Depth is now which button you press.
+
+**Every run goes to the cloud**, and it is not about convenience. pelikan.cz answers about 120
+searches from one address before it stops answering at all. A deep sweep of a three-leg trip is over
+three hundred, so a sweep started on this machine half-fails every time, and a sweep that half-fails
+is worth less than a shallow one that works — only the cloud shards the plan. The probe went up for
+the other half of the same arithmetic: it is ~50 searches, which is not too many to run here but is
+nearly half of what this machine gets in a day, spent on the cheapest question the app asks.
+
+The cloud searches the trip **committed to the branch**, so all four buttons refuse, by name, a trip
+that is not on it or differs from it — commit and push first. Running a sweep on this machine is
+still what `make run` is for.
+
+Sizing follows the mode: `scripts/plan_sweep.py --mode explore` shards from the probe's own plan.
+Without it a probe of `grand-tour` would be sized off that trip's 660-search sweep and dealt 36
+searches across seven runners.
+
+**Save trip** sits at the end of the Route panel, where the thing being saved is. In the Run row it
+read as a fourth way to start a search.
 
 ### Which trip opens
 
@@ -803,7 +920,7 @@ list describing the trip you had just left, changing only the name in the picker
 
 ### Saying it where it can be read
 
-Explanations collapse by default — `.panel__hint` is prose about how a mechanic works, and it is
+Explanations collapse by default — `.explain` is prose about how a mechanic works, and it is
 hidden until *What this is for* is pressed. That is right for teaching and it is a trap for anything
 the step is unusable without. Narrow it down fell into it exactly: every word about what the date
 boxes *do* was collapsible prose, so the default view of the step was a pile of date boxes, a
@@ -819,26 +936,25 @@ you and never collapsed, under the boxes it is about:
 > you chose.
 
 The rule this follows: **anything a reader must know to use a control belongs in a heading, a
-label, a button's name or a live line — never in prose that hides.** The same reason the switch
-carries `#population-note` ("every date in the window, swept at 02:00 every night"), the narrow
-sweep's controls are fenced under a heading that names them, and its two buttons are called *Run a
-narrow sweep here* and *Run one in the cloud* rather than repeating *Run it in the cloud* from
-Map it out — two identically named buttons running different modes was the single most confusing
-thing on the page.
+label, a button's name or a live line — never in prose that hides.** So each run button states its
+own cost on its face, `#narrow-role` says in a live line what the dates on that step actually do,
+and the buttons are named for what they run — *Sweep narrowed* rather than a second *Run it in the
+cloud*. Two identically named buttons running different modes was the single most confusing thing
+on the page.
 
-The switch shows one pair of panels and hides the other, rather than merging them, because **each
-population keeps its own selected run** — flipping across and back must not lose the run you were
-reading. A hidden section measures its container at zero width, so the newly visible pair is
-re-drawn and not merely unhidden.
+Each step keeps its own selected run (`state.stamp` and `state.finalStamp`) — going to the narrowed
+runs and back must not lose the broad run you were reading. A hidden section measures its container
+at zero width, so a step is re-drawn when it is opened and not merely unhidden; the same applies to
+Map it out's sub-tabs.
 
-Sections carry a `data-step`; several share one, and the two pairs above also carry a
-`data-population`. `data-panel` stays as each panel's own name, since that is what every renderer,
-test and error box already addresses them by, and `showTab` accepts either — asked for a panel it
-opens that panel's step, switches to the population that panel belongs to, and scrolls to it, which
-is what a finished sweep opening Results and a save error opening Search both need.
+Sections carry a `data-step`; several share one, and Map it out's also carry a `data-sub` naming
+which of its three views they belong to. `data-panel` stays as each panel's own name, since that is
+what every renderer, test and error box already addresses them by, and `showTab` accepts either —
+asked for a panel it opens that panel's step, opens the sub-tab that panel lives on, and scrolls to
+it, which is what a finished sweep opening Results and a save error opening Search both need.
 
-The two pairs draw the same ranking *and* the same leg charts from one set of renderers, pointed at
-different runs. Each is a `resultsView` and a `legView` naming the ids it owns, the run it has
+The broad panels and the narrowed ones draw the same ranking *and* the same leg charts from one set
+of renderers, pointed at different runs. Each is a `resultsView` and a `legView` naming the ids it owns, the run it has
 selected and the modes its picker may offer; the ids differ only by a `final-` prefix, so a panel
 added to one and forgotten in the other shows up as a missing element rather than as the two quietly
 sharing a control. The cursors are deliberately separate: a drag on one moving the other would
@@ -863,20 +979,33 @@ So each panel has a **What this is for** button, and the strip at the top has on
 the default for all of them. It starts off. A per-panel choice is remembered; flipping the switch
 clears them, because a choice made against the old default means the opposite under the new one.
 
-The line it holds is between **teaching and telling**:
+The line it holds is between **teaching and telling**, and it is one class each:
 
 | | Collapses | Example |
 |---|---|---|
-| `.panel__hint` | yes | *"A sweep of the dates you settled on under Narrow it down, and only those…"* |
-| `.panel__hint--live` | **no** | *"A deep sweep of this is 31 searches (~8 min), against 85…"* |
+| `.explain` | yes | *"A sweep of the dates you settled on under Narrow it down, and only those…"* |
+| `.answer` | **no** | *"Next 31 Aug, 22:00 (only what you narrowed to), then 1 Sept, 04:00"* |
 | `.notice`, `.badge` | **no** | *"1 cloud run is on the branch but not on this machine"* |
 
-Anything a renderer writes into is an answer about the run in front of you and stays whatever the
-switch says. A panel whose only hints are live ones gets no button at all, because a control that
-does nothing is worse than no control.
+It was `.panel__hint` with a `--live` modifier that opted out, and that shape had the switch only
+half working. A modifier naming the thing it exempts invites reaching for it: every renderer writing
+grey prose used the exempt class, so turning explanations off left most of the teaching on screen —
+including two paragraphs that were pure lesson. Two names cannot be reached for by accident. Walking
+all four steps with the switch off now leaves exactly one grey paragraph standing, and it is a date.
 
-The prose is hidden by a class on the panel rather than `hidden` on the paragraph, so it stays in the
-DOM and find-in-page still reaches it.
+**A fact must never live only in prose the switch can hide.** The nights-away band was the case that
+proved it: set before the narrowing panel had a box for it, it went on filtering every sweep, and
+the only thing naming it was a sentence — which had to be exempted from the switch to stay visible,
+which is how one live fact kept a paragraph of teaching permanently on screen. It has a **chip with
+an ×** now, beside the date fields, and the panel badge states it. A button is not prose, so it
+survives the switch by not being the kind of thing the switch is about.
+
+The default is set by a class on `<body>`, not on each panel, and a panel may then disagree with it
+in either direction (`is-loud` / `is-quiet`). Scoping it to panels is what left the *Follow it*
+summary — a notice sitting directly in its section — beyond the switch entirely.
+
+The prose is hidden by a class rather than `hidden` on the paragraph, so it stays in the DOM and
+find-in-page still reaches it.
 
 ### Every flight, priced on its own
 
@@ -930,7 +1059,7 @@ nothing at all. `/by-leg` reads `searches.jsonl` alongside `legs.jsonl` for exac
 line breaks across a gap rather than bridging it — joining the two sides would draw a price for
 every day in between.
 
-**Explore** reads verdicts from any run that still has its legs on disk, not only from probes — a
+**Probe results** reads verdicts from any run that still has its legs on disk, not only from probes — a
 full sweep priced the same routes on far more dates, so its verdict is the better one when you have
 one. Airports you drop gather in a bar at the top and are written in one save, so deciding about six
 airports is one pass rather than six. A run whose legs never reached disk is not offered at all,
@@ -942,7 +1071,7 @@ only for airports *you* dropped in this session; one that was simply never in yo
 `not in this trip`, because a whole table struck through as "dropped" looks like six decisions you
 made rather than a report of the wrong thing.
 
-Results points at the Explore tab when a probe is selected rather than drawing an empty itinerary
+Results points at Probe results when a probe is selected rather than drawing an empty itinerary
 table. The status strip carries a **Stop** button while a run is going.
 
 Every total on Results says when it was measured and how long ago, on the headline cards and on each

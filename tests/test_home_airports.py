@@ -16,7 +16,7 @@ import json
 
 import pytest
 
-from src.home_airports import load_ranking, save_ranking
+from src.home_airports import load_ranking, load_tiers, save_ranking, save_tiers
 
 
 def test_a_ranking_round_trips_in_the_order_it_was_given(tmp_path):
@@ -72,3 +72,93 @@ def test_a_typo_typed_into_the_form_is_refused_by_name(tmp_path):
 def test_the_same_airport_twice_in_one_save_is_refused(tmp_path):
     with pytest.raises(ValueError, match="twice"):
         save_ranking(["BRQ", "PRG", "BRQ"], tmp_path)
+
+
+def test_two_airports_can_share_a_rank(tmp_path):
+    """Prague and Vienna are both a morning. Forcing an order on them invents a
+    preference nobody holds."""
+    save_tiers([["BRQ"], ["PRG", "VIE"]], tmp_path)
+    assert load_tiers(tmp_path) == [["BRQ"], ["PRG", "VIE"]]
+
+
+def test_a_file_written_before_tiers_existed_still_reads(tmp_path):
+    """One airport per tier is exactly what a flat list meant, so there is
+    nothing to migrate and an older checkout keeps working."""
+    (tmp_path / "home_airports.json").write_text(
+        json.dumps({"airports": ["BRQ", "PRG", "VIE"]}), encoding="utf-8"
+    )
+    assert load_tiers(tmp_path) == [["BRQ"], ["PRG"], ["VIE"]]
+    assert load_ranking(tmp_path) == ["BRQ", "PRG", "VIE"]
+
+
+def test_the_chips_still_get_one_flat_order(tmp_path):
+    """A row of buttons has no way to show two airports at the same rank."""
+    save_tiers([["BRQ"], ["PRG", "VIE"]], tmp_path)
+    assert load_ranking(tmp_path) == ["BRQ", "PRG", "VIE"]
+
+
+def test_an_empty_tier_is_dropped_rather_than_kept_as_a_hole(tmp_path):
+    assert save_tiers([["BRQ"], [], ["PRG"]], tmp_path) == [["BRQ"], ["PRG"]]
+
+
+def test_a_trip_that_says_nothing_is_reported_from_your_own_airports(tmp_path):
+    """The dedupe. Two lists that had to be kept in step are now one, and a trip
+    inherits the tiers verbatim - they are already the same shape."""
+    from src.scenario import Scenario
+
+    save_tiers([["BRQ"], ["PRG", "VIE"]], tmp_path)
+    trip = Scenario.from_dict(
+        {
+            "id": "t",
+            "name": "T",
+            "origins": ["PRG"],
+            "stops": [{"label": "Japan", "airports": ["HND"], "stay_days": [10, 14]}],
+            "window_start": "2027-01-01",
+            "window_end": "2027-02-01",
+        }
+    )
+    assert trip.preferred_origins == []
+    assert trip.reporting_tiers(tmp_path) == [["BRQ"], ["PRG", "VIE"]]
+
+
+def test_a_trip_with_its_own_ranking_keeps_it(tmp_path):
+    """Inheritance is a fallback, never an override."""
+    from src.scenario import Scenario
+
+    save_tiers([["BRQ"], ["PRG", "VIE"]], tmp_path)
+    trip = Scenario.from_dict(
+        {
+            "id": "t",
+            "name": "T",
+            "origins": ["PRG"],
+            "stops": [{"label": "Japan", "airports": ["HND"], "stay_days": [10, 14]}],
+            "window_start": "2027-01-01",
+            "window_end": "2027-02-01",
+            "preferred_origins": [["VIE"]],
+        }
+    )
+    assert trip.reporting_tiers(tmp_path) == [["VIE"]]
+
+
+def test_the_ranking_is_not_written_into_the_trip(tmp_path):
+    """Inherited at read time. Writing today's answer into the file would freeze
+    it, and would make every trip claim a preference nobody expressed for it."""
+    from src.scenario import Scenario
+
+    save_tiers([["BRQ"]], tmp_path)
+    trip = Scenario.from_dict(
+        {
+            "id": "t",
+            "name": "T",
+            "origins": ["PRG"],
+            "stops": [{"label": "Japan", "airports": ["HND"], "stay_days": [10, 14]}],
+            "window_start": "2027-01-01",
+            "window_end": "2027-02-01",
+        }
+    )
+    trip.reporting_tiers(tmp_path)
+    assert trip.to_dict()["preferred_origins"] == []
+
+    # And it follows the global list as the global list changes.
+    save_tiers([["OSR"]], tmp_path)
+    assert trip.reporting_tiers(tmp_path) == [["OSR"]]

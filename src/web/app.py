@@ -22,7 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from ..airports import describe, frequent_airports, lookup
 from ..airports import search_with_meta as search_airports
 from ..combine import combine_all, series_from_result
-from ..home_airports import load_ranking, save_ranking
+from ..home_airports import load_ranking, load_tiers, save_tiers
 from ..notify_discord import COLOR_INFO, post
 from ..providers.pelikan_url import build_search_url
 from ..scenario import (
@@ -31,6 +31,7 @@ from ..scenario import (
     Preference,
     Scenario,
     load_scenario,
+    probing,
     read_scenarios,
     save_scenario,
 )
@@ -245,9 +246,17 @@ def airport_frequent() -> dict:
 
 @app.get("/api/home-airports")
 def get_home_airports() -> dict:
-    """The ranking, with each code described, so the page can show cities."""
-    ranked = load_ranking(DATA_DIR)
+    """The ranking, with each code described, so the page can show cities.
+
+    Both shapes, because both are wanted: `tiers` is what the panel edits and
+    what a trip inherits, `airports` is the same thing flattened for the row of
+    one-click chips beside *Depart from*, which cannot show two airports at one
+    rank.
+    """
+    tiers = load_tiers(DATA_DIR)
+    ranked = [code for tier in tiers for code in tier]
     return {
+        "tiers": tiers,
         "airports": ranked,
         "described": [
             airport for code in ranked if (airport := lookup(code, data_dir=DATA_DIR))
@@ -257,11 +266,23 @@ def get_home_airports() -> dict:
 
 @app.put("/api/home-airports")
 def put_home_airports(payload: dict = Body(...)) -> dict:
-    codes = payload.get("airports")
-    if not isinstance(codes, list):
-        raise HTTPException(400, "airports must be a list of IATA codes, most convenient first")
+    """Save the ranking, as tiers or as a flat list.
+
+    `airports` is still accepted and means one airport per tier - the shape
+    every caller wrote before two airports could share a rank.
+    """
+    tiers = payload.get("tiers")
+    if not isinstance(tiers, list):
+        codes = payload.get("airports")
+        if not isinstance(codes, list):
+            raise HTTPException(
+                400,
+                "tiers must be a list of lists of IATA codes, best first "
+                "(or airports, a flat list, for one airport per tier)",
+            )
+        tiers = [[code] for code in codes]
     try:
-        save_ranking(codes, DATA_DIR)
+        save_tiers(tiers, DATA_DIR)
     except (ValueError, OSError) as exc:
         raise HTTPException(400, str(exc)) from exc
     return get_home_airports()
@@ -1347,8 +1368,24 @@ def airport_verdicts(scenario_id: str) -> dict:
     trip flying out of Katowice.
     """
     live = _scenario_or_404(scenario_id)
-    pools = live.airport_pools
+    # The trip's own airports *plus* whatever the probe has been told to keep
+    # asking about. Filtering to the trip's pools alone is what made acting on
+    # this table destroy it: the verdict you narrowed by - "Katowice is 82%
+    # dearer" - vanished the moment you took Katowice out of the trip, and the
+    # next probe never asked about it again either.
+    pools = live.probe_pools
+    # The widened trip, used wherever a run has no snapshot of its own to be
+    # read against. Every run committed before `_write_scenario` existed is in
+    # that position, and reading one against the *narrowed* trip would answer
+    # the question this endpoint exists to ask - "what did the evidence say
+    # about the airport I dropped" - with silence.
+    watched = probing(live)
+    in_trip = [set(airports) for airports in live.airport_pools]
     roles = live.pool_roles
+    # The name the probe list is keyed by, sent rather than re-derived on the
+    # page: `probe_extra` is addressed by it, and two places deciding what a
+    # pool is called is how a list gets edited into a key nothing reads.
+    keys = live.pool_keys
 
     # Best run per pool, decided as the runs are read rather than after all of
     # them are: `best[index]` is (how many of that pool it priced, stamp, block,
@@ -1369,11 +1406,11 @@ def airport_verdicts(scenario_id: str) -> dict:
         status = _read_status(directory)
         if not _has_legs(directory):
             continue
-        searched = _sweep_scenario(directory, live)
+        searched = _sweep_scenario(directory, watched)
         if len(searched.airport_pools) != len(pools):
             continue
         try:
-            report = explore_report(load_legs(directory), searched, status, current=live)
+            report = explore_report(load_legs(directory), searched, status, current=watched)
         except (ValueError, KeyError, TypeError):
             # One unreadable run must not cost the tab every other run's answer.
             continue
@@ -1399,6 +1436,7 @@ def airport_verdicts(scenario_id: str) -> dict:
             blocks.append(
                 {
                     "index": index,
+                    "key": keys[index],
                     **role,
                     "measured_by": None,
                     "airports": [],
@@ -1408,11 +1446,19 @@ def airport_verdicts(scenario_id: str) -> dict:
             continue
 
         _, stamp, block, status = best[index]
-        rows = [row for row in block["airports"] if row["iata"] in wanted]
+        # `in_trip` rather than dropping the row: an airport the probe still
+        # prices but the sweep no longer searches is exactly the comparison this
+        # table exists to make, and it has to be visibly the odd one out.
+        rows = [
+            {**row, "in_trip": row["iata"] in in_trip[index]}
+            for row in block["airports"]
+            if row["iata"] in wanted
+        ]
         seen = {row["iata"] for row in rows}
         blocks.append(
             {
                 "index": index,
+                "key": keys[index],
                 **role,
                 # Named, because a verdict is only as good as the run behind it
                 # and this table mixes runs by design.
@@ -1440,6 +1486,10 @@ def airport_verdicts(scenario_id: str) -> dict:
         "currency": live.currency,
         "runs_read": runs_read,
         "pools": blocks,
+        # Airports the probe list still names for a pool this trip no longer
+        # has. Kept on disk deliberately; reported so that a list being kept and
+        # not used cannot also be invisible.
+        "probe_extra_unused": live.probe_extra_unused,
     }
 
 

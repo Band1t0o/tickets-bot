@@ -46,6 +46,23 @@
   --color-buttonNormalBorder: var(--palette-navy150);
   --color-buttonDangerText: var(--palette-red700);
 
+  /*
+   * The run ramp. One button per kind of run, weighted by what the run costs:
+   * a probe is six searches and reads as the light one, a deep sweep is three
+   * hundred and reads as the heavy one. Stepped through one hue rather than
+   * given three hues of their own - three saturated colours would say the runs
+   * are three different kinds of thing, and they are one thing at three sizes.
+   * Every pair here clears 4.5:1 against its own text.
+   */
+  --color-runProbeBackground: var(--palette-purple100);
+  --color-runProbeBorder: var(--palette-purple200);
+  --color-runProbeText: var(--palette-purple700);
+  --color-runQuickBackground: var(--palette-purple400);
+  --color-runDeepBackground: var(--palette-purple700);
+  --color-runText: var(--palette-white);
+  --color-runScheduleBackground: var(--palette-navy900);
+  --color-runScheduleBorder: var(--palette-navy900);
+
   --color-formInputBackground: var(--palette-white);
   --color-formInputBorder: var(--palette-navy150);
   --color-formInputBorderSelected: var(--palette-purple500);
@@ -132,6 +149,18 @@
   --color-buttonNormalBackgroundHover: var(--palette-navy700);
   --color-buttonNormalBorder: var(--palette-navy600);
   --color-buttonDangerText: var(--palette-red300);
+
+  /* The same ramp re-stepped for navy: the light end has to stay legible
+     against a dark panel, so it becomes a tinted dark rather than a tinted
+     white, and the heavy end lightens instead of darkening. */
+  --color-runProbeBackground: var(--palette-navy700);
+  --color-runProbeBorder: var(--palette-purple500);
+  --color-runProbeText: var(--palette-purple150);
+  --color-runQuickBackground: var(--palette-purple600);
+  --color-runDeepBackground: var(--palette-purple400);
+  --color-runText: var(--palette-white);
+  --color-runScheduleBackground: var(--palette-navy700);
+  --color-runScheduleBorder: var(--palette-navy600);
 
   --color-formInputBackground: var(--palette-navy900);
   --color-formInputBorder: var(--palette-navy600);

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -61,6 +61,17 @@ MAX_PREFERENCES = 4
 # honest tool is a narrowed sweep, not a follow.
 DEFAULT_SLACK_DAYS = 2
 MAX_SLACK_DAYS = 7
+
+
+def _pool_key(role: dict) -> str:
+    """The stable name of the pool a `pool_roles` entry describes.
+
+    "origins", "stop:0", "return_to". Used as the key of `Scenario.probe_extra`,
+    so that a list of airports to keep probing survives the trip growing a stop.
+    """
+    if role["role"] == "stop":
+        return f"stop:{role['stop_index']}"
+    return role["role"]
 
 
 @dataclass(frozen=True)
@@ -339,6 +350,28 @@ class Scenario:
     # and the second is how a decision is usually put together. Some of these
     # rows are a preference's own legs - see `LegWatch.source`.
     leg_watches: list[LegWatch] = field(default_factory=list)
+    # Airports the probe keeps asking about, beyond the ones the trip searches.
+    #
+    # The probe exists to say which airports are worth flying from, and acting
+    # on its answer means taking the losers out of the trip. Doing that used to
+    # delete the evidence: the verdict table filtered to the trip's own pools,
+    # so a dropped airport lost its row, and the next probe never asked about it
+    # again. The one number you narrowed *by* - "Katowice is 82% dearer" - was
+    # gone the moment you narrowed.
+    #
+    # So the probe's list is its own, and it is typed rather than inferred.
+    # Nothing lands here because you edited the route; removing an airport from
+    # a stop removes it from the trip and does nothing else. That is deliberate:
+    # a list that grew on its own would quietly walk a 51-search probe up toward
+    # the cost of the sweep it exists to avoid.
+    #
+    # Keyed by role - "origins", "stop:0", "return_to" - and not by position,
+    # because pools are positional and lining pool 2 of a two-stop trip up with
+    # pool 2 of a three-stop one is how a probe of Prague and Vienna came to be
+    # presented as the verdict for a trip flying out of Katowice. A key naming
+    # no current pool is kept on disk and not probed; the panel says so, because
+    # a stop reordered for an afternoon should not cost a year of probe list.
+    probe_extra: dict[str, list[str]] = field(default_factory=dict)
     # Sample the stops in the reverse order too, but only in the probe.
     #
     # "Is it cheaper to fly Philippines first?" is a real question and an
@@ -424,6 +457,87 @@ class Scenario:
                 else {"role": "origins", "stop_index": None, "label": "Back home"}
             )
         return roles
+
+    def reporting_tiers(self, data_dir: Path | str | None = None) -> list[list[str]]:
+        """Which airports this trip would rather be reported from, best first.
+
+        Its own `preferred_origins` when it has any, and otherwise the global
+        ranking from `data/home_airports.json`. Both are tiers, so this is a
+        fallback and not a conversion.
+
+        Inherited at read time rather than copied into the file on save. The
+        point of the fallback is that a trip which never said otherwise follows
+        the global list *as the global list changes* - writing today's answer
+        into the trip would freeze it, and would also make every trip claim a
+        preference nobody expressed for it.
+
+        Imported inside the method because `home_airports` imports `IATA_RE`
+        from this module.
+        """
+        if self.preferred_origins:
+            return self.preferred_origins
+        from .home_airports import DATA_DIR, load_tiers
+
+        return load_tiers(DATA_DIR if data_dir is None else data_dir)
+
+    @property
+    def pool_keys(self) -> list[str]:
+        """A stable name per pool, positionally aligned with `airport_pools`.
+
+        `probe_extra` is keyed by these rather than by index. Position is the
+        one thing about a pool that is guaranteed to change - adding a stop
+        renumbers every pool after it - and this whole module already carries
+        the scar of reading one trip's pool 2 as another's.
+
+        Derived from `pool_roles` so the two cannot drift, and deliberately the
+        same for the last pool of a trip with no separate return airports as for
+        its first: that pool *is* the origins list, and probing "the way home"
+        of such a trip means probing the airports you leave from.
+        """
+        return [_pool_key(role) for role in self.pool_roles]
+
+    @property
+    def probe_pools(self) -> list[list[str]]:
+        """`airport_pools`, widened by whatever `probe_extra` names for each.
+
+        What a probe actually asks about. Order is the trip's own airports
+        first, then the extras in the order they were typed, and a code already
+        in the pool is not repeated - the planner walks these to emit searches,
+        and a duplicate is a real search against a site that answers about 120
+        of them per runner.
+        """
+        pools = []
+        for key, airports in zip(self.pool_keys, self.airport_pools, strict=True):
+            extra = [code for code in self._probed(key) if code not in airports]
+            pools.append([*airports, *extra])
+        return pools
+
+    def _probed(self, key: str) -> list[str]:
+        """One pool's extras, ignoring anything that is not a list of codes.
+
+        Loading a trip does not validate it: `load_scenario` parses and returns,
+        so a hand-edited `"probe_extra": {"origins": "KTW"}` would otherwise be
+        iterated as three characters and planned as three airports. The read
+        path repairs and the write path refuses, which is the rule
+        `home_airports` already follows for the same reason.
+        """
+        codes = self.probe_extra.get(key)
+        return codes if isinstance(codes, list) else []
+
+    @property
+    def probe_extra_unused(self) -> dict[str, list[str]]:
+        """Entries of `probe_extra` naming a pool this trip no longer has.
+
+        Kept rather than dropped, so a stop removed for an afternoon does not
+        cost the list. Reported so that a list which is being kept and not used
+        cannot also be invisible.
+        """
+        live = set(self.pool_keys)
+        return {
+            key: codes
+            for key, codes in self.probe_extra.items()
+            if key not in live and isinstance(codes, list) and codes
+        }
 
     @property
     def leg_count(self) -> int:
@@ -580,6 +694,24 @@ class Scenario:
                         f"preferred_origins: {code} appears in tier {seen[code]} and tier {rank}"
                     )
                 seen[code] = rank
+
+        for key, codes in self.probe_extra.items():
+            if not isinstance(codes, list):
+                raise ValueError(f"probe_extra[{key!r}] must be a list of airport codes")
+            seen_here: set[str] = set()
+            for code in codes:
+                if not IATA_RE.match(code):
+                    raise ValueError(
+                        f"probe_extra[{key!r}]: {code!r} is not a 3-letter IATA code"
+                    )
+                if code in seen_here:
+                    raise ValueError(f"probe_extra[{key!r}]: {code} is in the list twice")
+                seen_here.add(code)
+            # A key naming no current pool is legal and is not probed - see the
+            # field's comment. Overlap with the pool's own airports is legal
+            # too, and deduplicated by `probe_pools`: refusing it would make
+            # putting an airport back into the trip fail to save while it was
+            # still listed here.
 
         if (self.focus_start is None) != (self.focus_end is None):
             raise ValueError(
@@ -924,10 +1056,65 @@ class Scenario:
             )
             for s in payload["stops"]
         ]
+        # Normalised on the way in, not validated: a code typed in lower case
+        # into the probe panel is the same airport, and the shape check that
+        # rejects anything else is `validate`. Absent from every file written
+        # before the probe kept its own list, which is all of them.
+        payload["probe_extra"] = {
+            str(key): (
+                [str(code).strip().upper() for code in codes]
+                if isinstance(codes, list)
+                # Passed through rather than dropped, so `validate` can refuse it
+                # by name. The same rule `preferred_origins` follows: a shape
+                # nobody could have meant is worth being told about, and a value
+                # silently discarded here is a probe list that saves and does
+                # nothing.
+                else codes
+            )
+            for key, codes in (payload.get("probe_extra") or {}).items()
+        }
+
         unknown = set(payload) - set(cls.__dataclass_fields__)
         if unknown:
             raise ValueError(f"unknown scenario fields: {', '.join(sorted(unknown))}")
         return cls(**payload)
+
+
+def probing(scenario: Scenario) -> Scenario:
+    """The trip as the probe searches it: every pool widened by `probe_extra`.
+
+    One helper, called from exactly two places - `PLANS["explore"]`, which sizes
+    and plans the probe, and `run_sweep`, which writes the snapshot the results
+    are later read against. Both read this, so the plan and the record of the
+    plan cannot disagree about which airports were asked about, which is the
+    failure this module keeps having to design against.
+
+    Returns the scenario unchanged when nothing is set, so a trip that has never
+    used the probe list is not copied on every estimate.
+    """
+    if not scenario.probe_extra:
+        return scenario
+    widened = scenario.probe_pools
+    keys = scenario.pool_keys
+    by_key = dict(zip(keys, widened, strict=True))
+
+    # `origins` covers the way home too on a trip with no separate return
+    # airports: `pool_keys` names that last pool `origins`, because it is
+    # literally the same list.
+    stops = [
+        replace(stop, airports=by_key.get(f"stop:{index}", stop.airports))
+        for index, stop in enumerate(scenario.stops)
+    ]
+    return replace(
+        scenario,
+        origins=by_key.get("origins", scenario.origins),
+        stops=stops,
+        return_to=(
+            by_key.get("return_to", scenario.return_to)
+            if scenario.return_to is not None
+            else None
+        ),
+    )
 
 
 def _migrate(payload: dict) -> dict:

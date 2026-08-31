@@ -19,7 +19,7 @@ from dataclasses import dataclass, replace
 from datetime import date, timedelta
 from itertools import zip_longest
 
-from ..scenario import Scenario
+from ..scenario import Scenario, probing
 
 # Wall-clock seconds one worker spends per search, including the politeness
 # delay. Measured, not reasoned: the cloud sweep of 11 Aug 03:24 ran 350
@@ -364,7 +364,14 @@ def plan_exploration(
     "would Philippines first be cheaper?" can be answered for tens of searches
     instead of the several hundred a second sweep would cost. Only here: the
     sweep prices the order the stops are actually listed in.
+
+    Widened by `probe_extra` before anything is planned, so the probe asks about
+    the airports you told it to keep watching as well as the ones the trip still
+    searches. Done here rather than at each call site: this is the one function
+    that says what a probe costs, and `--dry-run`, the estimate endpoint and the
+    cloud's shard sizing all read it.
     """
+    scenario = probing(scenario)
     searches = _explore_pass(scenario, dates_per_leg)
     for other in reordered(scenario):
         searches += _explore_pass(other, dates_per_leg)

@@ -156,6 +156,7 @@ def jobs(
     depth: str = "",
     shards: int = 0,
     final: bool = False,
+    mode: str = "",
 ) -> list[dict]:
     """One matrix entry per runner, sized from each trip's own plan.
 
@@ -181,8 +182,10 @@ def jobs(
         # Sized from the plan this slot will actually run. A final sweep is a
         # fraction of the broad one - 31 searches against 85 on the real trip -
         # and sizing it from `plan_searches` would deal those 31 across the five
-        # runners the broad shape needs, at four searches a runner.
-        planner = PLANS["final"] if final else plan_searches
+        # runners the broad shape needs, at four searches a runner. A probe is
+        # smaller again, and it is dispatched by hand from the app rather than
+        # by a slot, which is why the mode is read here as well as the flag.
+        planner = PLANS.get(mode) or (PLANS["final"] if final else plan_searches)
         count = shards or shards_for(len(planner(scenario)))
         entries += [
             {"scenario": scenario_id, "shard": index, "shard_count": count}
@@ -198,6 +201,13 @@ def main() -> None:
     parser.add_argument("--final", action="store_true",
                         help="The 13:00/20:00 slot, which re-prices the narrowing")
     parser.add_argument("--watching", action="store_true", help="The four-hourly watch slot")
+    parser.add_argument(
+        "--mode",
+        default="",
+        help="The mode the run will use, when it is not one of the slots above. "
+             "`explore` is a probe: ~50 searches, so one runner rather than the "
+             "four the trip's full plan would be dealt across.",
+    )
     parser.add_argument(
         "--shards",
         type=int,
@@ -224,7 +234,12 @@ def main() -> None:
     # a single `include` list rather than as two matrix axes because the count
     # now differs per trip: a cross product of trips and shard indices cannot
     # give one trip five runners and another one.
-    print("jobs=" + json.dumps(jobs(directory, chosen, args.depth, max(0, args.shards), args.final)))
+    print(
+        "jobs="
+        + json.dumps(
+            jobs(directory, chosen, args.depth, max(0, args.shards), args.final, args.mode)
+        )
+    )
 
 
 if __name__ == "__main__":

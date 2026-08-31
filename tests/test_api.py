@@ -2640,6 +2640,29 @@ def test_a_cloud_run_of_a_committed_trip_is_dispatched(client, cloud, monkeypatc
     assert cloud == [("jp-ph", "deep", "sweep")]
 
 
+def test_a_probe_is_dispatched_to_the_cloud_like_a_sweep(client, cloud, monkeypatch):
+    """It always could be - `explore` is in MODES, `_checked_mode` accepts it and
+    the workflow forwards the mode verbatim. The button ran it here instead, and
+    a probe is ~51 searches against the ~120 this machine gets in a day."""
+    app, _ = client
+    agreeing(monkeypatch)
+    body = app.post("/api/scenarios/jp-ph/run-cloud?mode=explore&depth=deep").json()
+    assert body["dispatched"] is True
+    assert body["mode"] == "explore"
+    assert cloud == [("jp-ph", "deep", "explore")]
+
+
+def test_a_cloud_probe_of_an_uncommitted_trip_is_refused_by_name(client, cloud, monkeypatch):
+    """The cloud probes the branch's airports, not the screen's. Refused here
+    rather than as a red run in Actions twenty seconds from now."""
+    app, _ = client
+    agreeing(monkeypatch, differs=["the airports it searches"])
+    response = app.post("/api/scenarios/jp-ph/run-cloud?mode=explore")
+    assert response.status_code == 400
+    assert "the airports it searches" in response.json()["detail"]
+    assert cloud == []
+
+
 def test_a_cloud_run_is_refused_when_the_branch_holds_a_different_trip(client, cloud, monkeypatch):
     """The cloud sweeps the branch, not the screen. A whole day was spent
     reading results of a trip nobody was still planning."""
@@ -2888,6 +2911,72 @@ def seed_verdict_run(data_dir, stamp, priced, *, searches=3):
         "route_errors": {},
     }))
     return stamp
+
+
+def narrow_to(api, **fields):
+    """Save the trip with one field changed, as the route editor would."""
+    trip = api.get("/api/scenarios/jp-ph").json()
+    trip.update(fields)
+    response = api.put("/api/scenarios/jp-ph", json=trip)
+    assert response.status_code == 200, response.json()
+    return response.json()
+
+
+def test_an_airport_taken_out_of_the_trip_keeps_its_verdict(client):
+    """The whole point of the probe list. Acting on this table used to destroy
+    it: the row you narrowed by - "Vienna is 100% dearer" - vanished the moment
+    you took Vienna out, so the comparison could never be checked again."""
+    api, data = client
+    seed_verdict_run(data, "2026-08-06T02-00-00Z", {
+        ("PRG", "NRT"): 12000, ("VIE", "NRT"): 24000,
+        ("NRT", "MNL"): 4000, ("MNL", "PRG"): 14000, ("MNL", "VIE"): 15000,
+    })
+    narrow_to(api, origins=["PRG"], probe_extra={"origins": ["VIE"]})
+
+    pool = api.get("/api/scenarios/jp-ph/airport-verdicts").json()["pools"][0]
+    rows = {row["iata"]: row for row in pool["airports"]}
+    assert set(rows) == {"PRG", "VIE"}
+    assert rows["PRG"]["in_trip"] is True
+    # Still judged, and visibly the odd one out rather than silently gone.
+    assert rows["VIE"]["in_trip"] is False
+    assert rows["VIE"]["verdict"] == "poor"
+
+
+def test_an_airport_dropped_without_being_kept_does_go(client):
+    """The list is typed, not inferred. Editing the route removes an airport
+    from the trip and does nothing else - a list that grew on its own would walk
+    a 51-search probe up toward the cost of the sweep it exists to avoid."""
+    api, data = client
+    seed_verdict_run(data, "2026-08-06T02-00-00Z", {
+        ("PRG", "NRT"): 12000, ("VIE", "NRT"): 24000,
+        ("NRT", "MNL"): 4000, ("MNL", "PRG"): 14000, ("MNL", "VIE"): 15000,
+    })
+    narrow_to(api, origins=["PRG"])
+
+    pool = api.get("/api/scenarios/jp-ph/airport-verdicts").json()["pools"][0]
+    assert [row["iata"] for row in pool["airports"]] == ["PRG"]
+
+
+def test_a_pool_carries_the_key_the_probe_list_is_addressed_by(client):
+    """Sent rather than re-derived on the page. Two places deciding what a pool
+    is called is how a list gets edited into a key nothing reads."""
+    api, data = client
+    seed_verdict_run(data, "2026-08-06T02-00-00Z", {("PRG", "NRT"): 12000})
+    body = api.get("/api/scenarios/jp-ph/airport-verdicts").json()
+    assert [pool["key"] for pool in body["pools"]] == [
+        "origins", "stop:0", "stop:1", "origins",
+    ]
+
+
+def test_a_probe_list_for_a_pool_the_trip_no_longer_has_is_reported(client):
+    """Kept on disk deliberately. A list being kept and not used must not also
+    be invisible."""
+    api, data = client
+    seed_verdict_run(data, "2026-08-06T02-00-00Z", {("PRG", "NRT"): 12000})
+    narrow_to(api, probe_extra={"stop:9": ["CTS"]})
+
+    body = api.get("/api/scenarios/jp-ph/airport-verdicts").json()
+    assert body["probe_extra_unused"] == {"stop:9": ["CTS"]}
 
 
 def test_every_airport_of_the_trip_is_judged_without_choosing_a_run(client):

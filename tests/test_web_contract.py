@@ -126,13 +126,36 @@ STALE_STEP_WORDING = [
     "the step before",
     "Run one above",
     "run one above",
+    # The switch between the two populations, deleted when the broad runs moved
+    # to Map it out. An empty state went on telling people to flip it for
+    # another session, because this list only ever read the markup and that
+    # sentence is written by a renderer.
+    "Switch to",
+    "the whole window”",
+    "Run a narrow sweep here",
 ]
 
 
-def test_the_narrowing_step_does_not_describe_a_step_that_was_merged_into_it():
+def test_no_screen_describes_a_step_or_a_switch_that_was_merged_away():
+    """Both files, because half this app's prose is written by a renderer.
+
+    Checking only the markup is why "Switch to the whole window and press Run a
+    narrow sweep here" survived the switch being deleted: it lives in a template
+    literal in `app.js`, and nothing was looking there.
+    """
     markup = (STATIC / "index.html").read_text(encoding="utf-8")
+    script = (STATIC / "app.js").read_text(encoding="utf-8")
     # Comments record why wording is what it is, including wording that was
     # replaced, and those quotations are not on screen.
     visible = re.sub(r"<!--.*?-->", "", markup, flags=re.S)
+    # Two passes, and a class that cannot match a newline for the line
+    # comments. With `re.S` a single `//.*$` is greedy across newlines and
+    # backtracks only to the *last* line end in the file, so one `//` near the
+    # top erases everything after it - which is exactly what this test did on
+    # its first outing: it passed against a deliberately reintroduced stale
+    # string, and proving that it bites is the only reason it was caught.
+    script = re.sub(r"/\*.*?\*/", "", script, flags=re.S)
+    script = re.sub(r"^[ \t]*//[^\r\n]*$", "", script, flags=re.M)
+    visible += script
     found = [phrase for phrase in STALE_STEP_WORDING if phrase in visible]
-    assert not found, f"index.html still points at the merged step: {found}"
+    assert not found, f"the page still points at something that was merged away: {found}"

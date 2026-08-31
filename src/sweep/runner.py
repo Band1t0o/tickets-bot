@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Protocol
 
 from ..models import Leg
-from ..scenario import Scenario
+from ..scenario import Scenario, probing
 from .planner import PLANS, LegSearch, shard_of
 
 # Politeness delay between searches on the same worker.
@@ -668,7 +668,12 @@ def run_sweep(
             not in already
         ]
     directory = _new_sweep_directory(Path(data_dir) / MODE_ROOTS[mode] / scenario.id)
-    _write_scenario(directory, scenario)
+    # The probe searches a widened trip - the pools plus whatever `probe_extra`
+    # names - so the snapshot has to record the widened one. `_sweep_scenario`
+    # takes a run's shape from this file, and a snapshot narrower than the plan
+    # would make every extra airport's answer look like it belonged to another
+    # trip, which is the exact failure `_write_scenario` was added to stop.
+    _write_scenario(directory, probing(scenario) if mode == "explore" else scenario)
     if inherited is not None:
         # Copied before the logs open: they open for appending, onto these.
         for name in ("legs.jsonl", "searches.jsonl"):

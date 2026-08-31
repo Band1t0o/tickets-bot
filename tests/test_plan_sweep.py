@@ -344,3 +344,25 @@ def test_a_dispatch_of_a_trip_with_nothing_to_watch_says_that_instead(tmp_path):
 def test_nothing_to_explain_when_the_dispatch_planned_something(tmp_path):
     directory = trips(tmp_path, make_scenario(id="real"))
     assert reason_for_nothing(directory, "real") == ""
+
+
+def test_a_probe_is_sized_from_the_probe_plan_not_the_sweeps(tmp_path):
+    """A probe dispatched by hand from the app is a fraction of the sweep it
+    exists to avoid: grand-tour is 660 searches swept and 36 probed. Sized from
+    `plan_searches` those 36 would be dealt across seven runners.
+    """
+    directory = trips(tmp_path, make_scenario(id="big", depth="deep", enabled=True))
+    swept = jobs(directory, ["big"], depth="deep")
+    probed = jobs(directory, ["big"], depth="deep", mode="explore")
+
+    assert len(swept) > 1, "this trip must need sharding for the comparison to mean anything"
+    assert len(probed) == 1
+    assert probed[0]["shard_count"] == 1
+
+
+def test_the_slot_flags_still_decide_when_no_mode_is_given(tmp_path):
+    """The crons pass --final and no --mode. Adding one must not change them."""
+    directory = trips(tmp_path, focused(id="narrowed", depth="deep", enabled=True))
+    assert jobs(directory, ["narrowed"], depth="deep", final=True) == jobs(
+        directory, ["narrowed"], depth="deep", final=True, mode=""
+    )
