@@ -88,7 +88,9 @@ jobs:
       - run: python -m playwright install --with-deps chromium
 
       - name: Report the planned cost before spending it
-        run: python -m src.cli watch --scenario "${{ matrix.scenario }}" --dry-run || true
+        env:
+          SCENARIO: ${{ matrix.scenario }}
+        run: python -m src.cli watch --scenario "$SCENARIO" --dry-run || true
 
       - name: Re-price the watched days
         env:
@@ -96,15 +98,18 @@ jobs:
           # Generous against a ~16 minute expectation, low enough that a stuck
           # run gives up well inside timeout-minutes.
           WATCH_BUDGET_MIN: 30
+          SCENARIO: ${{ matrix.scenario }}
         run: |
           set -euo pipefail
-          python -m src.cli watch --scenario "${{ matrix.scenario }}" --max-minutes "$WATCH_BUDGET_MIN"
+          python -m src.cli watch --scenario "$SCENARIO" --max-minutes "$WATCH_BUDGET_MIN"
 
       - name: Commit observations
         # Always: observations are appended as they are found, and an hour-old
         # price cannot be re-observed. Whatever killed the run, what it saw is
         # worth keeping.
         if: always()
+        env:
+          SCENARIO: ${{ matrix.scenario }}
         run: |
           set -euo pipefail
           git config user.name "github-actions"
@@ -121,7 +126,7 @@ jobs:
             echo "No new observations"
             exit 0
           fi
-          git commit -m "chore(watch): ${{ matrix.scenario }} $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          git commit -m "chore(watch): $SCENARIO $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
 
           # probe.yml and scrape.yml push to this branch too, on their own
           # concurrency groups, so nothing serialises the three. A rejected
