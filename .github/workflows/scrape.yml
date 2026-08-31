@@ -117,11 +117,16 @@ jobs:
           # The slot decides the mode; a dispatch may override it. Both afternoon
           # crons re-price the narrowing, and only 02:00 prices the window.
           MODE="${INPUT_MODE:-sweep}"
-          # The one `${{ }}` left inside a run: block in this repo, deliberately.
-          # It is GitHub's own cron string for the slot that fired - not a value
-          # anyone can type - and it is matched against the literals below, so
-          # reading it through `env` would put the two crons two lines further
-          # apart than the comparison they have to agree with.
+          # The one expression left inside a run: block in this repo, and it is
+          # deliberate: github.event.schedule is GitHub's own cron string for the
+          # slot that fired - not a value anyone can type - and it is matched
+          # against the literals below, so reading it through env would put the
+          # two crons two lines further apart than the comparison they agree with.
+          #
+          # Nothing in a run: block may write an expression in prose. GitHub
+          # substitutes them textually before bash is involved, comments
+          # included, so an empty one is a syntax error in the workflow rather
+          # than a remark - which is how this very comment failed the file.
           case "${{ github.event.schedule }}" in
             "0 13 * * *"|"0 20 * * *") MODE="final" ;;
           esac
@@ -156,8 +161,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Say why this dispatch swept nothing
-        # Through `env`, not interpolated into the script. A `${{ }}` expression
-        # is pasted in as text before bash ever sees the line, so a value
+        # Through `env`, not interpolated into the script. An expression is
+        # pasted in as text before bash ever sees the line, so a value
         # carrying a quote or a `$(...)` is running in this job rather than
         # being printed by it. `reason` is the worst of the two: it is a
         # sentence assembled by plan_sweep.py. Only a dispatcher with write
