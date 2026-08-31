@@ -1252,6 +1252,41 @@ def test_an_empty_card_selector_is_rejected(client):
     assert api.put("/api/sources", json=current).status_code == 400
 
 
+def test_a_url_template_naming_a_value_this_app_cannot_fill_is_refused(client):
+    """The Sources tab exists so a broken scraper is repairable without editing
+    code, which only holds if a bad repair is recoverable from the same screen.
+
+    An unknown placeholder used to save cleanly and then raise KeyError from
+    inside `.format` on every search: the test button answered 500 with nothing
+    to read, and the next sweep died the same way with no working template to
+    fall back on.
+    """
+    api, _ = client
+    current = api.get("/api/sources").json()
+    current["PELIKAN"]["url_template"] = "T:{trip_type},CDF:{oops}"
+    response = api.put("/api/sources", json={"PELIKAN": current["PELIKAN"]})
+    assert response.status_code == 400
+    assert "oops" in response.json()["detail"]
+    # And nothing was written: the working template is still what a sweep reads.
+    assert "{oops}" not in api.get("/api/sources").json()["PELIKAN"]["url_template"]
+
+
+def test_a_url_template_with_an_unbalanced_brace_is_refused(client):
+    api, _ = client
+    current = api.get("/api/sources").json()
+    current["PELIKAN"]["url_template"] = "T:{trip_type},CDF:{origin"
+    response = api.put("/api/sources", json={"PELIKAN": current["PELIKAN"]})
+    assert response.status_code == 400
+    assert "format string" in response.json()["detail"]
+
+
+def test_the_real_template_still_saves(client):
+    """The guard above must not refuse the thing it is guarding."""
+    api, _ = client
+    current = api.get("/api/sources").json()
+    assert api.put("/api/sources", json={"PELIKAN": current["PELIKAN"]}).status_code == 200
+
+
 def test_testing_a_source_reports_what_the_selectors_found(client, monkeypatch):
     """One click that answers "is it the URL or the markup?"
 
@@ -2638,6 +2673,19 @@ def test_a_cloud_run_of_a_committed_trip_is_dispatched(client, cloud, monkeypatc
     body = app.post("/api/scenarios/jp-ph/run-cloud?depth=deep").json()
     assert body["dispatched"] is True
     assert cloud == [("jp-ph", "deep", "sweep")]
+
+
+def test_a_cloud_run_at_a_depth_that_is_not_a_depth_is_refused(client, cloud, monkeypatch):
+    """`run` and `estimate` get this free by validating the scenario they build
+    with it. This endpoint builds none - it hands the string to `gh workflow
+    run` as an input - so nothing checked it, and an unrecognised depth was
+    spent in Actions rather than refused here."""
+    app, _ = client
+    agreeing(monkeypatch)
+    response = app.post("/api/scenarios/jp-ph/run-cloud?depth=thorough")
+    assert response.status_code == 400
+    assert "thorough" in response.json()["detail"]
+    assert cloud == []
 
 
 def test_a_probe_is_dispatched_to_the_cloud_like_a_sweep(client, cloud, monkeypatch):

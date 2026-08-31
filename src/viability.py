@@ -130,9 +130,18 @@ def route_stats(data_dir: Path = Path("data")) -> dict[str, RouteStats]:
     return stats
 
 
-def airport_stats(data_dir: Path = Path("data")) -> dict[str, AirportStats]:
-    """Per-airport view of the same history, with hand-measured notes merged in."""
-    routes = route_stats(data_dir)
+def airport_stats(
+    data_dir: Path = Path("data"), routes: dict[str, RouteStats] | None = None
+) -> dict[str, AirportStats]:
+    """Per-airport view of the same history, with hand-measured notes merged in.
+
+    `routes` lets a caller that has already computed them hand them over.
+    `report` below wants both views and used to ask for this one without saying
+    so, which ran `route_stats` twice - and `route_stats` parses every
+    `legs.jsonl` of every run of every trip. Measured on 62 legs files: 0.45s
+    for the endpoint against 0.26s for one scan.
+    """
+    routes = route_stats(data_dir) if routes is None else routes
     airports: dict[str, AirportStats] = {}
     dead_by_airport: dict[str, list[str]] = defaultdict(list)
 
@@ -173,8 +182,9 @@ def airport_stats(data_dir: Path = Path("data")) -> dict[str, AirportStats]:
 def report(data_dir: Path = Path("data")) -> dict:
     """Everything the UI needs to badge an airport picker."""
     routes = route_stats(data_dir)
+    airports = airport_stats(data_dir, routes)
     return {
-        "airports": {code: stats.to_dict() for code, stats in sorted(airport_stats(data_dir).items())},
+        "airports": {code: stats.to_dict() for code, stats in sorted(airports.items())},
         "dead_routes": sorted(r.route for r in routes.values() if r.dead),
         "routes_searched": len(routes),
     }

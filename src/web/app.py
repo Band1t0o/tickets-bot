@@ -21,12 +21,13 @@ from fastapi.staticfiles import StaticFiles
 
 from ..airports import describe, frequent_airports, lookup
 from ..airports import search_with_meta as search_airports
-from ..combine import combine_all, series_from_result
+from ..combine import combine_all, leg_cost, series_from_result
 from ..home_airports import load_ranking, load_tiers, save_tiers
 from ..notify_discord import COLOR_INFO, post
-from ..providers.pelikan_url import build_search_url
+from ..providers.pelikan_url import build_search_url, check_template
 from ..scenario import (
     DEFAULT_SLACK_DAYS,
+    DEPTHS,
     LegWatch,
     Preference,
     Scenario,
@@ -63,7 +64,10 @@ from ..sweep.runner import (
     legs_per_search_of,
     load_legs,
     narrowing_of,
+    narrowing_searched,
+    read_status,
     run_sweep,
+    sweep_dirs,
 )
 from ..viability import report as viability_report
 from ..webhook_store import clear_webhook, load_webhook, save_webhook
@@ -163,10 +167,8 @@ def _scenario_or_404(scenario_id: str) -> Scenario:
 
 
 def _sweep_dirs(scenario_id: str) -> list[Path]:
-    root = DATA_DIR / "sweeps" / _safe_id(scenario_id)
-    if not root.exists():
-        return []
-    return sorted((p for p in root.iterdir() if p.is_dir()), reverse=True)
+    """Validated here, listed in `sweep.runner`, which owns the directory shape."""
+    return sweep_dirs(DATA_DIR, _safe_id(scenario_id))
 
 
 def _read_json(path: Path):
@@ -177,16 +179,6 @@ def _read_json(path: Path):
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-
-
-def _read_status(directory: Path) -> dict:
-    path = directory / "status.json"
-    if not path.exists():
-        return {"state": "unknown"}
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return {"state": "unreadable"}
 
 
 # -------------------------------------------------------------------- version
@@ -556,6 +548,23 @@ def _checked_mode(mode: str | None) -> str:
     return mode
 
 
+def _checked_depth(depth: str | None) -> str | None:
+    """None, or one of the three depths. Anything else is refused here.
+
+    `run_locally` and `estimate` get this for free by validating the scenario
+    they build with it; `run_in_cloud` builds no scenario - it hands the string
+    to `gh workflow run` as an input - so it had nothing checking it at all. No
+    injection is possible (the gh call is an argument list, never a shell), but
+    an unrecognised depth reaches Actions and is spent there rather than
+    refused here.
+    """
+    if depth is None or depth == "":
+        return None
+    if depth not in DEPTHS:
+        raise HTTPException(400, f"depth must be one of {', '.join(DEPTHS)}, got {depth!r}")
+    return depth
+
+
 @app.post("/api/scenarios/{scenario_id}/estimate")
 def estimate(
     scenario_id: str,
@@ -600,27 +609,17 @@ def estimate(
 
 
 def _focus_of(scenario: Scenario) -> list | None:
-    """A trip's focus as the two strings a sweep records, or None."""
-    if scenario.focus_start and scenario.focus_end:
-        return [scenario.focus_start.isoformat(), scenario.focus_end.isoformat()]
-    return None
+    """A trip's focus as the two strings a sweep records, or None.
 
-
-def _narrowing_wanted(scenario: Scenario) -> dict:
-    """A trip's three narrowing constraints, shaped like a status's record of them.
-
-    The live half of the comparison `is_comparable` makes: what the trip asks for
-    now, against what each run on disk actually searched under.
+    Read off `narrowing_searched` rather than rebuilt, so the "both ends or
+    neither" rule lives in one place. This function and `_narrowing_of` below
+    are the two readings the page needs; the sweep's own record of what it
+    searched under is the same shape, and used to be built by a second copy of
+    this arithmetic that had already drifted to testing one end.
     """
-    return {
-        "focus": _focus_of(scenario),
-        "return_focus": (
-            [scenario.return_focus_start.isoformat(), scenario.return_focus_end.isoformat()]
-            if scenario.return_focus_start and scenario.return_focus_end
-            else None
-        ),
-        "total_days": list(scenario.total_days) if scenario.total_days else None,
-    }
+    return narrowing_searched(scenario)["focus"]
+
+
 
 
 def _leg_labels(scenario: Scenario) -> list[str]:
@@ -723,7 +722,7 @@ def resume_run(scenario_id: str, stamp: str) -> dict:
             "Start a fresh run, or put the airports back as they were.",
         )
 
-    left = _left_to_ask(directory)
+    left = _left_to_ask(read_status(directory))
     if not left:
         raise HTTPException(
             400,
@@ -733,7 +732,7 @@ def resume_run(scenario_id: str, stamp: str) -> dict:
 
     _failures.pop(scenario_id, None)
     stop = threading.Event()
-    mode = _read_status(directory).get("mode", "sweep")
+    mode = read_status(directory).get("mode", "sweep")
 
     def work():
         try:
@@ -792,6 +791,7 @@ def run_in_cloud(
     """
     scenario = _scenario_or_404(scenario_id)
     mode = _checked_mode(mode)
+    depth = _checked_depth(depth)
     if mode == "final":
         # Refused here rather than in the runner twenty minutes from now, on a
         # machine nobody is watching. `plan_final` raises the sentence to show.
@@ -993,43 +993,45 @@ def list_sweeps(scenario_id: str) -> dict:
         # leaving "minutes left" reading roughly half the real wait.
         "seconds_per_search": SECONDS_PER_SEARCH,
         "workers": DEFAULT_WORKERS,
+        # The status is read once per run and passed down. It used to be read
+        # three times - once for the spread, once inside `_resumable`, once
+        # inside `_left_to_ask` - which is 90 file reads for the 30 runs of this
+        # trip, on the one endpoint the page polls every two seconds while a
+        # sweep is going.
         "sweeps": [
             {
                 "stamp": d.name,
                 "has_legs": _has_legs(d),
                 "differs": _differs_from_live(d, live),
-                **_read_status(d),
+                **status,
                 # Whether carrying this one on would actually ask for anything.
                 # Computed here rather than in the page so the button and the
                 # endpoint agree about what "unfinished" means.
-                "resumable": _resumable(d),
+                "resumable": _left_to_ask(status) > 0,
                 # How many searches carrying on would actually make, so the
                 # button can say what it costs before it is pressed. Its own key
                 # rather than overwriting the run's own `unanswered`: the two are
                 # computed the same way, and a silent disagreement between them
                 # would be worth seeing rather than hiding.
-                "left_to_ask": _left_to_ask(d),
+                "left_to_ask": _left_to_ask(status),
             }
             for d in directories[:30]
+            for status in [read_status(d)]
         ],
     }
 
 
-def _left_to_ask(directory: Path) -> int:
-    """Searches this run planned and never got an answer for."""
-    status = _read_status(directory)
+def _left_to_ask(status: dict) -> int:
+    """Searches this run planned and never got an answer for.
+
+    Takes the status rather than the directory, so a caller that already holds
+    one is not made to read the file again. A finished run with holes counts:
+    not gated on `state`, because a run can answer 460 of 483 and still record
+    itself `done`, and those 23 are exactly the dates that might have been the
+    cheap ones. What matters is whether anything is still unasked.
+    """
     planned = status.get("planned") or status.get("total") or 0
     return max(0, planned - (status.get("answered") or 0))
-
-
-def _resumable(directory: Path) -> bool:
-    """A finished run with holes counts too.
-
-    Not gated on `state`: a run can answer 460 of 483 and still record itself
-    `done`, and those 23 are exactly the dates that might have been the cheap
-    ones. What matters is whether anything is still unasked.
-    """
-    return _left_to_ask(directory) > 0
 
 
 def _has_legs(directory: Path) -> bool:
@@ -1056,6 +1058,36 @@ def _has_legs(directory: Path) -> bool:
 # committed, on every render.
 _combined_cache: dict[tuple[str, int], object] = {}
 
+# The distinct routes one sweep's legs cover, keyed the same way. Its own cache
+# rather than a field on the combination, because the question is asked of runs
+# the combination is *not* wanted for and needs none of its pruning.
+_routes_cache: dict[tuple[str, int], set] = {}
+
+
+def _legs_key(directory: Path) -> tuple[str, int]:
+    """A cache key that changes when the run's legs file does."""
+    try:
+        return (str(directory), (directory / "legs.jsonl").stat().st_mtime_ns)
+    except OSError:
+        return (str(directory), 0)
+
+
+def _routes_in(directory: Path) -> set[tuple[str, str]]:
+    """The origin/destination pairs this run actually found flights on.
+
+    Memoised, because `history` asks it of every run on disk on every request
+    and the answer only changes when the legs file does. It was `load_legs`
+    inline, which parsed a second copy of every sweep's legs.jsonl - the
+    traversal above had already parsed them - purely to reduce them to a set of
+    pairs. On this trip's 30 runs that was the whole of the endpoint's warm cost.
+    """
+    key = _legs_key(directory)
+    cached = _routes_cache.get(key)
+    if cached is None:
+        cached = {(leg.origin, leg.destination) for leg in load_legs(directory)}
+        _routes_cache[key] = cached
+    return cached
+
 
 def _combination(
     scenario: Scenario, directory: Path, narrowing: tuple = (), in_window: bool = True
@@ -1073,7 +1105,6 @@ def _combination(
     identically priced 6 February one that sits inside the window. Filtering the
     unnarrowed result afterwards would have reported nothing available at all.
     """
-    legs_file = directory / "legs.jsonl"
     # Everything `_sweep_scenario` takes from the *live* trip belongs in the key,
     # not only the legs on disk. Editing a trip does not touch its sweeps, so a
     # key made of the legs file alone hands back the previous answer: setting a
@@ -1088,10 +1119,7 @@ def _combination(
         scenario.total_days,
         in_window,
     )
-    try:
-        key = (str(directory), legs_file.stat().st_mtime_ns, narrowing, reading)
-    except OSError:
-        key = (str(directory), 0, narrowing, reading)
+    key = (*_legs_key(directory), narrowing, reading)
     cached = _combined_cache.get(key)
     if cached is None:
         from_airport, to_airport, bags = narrowing or (None, None, False)
@@ -1189,17 +1217,11 @@ def _narrowing_of(scenario: Scenario, in_window: bool) -> dict:
     switched-off one look like alike.
     """
     return {
+        **narrowing_searched(scenario),
         "applied": bool(
             in_window
             and (scenario.focus_start or scenario.return_focus_start or scenario.total_days)
         ),
-        "focus": _focus_of(scenario),
-        "return_focus": (
-            [scenario.return_focus_start.isoformat(), scenario.return_focus_end.isoformat()]
-            if scenario.return_focus_start
-            else None
-        ),
-        "total_days": list(scenario.total_days) if scenario.total_days else None,
         "span_days": [scenario.min_span_days, scenario.max_span_days],
     }
 
@@ -1230,6 +1252,7 @@ def sweep_results(
     """
     scenario, directory = _sweep_dir_or_404(scenario_id, stamp)
     bag = scenario.bag_estimate
+    status = read_status(directory)
 
     # Typed into a URL as often as picked from the dropdowns, and an airport code
     # is upper-case everywhere else in this app.
@@ -1270,8 +1293,8 @@ def sweep_results(
         # complete one, and the difference is whether a cheaper trip was ever
         # looked at. None on sweeps committed before the figure was recorded,
         # which must not read as "complete".
-        "coverage": _read_status(directory).get("coverage"),
-        "focus": _read_status(directory).get("focus"),
+        "coverage": status.get("coverage"),
+        "focus": status.get("focus"),
         # The other narrowing, and not the same thing as `focus`: that one is a
         # record of what this run searched, this one is what is being asked of
         # the legs right now and can be turned off without re-sweeping.
@@ -1320,7 +1343,7 @@ def sweep_explore(scenario_id: str, stamp: str) -> dict:
     would throw away the hour it spent.
     """
     scenario, directory = _sweep_dir_or_404(scenario_id, stamp)
-    status = _read_status(directory)
+    status = read_status(directory)
     return {
         "stamp": stamp,
         "mode": status.get("mode", "sweep"),
@@ -1403,7 +1426,7 @@ def airport_verdicts(scenario_id: str) -> dict:
         ):
             break
 
-        status = _read_status(directory)
+        status = read_status(directory)
         if not _has_legs(directory):
             continue
         searched = _sweep_scenario(directory, watched)
@@ -1546,7 +1569,10 @@ def sweep_by_leg(scenario_id: str, stamp: str) -> dict:
             key = leg.depart_date.isoformat()
             # Ranked bag-inclusive, like every other total in this app: the
             # cheapest headline fare is usually a carrier whose bag costs extra.
-            cost = leg.price_amount + (bag if leg.checked_bag is not True else 0.0)
+            # `combine.leg_cost` rather than the same sum written out again -
+            # it is the rule the traversal ranks by, and these charts have to
+            # agree with the table beside them about which fare is cheaper.
+            cost = leg_cost(leg, bag)
             if key not in best or cost < best[key]["_cost"]:
                 best[key] = {
                     "_cost": cost,
@@ -1611,7 +1637,7 @@ def sweep_by_leg(scenario_id: str, stamp: str) -> dict:
         "stamp": stamp,
         "currency": scenario.currency,
         "bag_estimate": bag,
-        "coverage": _read_status(directory).get("coverage"),
+        "coverage": read_status(directory).get("coverage"),
         # So the page can draw the bands it is picking inside, and say which
         # rules a hand-picked combination breaks without asking again.
         "stay_days": [list(stop.stay_days) for stop in scenario.stops],
@@ -1643,10 +1669,10 @@ def history(scenario_id: str) -> list[dict]:
     # than one. A narrowed sweep prices a handful of departure dates, so its
     # cheapest is the cheapest of those dates and not of the trip; charting it
     # beside a broad sweep draws a step no fare made.
-    wanted = _narrowing_wanted(scenario)
+    wanted = narrowing_searched(scenario)
     series = []
     for directory in reversed(_sweep_dirs(scenario_id)):
-        status = _read_status(directory)
+        status = read_status(directory)
         # Which question this run answered, taken from what it recorded rather
         # than from what the trip says today. A run is broad or narrowed for
         # good the moment it finishes; nothing edited afterwards can change it.
@@ -1658,8 +1684,7 @@ def history(scenario_id: str) -> list[dict]:
         best = _combination(scenario, directory, in_window=narrowed).best
         if best is None:
             continue
-        legs = load_legs(directory)
-        covered = len(required & {(leg.origin, leg.destination) for leg in legs})
+        covered = len(required & _routes_in(directory))
         series.append(
             {
                 "swept_at": directory.name,
@@ -1741,7 +1766,7 @@ def sweep_candidates(
         # So the tab can say which sweep these came from, and flag a partial
         # one: a day that looks cheap because its rivals went unpriced is not a
         # day worth watching.
-        "coverage": _read_status(directory).get("coverage"),
+        "coverage": read_status(directory).get("coverage"),
         "window": _narrowing_of(scenario, in_window),
         "candidates": candidates[: min(max(limit, 1), 200)],
     }
@@ -2179,7 +2204,7 @@ def run_watch_now(scenario_id: str) -> dict:
             )
 
             result = run_sweep(scenario, data_dir=DATA_DIR, mode="watch", stop=stop)
-            status = _read_status(result.directory)
+            status = read_status(result.directory)
             directory = _watch_dir(scenario_id)
             record_observations(result.legs, scenario, status, directory)
             record_leg_observations(result.legs, scenario, status, directory)
@@ -2345,10 +2370,21 @@ def put_sources(payload: dict = Body(...)) -> dict:
             )
         if not str(body.get("base_url", "")).strip():
             raise HTTPException(400, f"{name}: base_url must not be empty")
+        # Checked before it is written, not when the next search uses it. An
+        # unknown placeholder used to save cleanly and then raise KeyError from
+        # inside `.format` on every search - the test button answered 500 with
+        # nothing to read, and the 02:00 sweep died the same way. A tab that
+        # exists so a broken scraper can be repaired without editing code has to
+        # make a bad repair recoverable from the same screen.
+        template = body.get("url_template", DEFAULT_SOURCES[name].url_template)
+        try:
+            check_template(template)
+        except ValueError as exc:
+            raise HTTPException(400, f"{name}: {exc}") from exc
         sources[name] = Source(
             name=name,
             base_url=body["base_url"],
-            url_template=body.get("url_template", DEFAULT_SOURCES[name].url_template),
+            url_template=template,
             selectors={key: str(selectors[key]).strip() for key in REQUIRED_SELECTORS},
             no_results_marker=body.get("no_results_marker", ""),
             result_timeout_s=int(body.get("result_timeout_s", 120)),

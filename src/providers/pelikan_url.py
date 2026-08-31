@@ -37,14 +37,42 @@ from datetime import date
 
 from ..sources import DEFAULTS, Source
 
-BASE = DEFAULTS["PELIKAN"].base_url
-
 TRIP_ROUND = "1"
 TRIP_ONE_WAY = "2"
 
 
 def _fmt_date(value: date) -> str:
     return f"{value.year}_{value.month}_{value.day}"
+
+
+# The placeholders `build_search_url` fills in. Named here rather than left
+# implicit in the `.format` call below, so a template typed into the Sources tab
+# can be checked before it is saved instead of after it has broken a sweep.
+TEMPLATE_FIELDS = ("trip_type", "adults", "origin", "destination", "depart")
+
+
+def check_template(template: str) -> None:
+    """Raise ValueError naming what is wrong with a search-URL template.
+
+    A template is edited from the Sources tab, which exists so that a site
+    renaming a class can be repaired without touching code. That only holds if a
+    bad edit is recoverable: an unknown placeholder used to sail through the
+    save and then raise `KeyError` from inside `.format` on every search - a 500
+    from the test button with nothing to read, and the next sweep dying the same
+    way with no sweep to fall back on.
+    """
+    try:
+        template.format(**dict.fromkeys(TEMPLATE_FIELDS, "X"))
+    except KeyError as exc:
+        raise ValueError(
+            f"the template uses {{{exc.args[0]}}}, which is not one of the values this "
+            f"app can fill in ({', '.join('{' + f + '}' for f in TEMPLATE_FIELDS)})"
+        ) from exc
+    except (IndexError, ValueError) as exc:
+        raise ValueError(
+            f"the template is not a valid format string ({exc}). A literal brace has "
+            f"to be written twice, as {{{{ or }}}}."
+        ) from exc
 
 
 def build_search_url(

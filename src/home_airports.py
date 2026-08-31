@@ -144,13 +144,3 @@ def save_tiers(tiers: list[list[str]], data_dir: Path | str = DATA_DIR) -> list[
         json.dumps({"tiers": written}, indent=2) + "\n", encoding="utf-8"
     )
     return written
-
-
-def save_ranking(codes: list[str], data_dir: Path | str = DATA_DIR) -> list[str]:
-    """Write a flat order, as one airport per tier.
-
-    Kept because a flat list is still a perfectly good way to say this, and it
-    is what every caller wrote before tiers existed.
-    """
-    written = save_tiers([[code] for code in codes], data_dir)
-    return [code for tier in written for code in tier]

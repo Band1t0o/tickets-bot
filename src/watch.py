@@ -356,6 +356,44 @@ def _nearest(candidates: list[Leg], wanted: date) -> Leg | None:
     return min(near, key=lambda leg: leg.price_amount) if near else None
 
 
+def _summarise(rows: list[dict], price_key: str) -> dict:
+    """The movement figures every followed thing reports, from its own series.
+
+    One copy for both `leg_report` and `watch_report`, which wrote it out
+    identically against different price columns. It is a set of rules, not
+    arithmetic: a series is counted only from the runs trustworthy enough to be
+    compared (`comparable`), because averaging a refused run in charts scraper
+    health rather than price - the mistake the trend chart made across four
+    sweeps running 2.9 to 9.7 legs per search. Untrusted rows stay in `series`
+    so the gap is visible, and out of every figure below.
+
+    Zeroed rather than None when nothing is trusted yet: a thing being followed
+    that has no believable reading has not moved, and a chart drawing `null` as
+    a fall is the failure this whole module is written against.
+    """
+    trusted = [row for row in rows if row.get("comparable")]
+    summary = {
+        "observations": len(rows),
+        "first": None,
+        "latest": None,
+        "net_change": 0,
+        "net_change_pct": 0.0,
+        "low": None,
+        "high": None,
+    }
+    if not trusted:
+        return summary
+    prices = [row[price_key] for row in trusted]
+    summary["first"] = prices[0]
+    summary["latest"] = prices[-1]
+    summary["low"] = min(prices)
+    summary["high"] = max(prices)
+    summary["net_change"] = round(prices[-1] - prices[0], 2)
+    if prices[0]:
+        summary["net_change_pct"] = round((prices[-1] - prices[0]) / prices[0] * 100, 1)
+    return summary
+
+
 def leg_report(directory: Path | str = DEFAULT_WATCH_DIR) -> dict:
     """Each watched leg's series and how far it has moved.
 
@@ -383,6 +421,7 @@ def leg_report(directory: Path | str = DEFAULT_WATCH_DIR) -> dict:
         trusted = [row for row in rows if row.get("comparable")]
         last = (trusted or rows)[-1]
         summary = {
+            **_summarise(rows, "price"),
             "key": key,
             "route": last["route"],
             "origin": last["origin"],
@@ -405,23 +444,7 @@ def leg_report(directory: Path | str = DEFAULT_WATCH_DIR) -> dict:
             # quietly presenting it as the day you picked.
             "exact": bool(last.get("exact")),
             "found_date": last.get("found_date"),
-            "observations": len(rows),
-            "first": None,
-            "latest": None,
-            "net_change": 0,
-            "net_change_pct": 0.0,
-            "low": None,
-            "high": None,
         }
-        if trusted:
-            prices = [row["price"] for row in trusted]
-            summary["first"] = prices[0]
-            summary["latest"] = prices[-1]
-            summary["low"] = min(prices)
-            summary["high"] = max(prices)
-            summary["net_change"] = round(prices[-1] - prices[0], 2)
-            if prices[0]:
-                summary["net_change_pct"] = round((prices[-1] - prices[0]) / prices[0] * 100, 1)
         legs[key] = summary
 
     return {"legs": legs}
@@ -454,6 +477,7 @@ def watch_report(directory: Path | str = DEFAULT_WATCH_DIR) -> dict:
     for key, rows in series.items():
         trusted = [row for row in rows if row.get("comparable")]
         summary = {
+            **_summarise(rows, "total"),
             "depart_date": key,
             "label": (trusted or rows)[-1].get("label", ""),
             "slack_days": (trusted or rows)[-1].get("slack_days", 0),
@@ -477,31 +501,17 @@ def watch_report(directory: Path | str = DEFAULT_WATCH_DIR) -> dict:
             "currency": rows[-1]["currency"],
             "route": (trusted or rows)[-1]["route"],
             "has_overland": bool((trusted or rows)[-1].get("has_overland")),
-            "observations": len(rows),
-            "first": None,
-            "latest": None,
+            # A trip carries figures a leg has no equivalent of, so they stay
+            # here rather than in `_summarise`. All of them are read off the
+            # latest *trusted* row, for the same reason the movement figures are.
             "latest_with_bags": None,
-            "net_change": 0,
-            "net_change_pct": 0.0,
-            "low": None,
-            "high": None,
         }
         if trusted:
-            prices = [row["total"] for row in trusted]
-            summary["first"] = prices[0]
-            summary["latest"] = prices[-1]
             summary["latest_with_bags"] = trusted[-1]["total_with_bags"]
             summary["nearby_total"] = trusted[-1].get("nearby_total")
             summary["nearby_total_with_bags"] = trusted[-1].get("nearby_total_with_bags")
             summary["nearby_dates"] = trusted[-1].get("nearby_dates")
             summary["nearby_route"] = trusted[-1].get("nearby_route")
-            summary["low"] = min(prices)
-            summary["high"] = max(prices)
-            summary["net_change"] = round(prices[-1] - prices[0], 2)
-            if prices[0]:
-                summary["net_change_pct"] = round(
-                    (prices[-1] - prices[0]) / prices[0] * 100, 1
-                )
         candidates[key] = summary
 
     return {"candidates": candidates}

@@ -96,7 +96,7 @@ class Stop:
     label: str = ""
     # Named for what happens rather than "open jaw", which already means the
     # trip-level "starts and ends at different airports" here (see
-    # `Itinerary.same_airport` and `combine.best_open_jaw`). One word, two
+    # `Itinerary.same_airport` and `CombineResult.best_open_jaw`). One word, two
     # meanings, in files that read each other is how the round-trip and
     # multi-city branches drifted until neither could build a trip.
     overland: bool = False

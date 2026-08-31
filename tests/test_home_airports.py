@@ -16,17 +16,17 @@ import json
 
 import pytest
 
-from src.home_airports import load_ranking, load_tiers, save_ranking, save_tiers
+from src.home_airports import load_ranking, load_tiers, save_tiers
 
 
 def test_a_ranking_round_trips_in_the_order_it_was_given(tmp_path):
     """Position is rank, so the order is the entire content of the file."""
-    save_ranking(["BRQ", "PRG", "VIE"], tmp_path)
+    save_tiers([["BRQ"], ["PRG"], ["VIE"]], tmp_path)
     assert load_ranking(tmp_path) == ["BRQ", "PRG", "VIE"]
 
 
 def test_codes_are_taken_however_they_are_typed(tmp_path):
-    save_ranking([" brq ", "Prg"], tmp_path)
+    save_tiers([[" brq "], ["Prg"]], tmp_path)
     assert load_ranking(tmp_path) == ["BRQ", "PRG"]
 
 
@@ -66,12 +66,12 @@ def test_a_typo_typed_into_the_form_is_refused_by_name(tmp_path):
     """Unlike the read path, which repairs. Nobody typed what is on disk; they
     did type this, and it is a mistake worth being told about."""
     with pytest.raises(ValueError, match="Brno"):
-        save_ranking(["BRQ", "Brno"], tmp_path)
+        save_tiers([["BRQ"], ["Brno"]], tmp_path)
 
 
 def test_the_same_airport_twice_in_one_save_is_refused(tmp_path):
     with pytest.raises(ValueError, match="twice"):
-        save_ranking(["BRQ", "PRG", "BRQ"], tmp_path)
+        save_tiers([["BRQ"], ["PRG"], ["BRQ"]], tmp_path)
 
 
 def test_two_airports_can_share_a_rank(tmp_path):

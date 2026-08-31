@@ -23,14 +23,16 @@ from ..sources import DEFAULTS, Source, load_source
 from .base import BaseProvider
 from .pelikan_url import build_search_url
 
-# Selectors, timeouts and the "no flights" marker now live in `src/sources.py`
-# and can be overridden from `data/sources.json` without editing code, because
-# the usual way this scraper breaks is the site renaming a class. These names
-# are kept as the defaults' values so existing references still read.
-CARD_SELECTOR = DEFAULTS["PELIKAN"].selectors["card"]
-RESULT_TIMEOUT_S = DEFAULTS["PELIKAN"].result_timeout_s
+# Selectors, timeouts and the "no flights" marker live in `src/sources.py` and
+# can be overridden from `data/sources.json` without editing code, because the
+# usual way this scraper breaks is the site renaming a class. Aliases for three
+# of them used to sit here "so existing references still read"; every such
+# reference had gone, and an alias nothing reads is a second place for a
+# selector to be wrong. Read them off the `Source` the provider was given.
+#
+# How often to look while waiting for the cards. Not from `sources.py`: it is a
+# property of this provider's polling loop, not of the site.
 POLL_INTERVAL_S = 5
-NO_RESULTS_MARKER = DEFAULTS["PELIKAN"].no_results_marker
 
 # How long to keep waiting for results, decided from how fast this site has
 # actually been answering rather than from a fixed ceiling.
@@ -253,8 +255,10 @@ def _dedupe(legs: list[Leg]) -> list[Leg]:
 
 
 class PelikanProvider(BaseProvider):
+    # No BASE_URL beside this: the base address comes from `self.source`, so a
+    # site that moves its path is repaired from `data/sources.json`. A constant
+    # here would be a second answer to that question, and nothing read it.
     NAME = "PELIKAN"
-    BASE_URL = "https://www.pelikan.cz"
 
     def __init__(self, source: Source | None = None, data_dir="data"):
         # Read once per provider rather than once per search: a sweep runs

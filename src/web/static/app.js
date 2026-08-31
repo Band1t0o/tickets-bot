@@ -483,6 +483,23 @@ const escapeHtml = (value) =>
   String(value ?? '').replace(/[&<>"']/g, (c) =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
+/* Fill a <select> from [value, text] pairs, replacing whatever it held.
+
+   Both callers then append an "orphan" option for a value that is no longer one
+   of the choices - a pinned airport dropped from its stop, a filter saved
+   against a previous sweep - because silently snapping such a value back to
+   "any" hides the reason a save is about to be refused. */
+const fillSelect = (select, pairs) => {
+  select.innerHTML = '';
+  for (const [value, text] of pairs) {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = text;
+    select.appendChild(option);
+  }
+  return select;
+};
+
 // Everything below `route` is the editable trip; `state.scenario` stays the
 // last saved version so an unsaved edit can be discarded by reloading.
 const route = { origins: [], stops: [], returnTo: [], preferredTiers: [], probeExtra: {} };
@@ -896,13 +913,10 @@ function crossingPins(stop) {
     caption.className = 'muted';
     caption.textContent = label;
 
-    const select = document.createElement('select');
-    for (const [value, text] of [['', 'any'], ...stop.airports.map((c) => [c, c])]) {
-      const option = document.createElement('option');
-      option.value = value;
-      option.textContent = text;
-      select.appendChild(option);
-    }
+    const select = fillSelect(
+      document.createElement('select'),
+      [['', 'any'], ...stop.airports.map((c) => [c, c])],
+    );
     // An airport removed from the stop leaves a pin pointing at nothing, which
     // the server refuses by name. Shown as the stale value it is rather than
     // silently reset, so the reason a save is refused is on screen.
@@ -2026,7 +2040,23 @@ for (const id of ['window-start', 'window-end', 'adults', 'currency', 'trip-name
 
 /* ----------------------------------------------------------------- status */
 
+/* The one scheduled status poll, so six callers cannot become six loops.
+
+   `pollStatus` re-arms itself every 2s while a run is going, and it is entered
+   from everywhere - starting a sweep, opening a trip, pulling cloud results,
+   saving. Nothing held the timer, so starting a sweep and then opening a trip
+   left two independent chains re-arming each other for the rest of the
+   session, each hitting /api/sweeps/<id> every two seconds. Cancelling on
+   entry means the most recent caller owns the loop and there is only ever one.
+*/
+let pollTimer = null;
+const pollAgain = () => {
+  clearTimeout(pollTimer);
+  pollTimer = setTimeout(pollStatus, 2000);
+};
+
 async function pollStatus() {
+  clearTimeout(pollTimer);
   if (state.isNew) return;   // no file, so no sweeps to report on
   const strip = $('status-strip');
   try {
@@ -2059,7 +2089,7 @@ async function pollStatus() {
       $('status-text').textContent =
         `Stopping — finishing the search in flight · ${latest.completed}/${latest.total} done, ` +
         `${latest.legs_found ?? 0} flights kept`;
-      setTimeout(pollStatus, 2000);
+      pollAgain();
     } else if (body.running && waitingUntil(latest) !== null) {
       /* The site is refusing and the runner is waiting it out - up to fifteen
          minutes in which nothing happens and nothing is wrong. Said plainly,
@@ -2072,7 +2102,7 @@ async function pollStatus() {
         `The site is refusing this client — waiting about ${minutes} min before trying again` +
         ` (${localStamp(latest.backoff_until, { day: undefined, month: undefined })})` +
         ` · ${latest.completed}/${latest.total} done, ${count(latest.legs_found ?? 0)} flights kept`;
-      setTimeout(pollStatus, 2000);
+      pollAgain();
     } else if (body.running && latest) {
       // Pace constants come from the server. Keeping local copies is how the
       // countdown ended up claiming half the real wait after the sweep was
@@ -2085,7 +2115,7 @@ async function pollStatus() {
       strip.className = 'status-strip is-running';
       $('status-text').textContent =
         `${latest.current || 'starting'} · ${latest.completed}/${latest.total} · ~${left} min left`;
-      setTimeout(pollStatus, 2000);
+      pollAgain();
     } else if (latest) {
       const broken = latest.state === 'unhealthy';
       const what = latest.mode === 'explore' ? 'probe' : 'sweep';
@@ -2617,6 +2647,66 @@ async function renderOneRun() {
    table are always scored against one baseline; this only has to say which run
    each pool came from, because a verdict is worth exactly as much as the run
    behind it. */
+/* One pool of a ranking table: its heading, its rows, and what it could not say.
+
+   Both panels that judge airports draw this — the merged verdicts table, which
+   takes each pool from whichever run priced most of it, and the single-run
+   report. They had it written out twice, down to a byte-identical <thead>, so
+   a column added to one appeared in the other only if someone remembered.
+
+   The three options are the whole of the real difference. `provenance` is the
+   line naming which run these numbers came from, which only the merged table
+   has to say because only it mixes runs. `extras` are nodes appended after the
+   table — the probe-list editor. `missingText` words the `not_searched` note,
+   which means different things either side: "your trip has gained this airport
+   since the run these rows come from" against "this run never asked". */
+function poolBlock(pool, currency, { provenance = null, extras = [], missingText } = {}) {
+  const block = document.createElement('div');
+  block.className = 'panel__section';
+
+  const heading = document.createElement('h3');
+  heading.textContent = pool.role === 'origins' && pool.index === 0
+    ? 'Flying from'
+    : `${pool.label}`;
+  block.appendChild(heading);
+
+  if (provenance) block.appendChild(provenance);
+
+  // Guarded, because the merged table has pools no run has priced at all and
+  // an empty table reads as a measurement of nothing rather than as no
+  // measurement. The single-run report always has rows, so this never fires
+  // for it.
+  if (pool.airports.length) {
+    const scroll = document.createElement('div');
+    scroll.className = 'table-scroll';
+    const table = document.createElement('table');
+    table.className = 'data';
+    table.innerHTML =
+      '<thead><tr><th>Airport</th><th>Verdict</th><th class="num">Cheapest in</th>'
+      + '<th class="num">Cheapest out</th><th class="num">Together</th>'
+      + '<th class="num">vs best</th><th class="num">Searches</th><th></th></tr></thead>';
+    const tbody = document.createElement('tbody');
+    for (const row of pool.airports) tbody.appendChild(exploreRow(pool, row, currency));
+    table.appendChild(tbody);
+    scroll.appendChild(table);
+    block.appendChild(scroll);
+  }
+
+  // Answered rather than left to inference. An airport missing from a table
+  // says nothing at all, and the question you came here with is "what about
+  // this one?" — the absence of a row is not an answer to it.
+  if (pool.not_searched?.length) {
+    const missing = document.createElement('p');
+    missing.className = 'answer small';
+    missing.innerHTML =
+      `<strong>${escapeHtml(pool.not_searched.join(', '))}</strong> ${missingText(pool)}`;
+    block.appendChild(missing);
+  }
+
+  for (const extra of extras) block.appendChild(extra);
+  return block;
+}
+
 async function renderAirportVerdicts() {
   const host = $('explore-verdicts');
   const badge = $('explore-source');
@@ -2645,15 +2735,6 @@ async function renderAirportVerdicts() {
 
   host.innerHTML = '';
   for (const pool of body.pools) {
-    const block = document.createElement('div');
-    block.className = 'panel__section';
-
-    const heading = document.createElement('h3');
-    heading.textContent = pool.role === 'origins' && pool.index === 0
-      ? 'Flying from'
-      : `${pool.label}`;
-    block.appendChild(heading);
-
     // Which run this pool's numbers are from, on the pool rather than on the
     // panel: they genuinely can differ, and a single line at the top claiming
     // one run for all of them would be the lie this endpoint exists to avoid.
@@ -2666,48 +2747,21 @@ async function renderAirportVerdicts() {
         ? ` — it answered ${Math.round(run.coverage * 100)}% of its plan, so a thin row here may be the site rather than the airport`
         : '';
       from.innerHTML =
-        `From the ${escapeHtml(kind)} of ${escapeHtml(localStamp(run.stamp))}` +
-        `${escapeHtml(holes)}.`;
+        `From the ${escapeHtml(kind)} of ${escapeHtml(localStamp(run.stamp))}`
+        + `${escapeHtml(holes)}.`;
     } else {
       from.textContent = 'No run on disk has priced any of these.';
     }
-    block.appendChild(from);
 
-    if (pool.airports.length) {
-      const scroll = document.createElement('div');
-      scroll.className = 'table-scroll';
-      const table = document.createElement('table');
-      table.className = 'data';
-      table.innerHTML =
-        '<thead><tr><th>Airport</th><th>Verdict</th><th class="num">Cheapest in</th>' +
-        '<th class="num">Cheapest out</th><th class="num">Together</th>' +
-        '<th class="num">vs best</th><th class="num">Searches</th><th></th></tr></thead>';
-      const tbody = document.createElement('tbody');
-      // The same row builder the single-run report uses, so a verdict reads the
-      // same and "Remove from trip" behaves the same wherever it is met.
-      for (const row of pool.airports) tbody.appendChild(exploreRow(pool, row, body.currency));
-      table.appendChild(tbody);
-      scroll.appendChild(table);
-      block.appendChild(scroll);
-    }
-
-    // Answered rather than left to inference, exactly as the single-run report
-    // does it: the absence of a row is not an answer to "what about this one?".
-    if (pool.not_searched?.length) {
-      const missing = document.createElement('p');
-      missing.className = 'answer small';
-      missing.innerHTML =
-        `<strong>${escapeHtml(pool.not_searched.join(', '))}</strong> ` +
-        (pool.measured_by
-          // Added to the trip since the run these rows come from, so there is
-          // no row to put it in rather than a verdict to report.
-          ? 'is not in the run these rows come from — run a probe to price it.'
-          : 'has never been priced by any run on disk — run a probe.');
-      block.appendChild(missing);
-    }
-
-    block.appendChild(probeListEditor(pool));
-    host.appendChild(block);
+    host.appendChild(poolBlock(pool, body.currency, {
+      provenance: from,
+      extras: [probeListEditor(pool)],
+      missingText: (p) => (p.measured_by
+        // Added to the trip since the run these rows come from, so there is no
+        // row to put it in rather than a verdict to report.
+        ? 'is not in the run these rows come from — run a probe to price it.'
+        : 'has never been priced by any run on disk — run a probe.'),
+    }));
   }
 
   renderUnusedProbeList(body.probe_extra_unused ?? {});
@@ -2882,41 +2936,9 @@ function renderExploreReport(body) {
   renderOrderVerdict(body);
 
   for (const pool of body.pools) {
-    const block = document.createElement('div');
-    block.className = 'panel__section';
-
-    const heading = document.createElement('h3');
-    heading.textContent = pool.role === 'origins' && pool.index === 0
-      ? 'Flying from'
-      : `${pool.label}`;
-    block.appendChild(heading);
-
-    const scroll = document.createElement('div');
-    scroll.className = 'table-scroll';
-    const table = document.createElement('table');
-    table.className = 'data';
-    table.innerHTML =
-      '<thead><tr><th>Airport</th><th>Verdict</th><th class="num">Cheapest in</th>' +
-      '<th class="num">Cheapest out</th><th class="num">Together</th>' +
-      '<th class="num">vs best</th><th class="num">Searches</th><th></th></tr></thead>';
-    const tbody = document.createElement('tbody');
-    for (const row of pool.airports) tbody.appendChild(exploreRow(pool, row, body.currency));
-    table.appendChild(tbody);
-    scroll.appendChild(table);
-    block.appendChild(scroll);
-
-    // Answered rather than left to inference. An airport missing from a table
-    // says nothing at all, and the question you came here with is "what about
-    // this one?" — the absence of a row is not an answer to it.
-    if (pool.not_searched?.length) {
-      const missing = document.createElement('p');
-      missing.className = 'answer small';
-      missing.innerHTML =
-        `<strong>${escapeHtml(pool.not_searched.join(', '))}</strong> ` +
-        'never searched in this run — run a probe to price them.';
-      block.appendChild(missing);
-    }
-    host.appendChild(block);
+    host.appendChild(poolBlock(pool, body.currency, {
+      missingText: () => 'never searched in this run — run a probe to price them.',
+    }));
   }
 }
 
@@ -3031,14 +3053,7 @@ function renderFilters(body, view) {
     ['filter-from', body.start_airports ?? [], view.filters.from, 'any airport'],
     ['filter-to', body.end_airports ?? [], view.filters.to, 'any airport'],
   ]) {
-    const select = view.$(id);
-    select.innerHTML = '';
-    for (const [value, text] of [['', blank], ...codes.map((c) => [c, c])]) {
-      const option = document.createElement('option');
-      option.value = value;
-      option.textContent = text;
-      select.appendChild(option);
-    }
+    const select = fillSelect(view.$(id), [['', blank], ...codes.map((c) => [c, c])]);
     // A code saved from a previous sweep may not exist in this one; keep it
     // selectable rather than silently snapping the filter back to "any".
     if (chosen && !codes.includes(chosen)) {

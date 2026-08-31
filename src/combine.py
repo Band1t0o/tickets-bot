@@ -75,8 +75,13 @@ def _stay_ok(earlier: Leg, later: Leg, span: tuple[int, int]) -> bool:
     return span[0] <= days <= span[1]
 
 
-def _leg_cost(leg: Leg, bag_estimate: float) -> float:
+def leg_cost(leg: Leg, bag_estimate: float) -> float:
     """What one leg contributes to the ranking total.
+
+    Public because the per-leg charts in `web.app` rank the same way and had
+    this arithmetic written out inline. It is a rule, not an expression - the
+    comment below is why it exists - and a rule kept in two places is one the
+    next change finds only half of.
 
     Itineraries are ranked on the bag-inclusive total, because the cheapest
     headline fare is usually a low-cost carrier whose checked bag is extra, and
@@ -115,7 +120,7 @@ def _departures(by_origin, arrived_at: str, stop, bag: float):
     # here would chain departures the planner never searched.
     return heapq.merge(
         *(by_origin[code] for code in stop.depart_from if code in by_origin),
-        key=lambda leg: _leg_cost(leg, bag),
+        key=lambda leg: leg_cost(leg, bag),
     )
 
 
@@ -205,7 +210,7 @@ def combine_all(
             continue
         by_origin[leg.origin].append(leg)
     for candidates in by_origin.values():
-        candidates.sort(key=lambda leg: _leg_cost(leg, bag))
+        candidates.sort(key=lambda leg: leg_cost(leg, bag))
 
     # A target that can never be hit must not sit in the threshold as `inf`,
     # which would disable pruning for the whole traversal. A trip that leaves
@@ -288,7 +293,7 @@ def combine_all(
             if nodes > MAX_NODES:
                 result.truncated = True
                 return
-            total = running + _leg_cost(leg, bag)
+            total = running + leg_cost(leg, bag)
             # Candidates are cost-sorted, so everything after this is worse.
             if total >= threshold(date_key):
                 break
@@ -322,7 +327,7 @@ def combine_all(
         if out_first and not out_first <= leg.depart_date <= out_last:
             continue
         date_key = leg.depart_date.isoformat()
-        cost = _leg_cost(leg, bag)
+        cost = leg_cost(leg, bag)
         if cost >= threshold(date_key):
             continue
         descend([leg], cost, leg.price_currency, date_key)
@@ -344,41 +349,14 @@ def combine(
     return combine_all(legs, scenario, limit=limit, narrowed=narrowed).top
 
 
-def best_same_airport(itineraries: list[Itinerary]) -> Itinerary | None:
-    """Cheapest itinerary that ends where it started."""
-    closed = [i for i in itineraries if i.same_airport]
-    return min(closed, key=lambda i: i.total_price) if closed else None
-
-
-def best_open_jaw(itineraries: list[Itinerary]) -> Itinerary | None:
-    """Cheapest itinerary that returns to a different airport."""
-    open_jaw = [i for i in itineraries if not i.same_airport]
-    return min(open_jaw, key=lambda i: i.total_price) if open_jaw else None
-
-
-def cheapest_by_departure_date(
-    itineraries: list[Itinerary], bag_estimate: float = 0
-) -> list[dict]:
-    """Cheapest total per departure date - the series behind the price chart."""
-    best: dict[str, Itinerary] = {}
-    for itinerary in itineraries:
-        if itinerary.departure_date is None:
-            continue
-        key = itinerary.departure_date.isoformat()
-        current = best.get(key)
-        if current is None or itinerary.total_with_bags(bag_estimate) < current.total_with_bags(
-            bag_estimate
-        ):
-            best[key] = itinerary
-    return _series(best, bag_estimate)
-
-
 def series_from_result(result: CombineResult, bag_estimate: float = 0) -> list[dict]:
-    """The price-by-date series, from a traversal that already computed it."""
-    return _series(result.best_by_date, bag_estimate)
+    """The price-by-date series, from a traversal that already computed it.
 
-
-def _series(best: dict[str, Itinerary], bag_estimate: float) -> list[dict]:
+    Built straight from `best_by_date` rather than by re-scanning a finished
+    list of itineraries, which is what the deleted `cheapest_by_departure_date`
+    did - the traversal already keeps the cheapest per date, so scanning for it
+    again was computing a figure it had been handed.
+    """
     return [
         {
             "depart_date": key,
@@ -389,5 +367,5 @@ def _series(best: dict[str, Itinerary], bag_estimate: float) -> list[dict]:
             "currency": itinerary.currency,
             "route": itinerary.route,
         }
-        for key, itinerary in sorted(best.items())
+        for key, itinerary in sorted(result.best_by_date.items())
     ]

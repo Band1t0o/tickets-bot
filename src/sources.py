@@ -23,14 +23,16 @@ import json
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
-# What a source is *for*, which decides what a broken one costs you.
+# What a source is *for* is carried by `Source.role`, which is one of three
+# values and is never taken from a request: `put_sources` copies it from the
+# defaults below, so a role nobody wrote cannot be saved. A `ROLES` tuple sat
+# here to be validated against and never was.
 #
 # "sweep" is the price feed: if it breaks, the nightly run goes quiet and there
 # is no data at all. "check" is a second opinion on a handful of legs, run by
 # hand; if it breaks you lose the cross-check, not the prices. "none" is a site
 # that was considered and is not connected - kept visible so the tab can say so
 # rather than leaving you to wonder whether it is on.
-ROLES = ("sweep", "check", "none")
 
 
 @dataclass(frozen=True)

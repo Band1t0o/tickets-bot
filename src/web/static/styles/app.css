@@ -2,7 +2,11 @@
  * Component styles ported from the Finance-planner project
  * (/Users/vojtano/Projects/Finance-planner/src/styles/app.css), trimmed to the
  * classes this UI actually uses and extended with a few flight-specific ones
- * (.airport-grid, .chart, .status-strip).
+ * (.chart, .status-strip, .typeahead).
+ *
+ * Unlike palette.css and theme.css beside it, this file is trimmed rather than
+ * kept verbatim - so a block nothing carries the classes for is deleted. An
+ * .airport-grid card grid lived here until the typeahead and chips replaced it.
  *
  * A copy, not a shared dependency: the two projects will drift. Style fixes
  * worth keeping should be made in both.
@@ -524,41 +528,6 @@ label.field > select { font-weight: 400; color: var(--color-formInputText); }
 }
 
 .stat.is-headline .stat__value { font-size: 26px; }
-
-/* --------------------------------------------------------- airport picker */
-
-.airport-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
-  gap: 8px;
-}
-
-.airport {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  padding: 9px 11px;
-  border: 1px solid var(--color-tableBorder);
-  border-radius: 8px;
-  background: var(--color-panelBackground);
-  cursor: pointer;
-}
-
-.airport:hover { border-color: var(--color-tableBorderStrong); }
-
-.airport.is-unavailable {
-  opacity: 0.6;
-  cursor: not-allowed;
-  background: var(--color-tableRowAlternate);
-}
-
-.airport__body { min-width: 0; }
-.airport__code { font-weight: 600; }
-.airport__note {
-  font-size: 11px;
-  color: var(--color-pageTextLight);
-  white-space: normal;
-}
 
 /* ------------------------------------------------------------------ charts */
 

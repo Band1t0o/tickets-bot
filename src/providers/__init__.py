@@ -10,16 +10,16 @@ Skyscanner-via-RapidAPI was removed rather than left commented out: unreachable
 since its registry entry was disabled, gated behind a 100-call monthly free
 tier no sweep could live inside, and it divided prices by 1000 to undo "cents",
 turning a genuine 1,200 EUR fare into 1.20.
+
+DemoStaticProvider went the same way, and a `REGISTRY` mapping names to classes
+with it. Both were reachable only through `src.cli scrape --provider`, which was
+deleted with the legacy pipeline, so nothing had constructed a provider by name
+for months. `run_sweep` takes the provider as an argument and defaults to
+pelikan; tests pass their own fakes. A registry with one entry is a lookup
+table for a choice nobody makes.
 """
 from __future__ import annotations
 
 from .base import BaseProvider
-from .demo_static import DemoStaticProvider
-from .pelikan import PelikanProvider
 
-REGISTRY: dict[str, type[BaseProvider]] = {
-    DemoStaticProvider.NAME: DemoStaticProvider,
-    PelikanProvider.NAME: PelikanProvider,
-}
-
-__all__ = ["REGISTRY", "BaseProvider"]
+__all__ = ["BaseProvider"]
