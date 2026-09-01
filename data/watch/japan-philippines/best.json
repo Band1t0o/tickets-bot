@@ -1,10 +1,10 @@
 {
   "watch:2027-01-12": {
-    "last_total": 22056.0,
+    "last_total": 20931.0,
     "currency": "CZK",
-    "recorded_at": "2026-08-24T07:45:36+00:00",
-    "best_total": 22056.0,
-    "best_at": "2026-08-24T07:45:36+00:00"
+    "recorded_at": "2026-09-01T22:40:48+00:00",
+    "best_total": 20931.0,
+    "best_at": "2026-09-01T22:40:48+00:00"
   },
   "legwatch:VIE-HND@2027-01-16": {
     "last_total": 10105.0,
@@ -12,5 +12,12 @@
     "recorded_at": "2026-08-30T19:23:07+00:00",
     "best_total": 10105.0,
     "best_at": "2026-08-30T19:23:07+00:00"
+  },
+  "legwatch:VIE-HND@2027-01-12": {
+    "last_total": 10163.0,
+    "currency": "CZK",
+    "recorded_at": "2026-09-01T22:40:48+00:00",
+    "best_total": 10163.0,
+    "best_at": "2026-09-01T22:40:48+00:00"
   }
 }
