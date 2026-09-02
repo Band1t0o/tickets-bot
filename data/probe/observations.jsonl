@@ -745,3 +745,6 @@
 {"ts": "2026-09-02T08:20:38+00:00", "origin": "PRG", "destination": "NRT", "depart_date": "2027-01-12", "min_price": 14292.0, "n_offers": 10, "currency": "CZK"}
 {"ts": "2026-09-02T08:20:51+00:00", "origin": "FRA", "destination": "NRT", "depart_date": "2027-01-12", "min_price": 15455.0, "n_offers": 10, "currency": "CZK"}
 {"ts": "2026-09-02T08:21:04+00:00", "origin": "NRT", "destination": "MNL", "depart_date": "2027-01-22", "min_price": 3376.0, "n_offers": 10, "currency": "CZK"}
+{"ts": "2026-09-02T14:02:29+00:00", "origin": "PRG", "destination": "NRT", "depart_date": "2027-01-12", "min_price": 14292.0, "n_offers": 10, "currency": "CZK"}
+{"ts": "2026-09-02T14:02:42+00:00", "origin": "FRA", "destination": "NRT", "depart_date": "2027-01-12", "min_price": 15449.0, "n_offers": 10, "currency": "CZK"}
+{"ts": "2026-09-02T14:02:55+00:00", "origin": "NRT", "destination": "MNL", "depart_date": "2027-01-22", "min_price": 3401.0, "n_offers": 10, "currency": "CZK"}
