@@ -8,8 +8,7 @@
     {
       "label": "",
       "airports": [
-        "CEB",
-        "MNL"
+        "CEB"
       ],
       "stay_days": [
         10,
@@ -48,6 +47,7 @@
   ],
   "preferences": [],
   "leg_watches": [],
+  "probe_extra": {},
   "probe_both_orders": false,
   "sweep_narrowing": true,
   "notify_quiet": true
