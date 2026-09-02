@@ -22,7 +22,6 @@
     {
       "label": "Philippines",
       "airports": [
-        "MNL",
         "CEB"
       ],
       "stay_days": [
@@ -115,6 +114,7 @@
       "source": ""
     }
   ],
+  "probe_extra": {},
   "probe_both_orders": false,
   "sweep_narrowing": true,
   "notify_quiet": false
