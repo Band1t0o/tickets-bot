@@ -9,21 +9,21 @@
       "label": "Japan",
       "airports": [
         "HND",
-        "NRT",
         "KIX"
       ],
       "stay_days": [
         12,
-        14
+        16
       ],
       "overland": true,
-      "arrive_via": null,
+      "arrive_via": "HND",
       "depart_via": "KIX"
     },
     {
       "label": "Philippines",
       "airports": [
-        "MNL"
+        "MNL",
+        "CEB"
       ],
       "stay_days": [
         11,
@@ -39,8 +39,8 @@
   "return_to": null,
   "one_way": false,
   "focus_start": "2027-01-08",
-  "focus_end": "2027-01-12",
-  "return_focus_start": "2027-02-01",
+  "focus_end": "2027-01-14",
+  "return_focus_start": "2027-01-30",
   "return_focus_end": "2027-02-12",
   "total_days": [
     24,
@@ -72,13 +72,15 @@
     "cheapest",
     "preferred"
   ],
-  "watches": [
+  "preferences": [
     {
       "depart_dates": [
         "2027-01-12",
         "2027-01-25",
         "2027-02-06"
       ],
+      "label": "",
+      "slack_days": 2,
       "added_at": "2026-08-23T20:01:54+00:00",
       "added_price": 26544,
       "currency": "CZK"
@@ -88,20 +90,32 @@
     {
       "origin": "VIE",
       "destination": "HND",
-      "depart_date": "2027-01-16",
-      "added_at": "2026-08-23T08:45:47+00:00",
-      "added_price": 10400,
-      "currency": "CZK"
-    },
-    {
-      "origin": "VIE",
-      "destination": "HND",
       "depart_date": "2027-01-12",
       "added_at": "2026-08-23T08:46:19+00:00",
       "added_price": 10400,
-      "currency": "CZK"
+      "currency": "CZK",
+      "source": ""
+    },
+    {
+      "origin": "KIX",
+      "destination": "MNL",
+      "depart_date": "2027-01-26",
+      "added_at": "2026-08-30T10:51:23+00:00",
+      "added_price": null,
+      "currency": "CZK",
+      "source": ""
+    },
+    {
+      "origin": "MNL",
+      "destination": "VIE",
+      "depart_date": "2027-02-08",
+      "added_at": "2026-08-30T10:51:56+00:00",
+      "added_price": null,
+      "currency": "CZK",
+      "source": ""
     }
   ],
   "probe_both_orders": false,
+  "sweep_narrowing": true,
   "notify_quiet": false
 }

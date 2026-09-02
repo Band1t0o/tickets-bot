@@ -64,14 +64,23 @@
     <div class="tabs" id="tabs">
       <button data-tab="map" class="is-active">Map it out</button>
       <button data-tab="narrow">Narrow it down</button>
-      <button data-tab="final">Final sweeps</button>
       <button data-tab="follow">Follow it</button>
       <span class="spacer"></span>
       <button data-tab="setup" class="tabs__gear" title="Discord, the night sweep, the cloud and the sources">&#9881;</button>
     </div>
 
+    <!-- A second nav row, and only Map it out has one. Its three views are the
+         form you fill in and the two kinds of answer a run gives back. Both
+         kinds used to live on the step after this one, behind a switch, which
+         put the results of a broad sweep on the tab named for narrowing. -->
+    <div class="subtabs" id="subtabs" hidden>
+      <button data-sub="options" class="is-active">Search options</button>
+      <button data-sub="probe">Probe results</button>
+      <button data-sub="results">Search results</button>
+    </div>
+
     <!-- ------------------------------------------------------------ Search -->
-    <section data-panel="search" data-step="map">
+    <section data-panel="search" data-step="map" data-sub="options">
       <div class="panel">
         <div class="panel__header"><h2>When</h2></div>
         <div class="form-grid">
@@ -87,7 +96,7 @@
 
       <div class="panel">
         <div class="panel__header"><h2>Route</h2></div>
-        <p class="panel__hint">
+        <p class="explain">
           A trip is a chain of stops, read top to bottom. Add as many as you like — search
           cost grows with the number of legs, not with the number of date combinations.
           Type a city, an airport code or a country and press Enter. Badges come from your
@@ -107,21 +116,56 @@
           Return to <span class="muted" id="return-note"></span>
         </h3>
         <div class="chips" id="return-to"></div>
+
+        <!-- Saving belongs to the thing being saved. It used to sit in the Run
+             row, where it read as a fourth way to start a search rather than as
+             the end of the form above it. -->
+        <div class="row">
+          <div id="dirty-note" class="badge badge--warning" hidden></div>
+          <span class="spacer"></span>
+          <button id="save-btn" class="primary">Save trip</button>
+        </div>
+        <div id="save-error" class="panel-error badge badge--error" hidden></div>
       </div>
 
       <div class="panel">
-        <div class="panel__header">
-          <h2>Run</h2>
-          <span class="badge badge--muted" id="estimate">—</span>
+        <div class="panel__header"><h2>Run</h2></div>
+
+        <!--
+          One button per kind of run, each stating what it costs. Starting a
+          search used to be three decisions taken in three different controls -
+          a depth select, then one of two buttons for where it ran - and the
+          two with their own controls were the two that mattered least. Depth
+          is now which button you press, and every one of them runs in the
+          cloud: pelikan.cz answers about 120 searches from one address, so a
+          312-search sweep cannot finish on this machine at all. Only the cloud
+          shards it. `Standard` depth lives on in the scheduling panel, which is
+          where a run nobody is watching gets configured.
+        -->
+        <div class="runs">
+          <button class="run-btn run-btn--probe" id="explore-btn">
+            <span class="run-btn__name">Probe</span>
+            <span class="run-btn__cost" id="probe-cost">—</span>
+          </button>
+          <button class="run-btn run-btn--quick" id="run-quick-btn" data-depth="quick">
+            <span class="run-btn__name">Quick sweep</span>
+            <span class="run-btn__cost" id="quick-cost">—</span>
+          </button>
+          <button class="run-btn run-btn--deep" id="run-deep-btn" data-depth="deep">
+            <span class="run-btn__name">Deep sweep</span>
+            <span class="run-btn__cost" id="deep-cost">—</span>
+          </button>
+          <span class="runs__gap"></span>
+          <!-- The gateway into everything that runs without being pressed.
+               Reachable from here and from the narrowing step, because that is
+               where the question "and does this happen on its own?" occurs. -->
+          <button class="run-btn run-btn--schedule" id="schedule-btn">
+            <span class="run-btn__name">Scheduled sweeping</span>
+            <span class="run-btn__cost" id="schedule-summary">—</span>
+          </button>
         </div>
+
         <div class="row">
-          <label class="field">Depth
-            <select id="depth">
-              <option value="quick">Quick — every 7th day</option>
-              <option value="standard">Standard — every 3rd day</option>
-              <option value="deep">Deep — every day</option>
-            </select>
-          </label>
           <!--
             The probe only. Sweeping both orders is two full plans against a
             site that answers about 120 searches a runner; three dates a leg is
@@ -132,10 +176,6 @@
             reverse order too
           </label>
           <span class="spacer"></span>
-          <button id="save-btn">Save trip</button>
-          <button id="explore-btn" class="primary">Explore first</button>
-          <button id="run-local-btn">Run it here</button>
-          <button id="run-cloud-btn">Run it in the cloud</button>
           <!--
             The same stop as the one in the strip, next to the buttons that
             start a run. The strip is sticky and always on screen, but it is a
@@ -153,37 +193,29 @@
           -->
           <button id="resume-btn" class="primary" hidden></button>
         </div>
-        <!--
-          A run searches the trip on disk, and these edits are in the browser
-          until something writes them. Two probes were spent searching the
-          previous day's trip, so the state has to be visible next to the
-          buttons that act on it - not implied by a suffix on a badge.
-        -->
-        <div id="dirty-note" class="badge badge--warning" hidden></div>
         <div id="resume-note" class="small muted" hidden></div>
-        <div id="leg-breakdown" class="small muted panel__line"></div>
-        <!-- Split in two so collapsing the lesson does not take the number with
-             it. The cost is measured against the trip on screen and moves as the
-             trip does, which makes it an answer; the paragraph under it is the
-             same sentence every time. -->
-        <p class="panel__hint panel__hint--live small" id="explore-cost-line">
-          <strong>Explore first</strong> costs <span id="explore-cost">a few minutes</span>,
-          against an hour and a half for the real sweep.
+        <p class="explain" id="run-note">
+          A probe prices every route on three spread-out dates. It will not find you a trip;
+          it says which airports are hopeless, so a sweep can leave them out — the verdicts
+          land under <em>Probe results</em>. A sweep prices the whole window and its
+          itineraries land under <em>Search results</em>.
         </p>
-        <p class="panel__hint" id="explore-note">
-          It prices every route in this trip on three spread-out dates. It will not find you a
-          trip; it tells you which airports are hopeless, so the real sweep can leave them out.
-          The verdicts land in <em>Explore</em>, with a button to drop an airport from the trip.
+        <!--
+          The probe joined the sweeps in the cloud, so "as saved" stopped being
+          the whole truth: the cloud reads the trip out of the branch. Pressing
+          any of these saves first, and the run is refused by name when the
+          branch still holds something else - but the sentence has to say which
+          copy is searched, because that is the difference nobody sees until a
+          run comes back about a trip they stopped planning.
+        -->
+        <p class="explain" id="run-note-branch">
+          All three run in the cloud, on the trip <em>committed and pushed</em> — your machine
+          is one address and pelikan.cz answers about 120 searches from it before it stops
+          answering at all. Pressing a button saves first; if the branch still holds a
+          different version, the run is refused and says so rather than sweeping it. A run in
+          progress can be stopped from the strip at the top; it keeps what it has found.
         </p>
-        <p class="panel__hint" id="run-note">
-          Local runs use your machine; cloud runs are free, since the repo is public. What
-          limits depth now is pelikan.cz rather than minutes — it has throttled this client
-          into mass timeouts before, and a sweep that half-fails is worth less than a shallow
-          one that works. The estimate above is measured at the current pace, so it moves when
-          the sweep settings do. A run in progress can be stopped from the strip at the top;
-          it keeps everything it has already found.
-        </p>
-        <div id="save-error" class="panel-error badge badge--error" hidden></div>
+        <div id="run-error" class="panel-error badge badge--error" hidden></div>
       </div>
 
     </section>
@@ -195,25 +227,53 @@
       to search is a step before reading itineraries, not a kind of itinerary -
       and because deciding about six airports should be one pass and one save.
     -->
-    <section data-panel="explore" data-step="map" hidden>
+    <section data-panel="explore" data-step="map" data-sub="probe" hidden>
       <div class="panel">
         <div class="panel__header">
           <h2>Worth searching?</h2>
           <span class="badge badge--muted" id="explore-source">—</span>
         </div>
-        <p class="panel__hint">
+        <p class="explain">
           One row per airport of this trip, and what it costs against the alternatives standing
           in the same place. Prices are the cheapest ever seen, so they are a floor to compare
           airports by, never a fare to book. <strong>Not measured</strong> means the site never
           answered — run it again rather than ruling that airport out.
         </p>
+        <!--
+          What went into the table, said once at the top. Every group below
+          already names the run it was judged by - they can genuinely differ,
+          which is why the naming is per group - but nothing said how many runs
+          the table was standing on, or how old the newest of them was. Live, so
+          the explanations switch cannot take it away.
+        -->
+        <p class="answer small" id="explore-merge"></p>
+        <p class="explain small" id="explore-merge-why" hidden>
+          Each group below is judged by the newest run that priced most of it, so they can
+          come from different runs; each says which.
+        </p>
+
         <div class="notice" id="explore-pending" hidden>
           <span id="explore-pending-text"></span>
           <span class="spacer"></span>
           <button class="small" id="explore-undo">Undo</button>
           <button class="small primary" id="explore-save">Save trip</button>
         </div>
+
+        <!-- Deliberately one box. A trip with four pools of six airports is a
+             lot of table to read when the question is about one of them. -->
+        <div class="row" id="explore-filter-row" hidden>
+          <label class="field">Show only
+            <input type="search" id="explore-filter" placeholder="an airport, a code or a city"
+                   size="28">
+          </label>
+          <span class="small muted" id="explore-filter-note"></span>
+        </div>
+
         <div id="explore-verdicts"></div>
+        <!-- A probe list naming a pool the trip no longer has. Kept on disk on
+             purpose; said out loud so that a setting which has stopped applying
+             is not also invisible. -->
+        <p class="answer small" id="explore-orphans" hidden></p>
         <div class="empty" id="explore-empty">
           Nothing to judge yet. Run a probe or a sweep, and this tab will say which
           airports are worth keeping.
@@ -233,7 +293,7 @@
               <select id="explore-select"></select>
             </label>
           </div>
-          <p class="panel__hint panel__hint--live" id="explore-intro"></p>
+          <p class="answer" id="explore-intro"></p>
           <!--
             A run searched one trip. Read against a trip edited since, it lists
             airports that were never asked about and leaves out the ones that
@@ -264,40 +324,37 @@
 
     <!-- ------------------------------------------------------------ Narrow -->
     <!--
-      The step after the map. A broad sweep says which part of the window is
-      worth anything; by the time it has been read a few times the decision has
+      The step after the map. A sweep says which part of the window is worth
+      anything; by the time it has been read a few times the decision has
       usually narrowed by things no sweep knows — when leave starts, when work
-      starts again — and what is left is not a date but three constraints at
-      once. Above: state them, and watch the plan shrink. Below: every flight of
-      the trip priced separately, so a combination can be picked by eye rather
-      than only accepted from the ranking.
+      starts again — and what is left is not a date but two constraints at once:
+      when you can go, and how long you want in each place.
+
+      One population, not two. This step used to carry a switch between the
+      broad runs and the narrowed ones, which meant the results of a sweep over
+      the whole window were read on the tab named for narrowing. The broad runs
+      now answer under Map it out → Search results, where the sweep that made
+      them is started, and everything below is the narrowed run only.
     -->
     <section data-panel="narrow" data-step="narrow" hidden>
+      <!-- The trip, read-only. This step opened on three date fields with no
+           statement of what they were narrowing, so the route the numbers below
+           belong to was on another tab entirely. -->
+      <div class="trip-strip" id="narrow-trip">
+        <span class="trip-strip__chain" id="narrow-trip-chain"></span>
+        <span class="spacer"></span>
+        <span class="small muted">
+          To change the route, edit it in <strong>Map it out</strong> and save.
+          This is here to read, not to edit.
+        </span>
+      </div>
+
       <div class="panel">
         <div class="panel__header">
           <h2>When you actually want to go</h2>
           <span class="badge badge--muted" id="narrow-state">the whole window</span>
         </div>
-        <p class="panel__hint">
-          Three constraints, intersected — so the searches go where the decision already is, and a
-          combination none of them can satisfy is refused here rather than swept for an hour
-          and found empty. Legs already on disk stay readable both ways, under the table below.
-        </p>
-        <p class="panel__hint">
-          <strong>These boxes do two things, and neither of them narrows the broad sweep.</strong>
-          They filter what you read on this step, and they are what a <em>final sweep</em> searches —
-          the step after this one, which re-prices them several times a day. The 02:00 run goes on
-          pricing the whole window whatever is typed here, so a cheaper week outside your choice is
-          still found and still shows up in the ranking below.
-        </p>
-        <!--
-          This paragraph used to say the opposite, in bold: "Both scheduled sweeps read these
-          boxes off the trip file, so a date outside them stops being priced at all." It was
-          true, and it was the bug. `plan_searches` read the narrowing, so saving one narrowed
-          every sweep including the nightly one, and the broad picture stopped being refreshed
-          the moment you decided anything. Measured on this trip on 24 Aug: two nightly runs of
-          48 searches against a window of 85, both filed as broad sweeps.
-        -->
+
         <div class="narrow-grid">
           <label>Leave between
             <span class="row">
@@ -313,47 +370,48 @@
               <input type="date" id="narrow-back-end">
             </span>
           </label>
-          <label>Nights away
-            <span class="row">
-              <input type="number" id="narrow-nights-min" min="0" max="365" step="1">
-              <span class="small muted">to</span>
-              <input type="number" id="narrow-nights-max" min="0" max="365" step="1">
-              <span class="small muted" id="narrow-nights-hint"></span>
-            </span>
-          </label>
         </div>
-        <!-- The chart the departure window is picked on, in the panel that owns
-             the field. It used to be a panel of its own with its own badge, its
-             own Save and its own vocabulary - "watching 01-08 to 01-12" against
-             "out 01-08–01-12" up here - and both wrote `focus_start`/`focus_end`.
-             One field, one control. Clicking two points fills the boxes above;
-             the panel's own Save is what writes them. -->
-        <h3 class="subhead">
-          Cheapest total by the day you leave
-          <span class="badge badge--muted" id="by-date-sweep"></span>
-        </h3>
-        <p class="panel__hint small">
-          Click two points to fill <em>Leave between</em> above. For a trip of several legs this
-          is the weakest of the three constraints — the total is a sum of legs priced on their
-          own days, and the flight home usually moves it more than the flight out. It is here to
-          be read before you narrow, not to narrow by on its own; the per-leg charts below are
-          where a trip is actually picked.
-        </p>
-        <div class="chart" id="chart-by-date"></div>
-        <p class="panel__hint panel__hint--live small" id="by-date-note"></p>
+
+        <!--
+          A nights-away band set before this panel stopped offering a box for
+          it. It filters, so something on screen has to be able to remove it -
+          and that something has to be a control, not a sentence. It was a
+          sentence, exempt from the explanations switch on the grounds that the
+          switch would otherwise hide a live constraint. A button is simply not
+          prose: it survives the switch because it is not the kind of thing the
+          switch is about.
+        -->
+        <div class="row" id="narrow-nights-row" hidden>
+          <button class="chip chip--clearable" id="narrow-nights-clear"
+                  title="Stop filtering by how long the whole trip is">
+            <span id="narrow-nights-label"></span>
+            <span class="chip__remove" aria-hidden="true">&times;</span>
+          </button>
+        </div>
 
         <h3 class="subhead">How long in each place</h3>
-        <p class="panel__hint small">
-          The shape of the trip rather than a narrowing, and the reason the band above stops
-          where it does. These decide what the <em>next</em> sweep prices — every sweep already
-          on disk keeps the stays it was run under, so nothing below moves when you change them.
-          Tightening is still the one to think twice about: those nights stop being asked about,
-          so a cheaper stay outside the new range is never found again. A 9–11 rule here once
-          meant a real 12-day Japan stay was never priced.
-        </p>
         <div class="narrow-grid" id="narrow-stays"></div>
         <p class="small muted" id="narrow-stays-sweep" hidden></p>
-        <p class="panel__hint panel__hint--live small" id="narrow-cost"></p>
+        <p class="explain small">
+          The shape of the trip, and what the next narrowed sweep prices. Every sweep already
+          on disk keeps the stays it was run under, so nothing below moves when you change
+          them. Tightening is the one to think twice about: those nights stop being asked
+          about, so a cheaper stay outside the new range is never found again. A 9–11 rule
+          here once meant a real 12-day Japan stay was never priced.
+        </p>
+
+        <!-- Written from the trip: the answer to "what do these fields actually
+             do", which the four paragraphs that used to stand here were never
+             read far enough to give.
+
+             It collapses with the rest of the teaching, which it did not use
+             to. It was exempt because it also named a nights-away band that had
+             no box left to remove it with - one live fact keeping a paragraph
+             of prose on screen. The band has a button of its own now, and the
+             badge above states it, so nothing here is the only mention of a
+             setting. -->
+        <p class="explain small" id="narrow-role"></p>
+
         <div class="row">
           <button class="primary" id="narrow-save">Save</button>
           <button id="narrow-clear">Clear it</button>
@@ -361,20 +419,49 @@
           <span class="spacer"></span>
           <span class="small" id="narrow-message"></span>
         </div>
-        <!-- Below the buttons rather than above them, though it describes the
-             boxes above. It appears on `change`, which fires when a stay box
-             loses focus - so placed higher it grew the panel between a click
-             being aimed at Save and the click landing, and the press missed
-             the button entirely. Found by a browser test doing exactly that. -->
         <p class="small" id="narrow-stays-alert" hidden></p>
-      </div>
 
+        <!-- The same idiom as Map it out's Run row, for the same reason: one
+             button that starts the run, stating what it costs, beside the one
+             that says what happens without being pressed. -->
+        <div class="runs">
+          <button class="run-btn run-btn--deep" id="final-run-btn">
+            <span class="run-btn__name">Sweep narrowed</span>
+            <span class="run-btn__cost" id="narrow-sweep-cost">—</span>
+          </button>
+          <span class="runs__gap"></span>
+          <button class="run-btn run-btn--schedule" id="narrow-schedule-btn">
+            <span class="run-btn__name">Scheduled sweeping</span>
+            <span class="run-btn__cost" id="narrow-schedule-summary">—</span>
+          </button>
+        </div>
+        <div class="row">
+          <span class="spacer"></span>
+          <button id="final-stop-btn" class="status-strip__stop" hidden>Stop this run</button>
+        </div>
+        <p class="small" id="final-error" hidden></p>
+      </div>
+    </section>
+
+    <!-- --------------------------------------------------- Search results -->
+    <!--
+      What a sweep found, in two panels: every leg priced on its own, then the
+      same runs as a ranking. They sat on the narrowing step behind a switch,
+      which is how the answer to "what did my sweep find" came to live on the
+      tab named for cutting the search down. They belong beside the buttons
+      that start the sweep.
+
+      Expect several airports in each leg here - this is the whole window, over
+      every origin and destination the trip lists. The narrowing step is where
+      that usually comes down to one or two.
+    -->
+    <section data-panel="broad-charts" data-step="map" data-sub="results" hidden>
       <div class="panel">
         <div class="panel__header">
           <h2>Every flight, priced on its own</h2>
           <select id="narrow-sweep" class="small"></select>
         </div>
-        <p class="panel__hint">
+        <p class="explain">
           One chart per leg, on one shared date axis, so a vertical slice down all three is one
           trip. <strong>Drag the markers</strong> to build a trip by hand. A leg name expands into
           its separate airport pairs when the question is which one is dragging it.
@@ -385,7 +472,7 @@
 
         <div class="row">
           <button id="cursor-snap">Snap to the cheapest that fits</button>
-          <button class="primary" id="cursor-watch">Follow this trip</button>
+          <button class="primary" id="cursor-watch">Save as preference</button>
           <!-- The ranking below answers a different question about the same
                trip - what else was near it, and whether it is open jaw - and
                finding your own pick among fifty rows by eye is not a thing to
@@ -394,7 +481,7 @@
           <span class="spacer"></span>
           <span class="small" id="cursor-message"></span>
         </div>
-        <p class="panel__hint small">
+        <p class="explain small">
           <strong>Nothing here is enforced.</strong> The stay ranges exist so a sweep knows what to
           price, and every total it reports is the cheapest thing that obeyed them. If fifteen days
           in Japan turns out to be four thousand cheaper, that is worth knowing, and a range you
@@ -404,13 +491,12 @@
       </div>
     </section>
 
-    <!-- ----------------------------------------------------------- Results -->
     <!--
       The same sweep as the charts above, read as a ranking: what else was near
       the trip you picked, and whether it is open jaw. One picker drives both,
       or the step describes two runs at once.
     -->
-    <section data-panel="results" data-step="narrow" hidden>
+    <section data-panel="results" data-step="map" data-sub="results" hidden>
       <div class="panel">
         <div class="panel__header">
           <h2>Sweep</h2>
@@ -462,7 +548,7 @@
           <span class="small muted" id="filter-count"></span>
           <button class="small" id="filter-reset" hidden>Reset</button>
         </div>
-        <p class="panel__hint panel__hint--live small" id="filter-note" hidden></p>
+        <p class="answer small" id="filter-note" hidden></p>
 
         <div class="table-scroll" id="results-scroll">
           <table class="data" id="results-table">
@@ -483,7 +569,7 @@
       </div>
     </section>
 
-    <!-- ------------------------------------------------------- Final sweeps -->
+    <!-- --------------------------------------------------- Narrowed sweeps -->
     <!--
       The step the narrowing was always missing. "Narrow it down" reads a broad
       sweep and decides which trip you mean to take; this one prices that
@@ -497,86 +583,44 @@
       narrowed by a return window. The broad picture stopped being refreshed and
       nothing on the page said so.
     -->
-    <section data-panel="final-plan" data-step="final" hidden>
-      <div class="panel">
-        <div class="panel__header">
-          <h2>Price the trip you have chosen</h2>
-          <span class="badge badge--muted" id="final-state">nothing narrowed yet</span>
-        </div>
-        <p class="panel__hint">
-          A sweep of the dates you settled on under <strong>Narrow it down</strong>, and only
-          those. A fraction of the searches, so it can run several times a day against a site
-          that answers about 120 per address — which is what makes it worth having at all.
-          The point is not one more price: it is the same price on Monday, Tuesday and
-          Wednesday, so a drop is visible as a drop.
-        </p>
-        <p class="panel__hint">
-          <strong>It does not replace the broad sweep.</strong> That one still prices the whole
-          window every night, and it is the only thing that can still tell you a better week
-          exists outside what you have chosen — the question a narrowing was decided against,
-          and the one that goes stale fastest.
-        </p>
-        <!-- What it will search, written from the trip rather than restated
-             here, and a link back to the one place it can be changed. Two
-             controls for one field is the mistake the by-date chart was moved
-             into the narrowing panel to end. -->
-        <p class="panel__hint panel__hint--live" id="final-narrowing"></p>
-        <div class="row">
-          <label class="field">Depth
-            <select id="final-depth">
-              <option value="quick">Quick — every 7th day</option>
-              <option value="standard">Standard — every 3rd day</option>
-              <option value="deep" selected>Deep — every day</option>
-            </select>
-          </label>
-          <button class="primary" id="final-run-btn">Run it here</button>
-          <button id="final-run-cloud-btn">Run it in the cloud</button>
-          <button id="final-stop-btn" hidden>Stop this run</button>
-        </div>
-        <p class="small" id="final-error" hidden></p>
-        <p class="panel__hint small">
-          The cloud runs one of these at 13:00 and again at 20:00 UTC, for every trip that has
-          been narrowed to something. A trip narrowed to nothing is skipped rather than swept
-          twice — the 02:00 run already prices its whole window.
-        </p>
-      </div>
-    </section>
-
     <!--
-      The same three curves as the step before, over the narrowed run instead of
+      The same three curves as the panel above, over the narrowed runs instead of
       the broad one, because they answer a second question the app had no view
-      for. "Narrow it down" asks which week; this asks which exact flights, at
-      today's price. The final sweeps run twice a day and the broad one once a
-      night, so before this the freshest per-leg prices in the app were the only
-      ones with no chart, and the buttons that book and follow a trip were wired
-      to the stalest.
+      for. The whole window asks which week; this asks which exact flights, at
+      today's price. The narrow sweeps run twice a day and the broad one once a
+      night, so before these existed the freshest per-leg prices in the app were
+      the only ones with no chart, and the buttons that book and follow a trip
+      were wired to the stalest.
     -->
-    <section data-panel="final-charts" data-step="final" hidden>
+    <section data-panel="final-charts" data-step="narrow" hidden>
       <div class="panel">
         <div class="panel__header">
           <h2>Every flight, priced on its own</h2>
           <select id="final-sweep-charts"></select>
         </div>
-        <p class="panel__hint">
+        <p class="explain">
           One chart per leg, on one shared date axis, so a vertical slice down all three is one
           trip. <strong>Drag the markers</strong> to build a trip by hand. Narrower than the same
-          charts a step back — a final sweep only priced the days you chose — which is the point:
-          this is the shortlist, at this morning's prices.
+          charts under <em>Map it out → Search results</em> — a narrowed sweep only priced the days
+          you chose — which is the point: this is the shortlist, at this morning's prices, and
+          usually one or two airports a leg rather than all of them.
         </p>
 
         <div class="cursor-readout" id="final-cursor-readout"></div>
         <div id="final-leg-charts" class="empty">
-          No final sweep yet. Run one above to price the dates you have narrowed to.
+          No narrowed sweep yet. Set the dates above and press <strong>Sweep narrowed</strong>,
+          or open <strong>Scheduled sweeping</strong> beside it to have one run at 13:00 and
+          20:00 every day.
         </div>
 
         <div class="row">
           <button id="final-cursor-snap">Snap to the cheapest that fits</button>
-          <button class="primary" id="final-cursor-watch">Follow this trip</button>
+          <button class="primary" id="final-cursor-watch">Save as preference</button>
           <button id="final-cursor-in-table">Find it in the table</button>
           <span class="spacer"></span>
           <span class="small" id="final-cursor-message"></span>
         </div>
-        <p class="panel__hint small">
+        <p class="explain small">
           <strong>Nothing here is enforced either.</strong> Everything this run priced already
           obeys your narrowing, so a marker can only break a rule if you drag it past one — and
           the badges will say which. Following it works either way.
@@ -584,17 +628,17 @@
       </div>
     </section>
 
-    <section data-panel="final-results" data-step="final" hidden>
+    <section data-panel="final-results" data-step="narrow" hidden>
       <div class="panel">
         <div class="panel__header">
           <h2>What the narrowing costs now</h2>
           <select id="final-sweep-select"></select>
         </div>
-        <p class="panel__hint">
-          The same ranking as the step before, over the narrowed runs instead of the broad
-          ones. Read it for the question the broad table cannot answer: among the trips that
-          fit what you decided, is a <em>different</em> one cheaper today than the one you had
-          in mind?
+        <p class="explain">
+          The same ranking as under <em>Map it out → Search results</em>, over the narrowed runs
+          instead of the broad ones. Read it for the question the broad table cannot answer: among the
+          trips that fit what you decided, is a <em>different</em> one cheaper today than the one
+          you had in mind?
         </p>
         <!-- The third copy of the same notice, on the step the cloud files two
              runs a day into. It was the one step that could not say any had
@@ -625,7 +669,7 @@
           <span class="small muted" id="final-filter-count"></span>
           <button class="small" id="final-filter-reset" hidden>Reset</button>
         </div>
-        <p class="panel__hint panel__hint--live small" id="final-filter-note" hidden></p>
+        <p class="answer small" id="final-filter-note" hidden></p>
 
         <div class="table-scroll" id="final-results-scroll">
           <table class="data" id="final-results-table">
@@ -640,24 +684,71 @@
           </table>
         </div>
         <div class="empty" id="final-results-empty">
-          No final sweep yet. Run one above to price the dates you have narrowed to.
+          No narrowed sweep yet. Set the dates above and press <strong>Sweep narrowed</strong>
+          to price what you have narrowed to.
         </div>
       </div>
     </section>
 
     <!-- ------------------------------------------------------------- Setup -->
     <!--
-      Everything behind the gear: what Discord is told, what the night sweep
-      will run, what the cloud is doing, and where the prices come from. Four
-      panels about the workflow rather than about the trip on screen.
+      Everything behind the gear, in five panels and in the order they are
+      actually wanted: Discord, your airports, what runs on its own, what the
+      cloud has been doing, and where the prices come from.
+
+      It was nine panels, and two subjects were configured in two places each. A
+      Discord webhook was set on one panel while what Discord is told was ticked
+      on another, three panels apart; the airports near home were ranked on one
+      panel while which of them Discord should report about was ranked on
+      another, and each spent a paragraph explaining that it was not the other
+      one. That paragraph is the tell: two controls that can only be described
+      by their difference from each other belong on one panel, next to each
+      other, where the difference is visible instead of asserted.
+
+      Four of the nine were the cloud - its schedule, its queue, its sync, its
+      run list - which is one subject in four boxes. They are one panel now,
+      with the two long lists behind disclosures, because the schedule and any
+      warning are what is read and the lists are what is consulted.
     -->
-    <!-- What gets sent to Discord -->
+
+    <!-- ----------------------------------------------------------- Discord -->
     <section data-panel="notify" data-step="setup" hidden>
       <div class="panel">
-        <div class="panel__header"><h2>What gets sent to Discord</h2></div>
-        <p class="panel__hint">
-          Each sweep reports the picks you tick below, so a daily ping is a short list
-          rather than the whole deep search.
+        <div class="panel__header">
+          <h2>Discord</h2>
+          <span class="badge badge--muted" id="notify-origin">&mdash;</span>
+        </div>
+        <p class="explain">
+          Where a sweep posts, and what it posts. In Discord:
+          <strong>Edit Channel &rarr; Integrations &rarr; Webhooks &rarr; Copy Webhook URL</strong>.
+        </p>
+        <div class="row">
+          <label class="field field--wide">Webhook URL
+            <input type="password" id="webhook-url" autocomplete="off"
+                   placeholder="https://discord.com/api/webhooks/&hellip;">
+          </label>
+        </div>
+        <div class="row">
+          <button id="webhook-save">Save webhook</button>
+          <button id="webhook-test" class="primary">Send a test message</button>
+          <button class="small" id="webhook-clear">Remove</button>
+        </div>
+        <div id="webhook-result" class="small panel__line"></div>
+        <p class="explain small">
+          This URL is a password in disguise &mdash; anyone holding it can post to the channel
+          &mdash; so it is stored in <code id="webhook-path">.secrets/discord.json</code>, outside
+          everything git tracks. It is never sent back to this page; the field above shows
+          it masked. <strong>Cloud sweeps do not read that file.</strong> They read the
+          repository secret, which you set once with
+          <code>gh secret set DISCORD_WEBHOOK_URL</code>. When that variable is present it
+          wins, so a cloud run always posts where the secret says.
+        </p>
+
+        <h3 class="subhead">What gets sent</h3>
+        <p class="explain small">
+          Each sweep reports the picks you tick here, so a daily ping is a short list rather
+          than the whole deep search. Which airport counts as <em>preferred</em> is your
+          ranking, under <strong>Your airports</strong> below.
         </p>
         <div class="row">
           <label class="check small">
@@ -670,24 +761,13 @@
             <input type="checkbox" id="notify-quiet"> Only when it beats the best so far
           </label>
         </div>
-
-        <h3 class="subhead">Airports you'd rather fly from</h3>
-        <p class="panel__hint">
-          Best first. A trip counts as belonging to a tier only when it both leaves from and
-          returns to that tier — flying out of Prague and home into Frankfurt still strands you
-          in Frankfurt. The best tier that has any trip at all wins, and the message says what
-          preferring it cost against the outright cheapest.
-        </p>
-        <div id="preferred-tiers"></div>
         <div class="row">
-          <button class="small" id="add-tier-btn">+ Add a lower choice</button>
           <span class="spacer"></span>
           <!--
-            Its own Save, because this panel moved behind the gear and the trip's
-            Save button did not come with it. These are fields of the trip - the
-            scheduled sweep reads them off the scenario file - so they are saved
-            by the same call; what would not survive the move is a panel you can
-            edit and cannot commit.
+            Its own Save, because these are fields of the trip - the scheduled
+            sweep reads them off the scenario file - and the trip's own Save
+            button is on Map it out. What would not survive the move behind the
+            gear is a panel you can edit and cannot commit.
           -->
           <button class="small primary" id="notify-save-btn">Save</button>
         </div>
@@ -695,25 +775,91 @@
       </div>
     </section>
 
-    <!-- The night sweep -->
-    <section data-panel="night" data-step="setup" hidden>
-      <!--
-        What happens overnight, on the tab where the trip is decided.
+    <!-- ---------------------------------------------------- Your airports -->
+    <!--
+      One ranked list, tiered, and the trip inherits it.
 
-        This was invisible from the page, and all of it mattered. The scheduled
-        sweep is the only place a full-sized trip has ever been swept whole -
-        483/483 in 19 minutes on 21 Aug, against three throttled local runs the
-        same morning - and the page said nothing about which trips it would run,
-        how many runners they would need, when it fires, or that it sweeps the
-        trip on the branch rather than the trip on this screen. A whole day was
-        spent reading results of a trip nobody was still planning.
-      -->
+      These were two panels. `home_airports.json` ranked the airports you can
+      actually get to, easiest first, and fed the one-click chips beside
+      *Depart from*; `preferred_origins` on each trip ranked which airport
+      Discord should report about. Both are "my airports, best first", both were
+      edited by hand, and each panel carried a paragraph whose whole job was to
+      say it was not the other one.
+
+      Tiers are what made them one thing. The global list is tiered now - Prague
+      and Vienna can share a rank, because they are both a morning - which is
+      already the shape `preferred_origins` has, so a trip that says nothing
+      inherits these verbatim. Inherited at read time, so a trip follows the
+      list as the list changes rather than freezing a copy of it.
+    -->
+    <section data-panel="home-airports" data-step="setup" hidden>
       <div class="panel">
         <div class="panel__header">
-          <h2>Night sweep</h2>
-          <span class="badge badge--muted" id="night-badge">—</span>
+          <h2>Your airports</h2>
+          <span class="badge badge--muted" id="home-airports-state">not set</span>
         </div>
-        <p class="panel__hint">
+        <p class="explain">
+          The airports you can actually get to, easiest first &mdash; Brno before Prague
+          before Vienna, or whatever the order is for you. Two that are equally awkward go
+          on one row. This does two things: it becomes the one-click chips beside
+          <strong>Depart from</strong> and <strong>Back to</strong>, and it is the order
+          Discord reports in. Typing any other airport still works exactly as before.
+        </p>
+        <p class="explain small">
+          It is about the journey to the airport and nothing else. Which airport is
+          <em>cheapest</em> is what a sweep finds out, and which are worth pricing at all is
+          what a probe answers. Leave this empty and the chips go back to being the airports
+          your saved trips already use.
+        </p>
+        <div id="home-airports"></div>
+        <div class="row">
+          <button class="small" id="home-airports-add-tier">+ Add a lower choice</button>
+          <span class="spacer"></span>
+          <span class="small" id="home-airports-message"></span>
+          <button class="primary" id="home-airports-save">Save</button>
+        </div>
+
+        <!--
+          The override, behind a click, because it is the rare case: a trip out
+          of a city you would not normally leave from. Empty means "use the list
+          above", which is what every trip means until someone says otherwise.
+        -->
+        <details class="disclosure" id="trip-airports">
+          <summary class="small muted">This trip prefers a different order</summary>
+          <p class="explain small">
+            Only for this trip, and only for what Discord reports. A trip counts as
+            belonging to a tier when it both leaves from and returns to that tier &mdash;
+            flying out of Prague and home into Frankfurt still strands you in Frankfurt.
+            The best tier that has any trip at all wins, and the message says what preferring
+            it cost against the outright cheapest.
+          </p>
+          <div id="preferred-tiers"></div>
+          <div class="row">
+            <button class="small" id="add-tier-btn">+ Add a lower choice</button>
+            <span class="spacer"></span>
+            <button class="small primary" id="preferred-save-btn">Save</button>
+          </div>
+          <p class="explain small" id="preferred-inherited"></p>
+        </details>
+      </div>
+    </section>
+
+    <!-- ------------------------------------------------ Scheduled sweeping -->
+    <!--
+      What happens overnight, and what it will cost.
+
+      Read-only. The four controls that decide it are in one dialog, opened from
+      here and from the two run rows, because three copies of the same checkbox
+      is three ids and three ways for them to disagree. What stays here is the
+      part you come to this panel to read: the list of what fires tonight.
+    -->
+    <section data-panel="night" data-step="setup" hidden>
+      <div class="panel">
+        <div class="panel__header">
+          <h2>Scheduled sweeping</h2>
+          <span class="badge badge--muted" id="night-badge">&mdash;</span>
+        </div>
+        <p class="explain">
           GitHub Actions sweeps on a schedule and commits the results back to the repo, so it
           runs whether or not this page is open. It is also the only place a full-sized trip
           finishes: your machine is one client, and pelikan.cz answers about 120 searches from
@@ -721,33 +867,30 @@
           single runner is handed more than <strong id="night-cap">100</strong>.
         </p>
         <div class="row">
-          <label class="check small">
-            <input type="checkbox" id="enabled"> Sweep this trip every night
-          </label>
+          <button class="primary" id="night-edit-btn">Edit the schedule</button>
           <span class="spacer"></span>
-          <!-- Its own Save, for the same reason the Discord panel has one: the
-               tick is a field of the trip, and the trip's Save button stayed on
-               Map it out when this panel moved behind the gear. -->
-          <button class="small primary" id="night-save-btn">Save</button>
         </div>
-        <div id="night-save-error" class="panel-error badge badge--error" hidden></div>
         <div id="night-this-trip" class="small panel__line"></div>
+        <div id="narrow-sweep-line" class="small muted panel__line"></div>
         <div id="night-cloud" class="badge badge--warning" hidden></div>
 
         <h3 class="subhead">Everything it will run tonight</h3>
         <div id="night-all" class="night-list small"></div>
-        <p class="panel__hint panel__hint--live small" id="night-when"></p>
+        <p class="answer small" id="night-when"></p>
       </div>
     </section>
 
     <!-- ------------------------------------------------------------- Cloud -->
     <!--
-      What the cloud is doing, has done, and is being held to do.
+      What the cloud is doing, has done, and is being held to do - one panel.
 
-      Its own tab rather than a corner of Search because it is about the
-      workflow rather than about the trip on screen - Night sweep answers that
-      one. Nothing here was answerable from the app before: dispatching shelled
-      `gh workflow run`, said "Dispatched to GitHub Actions", and forgot the run
+      It was four, which is one subject in four boxes. The schedule and the "your
+      checkout is behind" warning are what this panel is read for; the queue and
+      the run list are what it is consulted for, and they are long. So the first
+      two stay open and the last two are a click.
+
+      Nothing here was answerable from the app before: dispatching shelled `gh
+      workflow run`, said "Dispatched to GitHub Actions", and forgot the run
       existed. On 22 Aug that one sentence covered three runs that swept nothing
       and went green in twelve seconds, and two that were cancelled while
       pending without starting a single job. All five looked like success.
@@ -755,118 +898,78 @@
     <section data-panel="cloud" data-step="setup" hidden>
       <div class="panel">
         <div class="panel__header">
-          <h2>Scheduled runs</h2>
-          <span class="badge badge--muted" id="cloud-badge">—</span>
+          <h2>The cloud</h2>
+          <span class="badge badge--muted" id="cloud-badge">&mdash;</span>
         </div>
-        <p class="panel__hint">
+        <p class="explain">
           GitHub Actions sweeps on its own schedule and commits results back to the repo,
           whether or not this page is open. This is that schedule, what is going now, and
           what the last runs actually did.
         </p>
         <div id="cloud-schedule" class="small"></div>
         <div id="cloud-unknown" class="badge badge--warning" hidden></div>
-      </div>
 
-      <!--
-        Runs asked for here and not yet sent. Dispatching while a run is already
-        going leaves the new one pending, and GitHub keeps only one pending run
-        per lane - a third dispatch cancels it outright. Holding them here is
-        what stops that, so the list has to be visible or it is just a delay
-        nobody asked for.
-      -->
-      <div class="panel">
-        <div class="panel__header">
-          <h2>Waiting to be sent</h2>
-        </div>
-        <div id="cloud-queue" class="night-list small"></div>
-        <p class="panel__hint small">
-          A run waits here only while the cloud is busy, and is sent as soon as it is free.
-          The queue lives in this app: close it and these are forgotten. Anything already
-          dispatched is in GitHub and unaffected.
-        </p>
-      </div>
-
-      <div class="panel">
-        <div class="panel__header">
-          <h2>Results on this machine</h2>
-        </div>
-        <p class="panel__hint">
-          A finished run commits its results to the branch. This app reads them off the
-          disk, so until the checkout is brought forward they exist and are invisible -
-          which is exactly what happened to three runs on 22 Aug.
-        </p>
+        <!--
+          Stays visible rather than going behind a click with the lists: a
+          finished run commits its results to the branch, and until the checkout
+          is brought forward they exist and are invisible - which is exactly
+          what happened to three runs on 22 Aug.
+        -->
         <div class="notice notice--warning cloud-sync" id="cloud-sync-cloud" hidden>
           <span id="cloud-sync-cloud-text"></span>
           <button class="small" id="cloud-sync-cloud-get">Get them</button>
           <button class="small" id="cloud-sync-cloud-take" hidden>Just get the results</button>
         </div>
         <div class="small muted" id="cloud-sync-ok" hidden></div>
-      </div>
 
-      <div class="panel">
-        <div class="panel__header">
-          <h2>Recent runs</h2>
-        </div>
-        <div id="cloud-runs" class="night-list small"></div>
+        <!--
+          Runs asked for here and not yet sent. Dispatching while a run is
+          already going leaves the new one pending, and GitHub keeps only one
+          pending run per lane - a third dispatch cancels it outright. Holding
+          them here is what stops that, so the list has to be reachable or it is
+          just a delay nobody asked for.
+        -->
+        <details class="disclosure" id="cloud-queue-box">
+          <summary class="small muted">Waiting to be sent <span id="cloud-queue-count"></span></summary>
+          <div id="cloud-queue" class="night-list small"></div>
+          <p class="explain small">
+            A run waits here only while the cloud is busy, and is sent as soon as it is free.
+            The queue lives in this app: close it and these are forgotten. Anything already
+            dispatched is in GitHub and unaffected.
+          </p>
+        </details>
+
+        <details class="disclosure" id="cloud-runs-box">
+          <summary class="small muted">Recent runs</summary>
+          <div id="cloud-runs" class="night-list small"></div>
+        </details>
       </div>
     </section>
 
     <!-- ----------------------------------------------------------- Sources -->
     <section data-panel="sources" data-step="setup" hidden>
-      <!--
-        Webhook first, health second, repairs last - which is the order these
-        are actually wanted in. The tab used to open on a form of four fields
-        and six CSS selectors for one site, which answers a question nobody
-        arrives here asking.
-      -->
-      <div class="panel">
-        <div class="panel__header">
-          <h2>Where results get sent</h2>
-          <span class="badge badge--muted" id="notify-origin">—</span>
-        </div>
-        <p class="panel__hint">
-          The Discord channel each sweep posts its picks to. In Discord:
-          <strong>Edit Channel → Integrations → Webhooks → Copy Webhook URL</strong>.
-        </p>
-        <div class="row">
-          <label class="field field--wide">Webhook URL
-            <input type="password" id="webhook-url" autocomplete="off"
-                   placeholder="https://discord.com/api/webhooks/…">
-          </label>
-        </div>
-        <div class="row">
-          <button id="webhook-save">Save webhook</button>
-          <button id="webhook-test" class="primary">Send a test message</button>
-          <button class="small" id="webhook-clear">Remove</button>
-        </div>
-        <div id="webhook-result" class="small panel__line"></div>
-        <p class="panel__hint small">
-          This URL is a password in disguise — anyone holding it can post to the channel —
-          so it is stored in <code id="webhook-path">.secrets/discord.json</code>, outside
-          everything git tracks. It is never sent back to this page; the field above shows
-          it masked. <strong>Cloud sweeps do not read that file.</strong> They read the
-          repository secret, which you set once with
-          <code>gh secret set DISCORD_WEBHOOK_URL</code>. When that variable is present it
-          wins, so a cloud run always posts where the secret says.
-        </p>
-      </div>
-
       <div class="panel">
         <div class="panel__header">
           <h2>Where the prices come from</h2>
           <button class="small" id="sources-check-all">Check them all</button>
         </div>
-        <p class="panel__hint">
+        <p class="explain">
           Press <strong>Check now</strong> and each site is asked for one real price. That is
           the whole question: is it still working. A site that has moved its URL or renamed a
           CSS class stops the sweep without stopping the code, and when that happens the card
-          opens a <strong>Repair</strong> box with the strings to change — you never need it
-          until then. Deleting <code>data/sources.json</code> always restores the built-in
-          defaults.
+          opens a <strong>Repair</strong> box with the strings to change &mdash; you never
+          need it until then. Deleting <code>data/sources.json</code> always restores the
+          built-in defaults.
         </p>
-        <div id="sources-body" class="empty">Loading…</div>
+        <!-- Behind a click: this answers a question nobody arrives here asking,
+             and it is only ever asked when a sweep has already gone wrong. -->
+        <details class="disclosure" id="sources-box">
+          <summary class="small muted">The sites, and whether each still answers</summary>
+          <div id="sources-body" class="empty">Loading&hellip;</div>
+        </details>
       </div>
     </section>
+
     <!-- ------------------------------------------------------------- Watch -->
     <!--
       After Prices, because it reads what Prices produced. A sweep answers what
@@ -892,7 +995,7 @@
       -->
       <div class="notice" id="follow-summary">
         <span id="follow-summary-text">Nothing is being followed yet.</span>
-        <p class="small">
+        <p class="explain small">
           <strong>Nothing here moves when you change the trip or the narrowing.</strong>
           A follow is pinned to the exact dates it was picked on and is re-priced on those,
           whatever the trip on the other tabs has since become. Editing a stay range or a
@@ -905,10 +1008,11 @@
           <h2>Flights you are following</h2>
           <span class="badge badge--muted" id="leg-watch-cost">—</span>
         </div>
-        <p class="panel__hint">
-          One route on one day, re-priced every four hours for a single search each —
-          so following four of them costs four searches, against the sixty-odd a pinned
-          trip costs. They need not be legs of this trip: pick whatever looked promising.
+        <p class="explain">
+          One route on one day, re-priced every four hours for a single search each.
+          The legs of each preference are here automatically and cost nothing extra —
+          the check already prices those days — and are dropped by dropping the
+          preference. The rest are yours: they need not even be legs of this trip.
           Discord hears about one only when it falls by more than 1%.
         </p>
         <div class="chart" id="leg-watch-chart"></div>
@@ -916,7 +1020,7 @@
           <table class="data" id="leg-watch-table">
             <thead>
               <tr>
-                <th>Flight</th><th>Departs</th><th class="num">When picked</th>
+                <th>Flight</th><th>Departs</th><th>From</th><th class="num">When picked</th>
                 <th class="num">Now</th><th class="num">Change</th><th></th><th></th>
               </tr>
             </thead>
@@ -927,9 +1031,10 @@
              when the seven tabs became three steps. Naming the real path is the
              whole job of an empty state. -->
         <div class="empty" id="leg-watch-empty">
-          Nothing followed yet. Go to <strong>Narrow it down</strong> → <strong>Every flight,
+          Nothing followed yet. Saving a preference follows each of its flights
+          automatically — or go to <strong>Narrow it down</strong> → <strong>Every flight,
           priced on its own</strong>, drag the markers to the day you like, and press
-          <strong>Follow</strong> on that leg — or add one by hand below.
+          <strong>Follow</strong> on that leg. You can also add one by hand below.
         </div>
         <div class="row" id="leg-watch-add">
           <label class="field">From<input type="text" id="leg-watch-from" maxlength="3"
@@ -947,23 +1052,30 @@
           <!-- "Days you are watching" was the wrong name twice over: each of
                these is a whole trip and not a day, and "days" is now what the
                previous step calls the departure window it narrows by. -->
-          <h2>Trips you are following</h2>
+          <h2>Your preferences</h2>
           <span class="badge badge--muted" id="watch-cost">—</span>
         </div>
-        <p class="panel__hint">
-          Each of these is a whole trip pinned to its exact dates, re-priced every four
-          hours by its own cloud run. Lines share one set of axes on purpose: the question
-          is which of these to book, and that is a comparison. A point drawn hollow
-          came from a run the site refused part of — the gap is worth seeing, the price in
-          it is not a price. Discord hears about one only when it falls by more than 1%,
-          because this site moves fares by a few crowns at a time and those are not news.
+        <p class="explain">
+          The two or three trips you are deciding between, ranked in the order you would
+          take them. Each is pinned to the dates you picked and re-priced on them every
+          four hours, <strong>plus a couple of days either side</strong> — so it can tell
+          you that the same trip two days later is two thousand cheaper, and offer to move
+          to it. <strong>The line is always the trip you chose</strong>, never the cheaper
+          neighbour; a series that drifted would draw a fall you could not act on.
+        </p>
+        <p class="explain">
+          Lines share one set of axes on purpose: the question is which of these to book,
+          and that is a comparison. A point drawn hollow came from a run the site refused
+          part of — the gap is worth seeing, the price in it is not a price. Discord hears
+          about one only when it falls by more than 1%, because this site moves fares by a
+          few crowns at a time and those are not news.
         </p>
         <div class="chart" id="watch-chart"></div>
         <div class="table-scroll">
           <table class="data" id="watch-table">
             <thead>
               <tr>
-                <th>Departs</th><th>Trip</th><th class="num">When picked</th>
+                <th>Preference</th><th>Route</th><th class="num">When picked</th>
                 <th class="num">Now</th><th class="num">Change</th><th></th>
               </tr>
             </thead>
@@ -971,9 +1083,22 @@
           </table>
         </div>
         <div class="empty" id="watch-empty">
-          Nothing followed yet. Build a trip on <strong>Narrow it down</strong> →
-          <strong>Every flight, priced on its own</strong> and press <strong>Follow this
-          trip</strong> — or take one off the last sweep's ranking below.
+          No preferences yet. Build a trip on <strong>Narrow it down</strong> →
+          <strong>Every flight, priced on its own</strong> and press <strong>Save as
+          preference</strong> — or add one by hand below.
+        </div>
+
+        <!-- The by-hand path, for when the dates are already decided and
+             hunting for them on three charts is work for nothing. Built by the
+             page from the trip's leg count, because a trip is a chain of any
+             length and a fixed three boxes would be a two-stop assumption in
+             the markup. -->
+        <div class="row" id="preference-add">
+          <span class="small muted">Add by hand:</span>
+          <span class="row" id="preference-add-dates"></span>
+          <label class="field">Called<input type="text" id="preference-add-label"
+                 placeholder="named after its shape if left blank" size="22"></label>
+          <button class="small primary" id="preference-add-btn">Save as preference</button>
         </div>
         <div class="row">
           <button id="watch-run-btn">Check now</button>
@@ -995,7 +1120,7 @@
               <select id="watch-sweep-select"></select>
             </label>
           </div>
-          <p class="panel__hint small">
+          <p class="explain small">
             The cheapest trip found on each departure date, cheapest first. Picking one pins
             that trip's leg dates — so a nine-day stay in Japan stays nine days — while still
             pricing every airport on them, which is what lets the watch notice that Frankfurt
@@ -1011,18 +1136,18 @@
     <section data-panel="history" data-step="follow" hidden>
       <div class="panel">
         <div class="panel__header"><h2>Best total over time</h2></div>
-        <p class="panel__hint">
+        <p class="explain">
           Whether to book now or wait. Only sweeps complete enough to compare are joined
           and labelled — a sweep that half-failed reports a price that says more about the
           scraper than about the market.
         </p>
         <div class="chart" id="chart-history"></div>
-        <p class="panel__hint panel__hint--live small" id="history-note"></p>
+        <p class="answer small" id="history-note"></p>
       </div>
 
       <div class="panel">
         <div class="panel__header"><h2>Volatility probe</h2></div>
-        <p class="panel__hint">
+        <p class="explain">
           Three fixed routes sampled every two hours, to decide whether daily sweeping is
           often enough. <strong>Net move</strong> is first observation to last — the figure
           that says whether a fare is running away from you. <strong>Steps that moved</strong>
@@ -1035,6 +1160,81 @@
     </section>
 
   </main>
+
+    <!--
+      The schedule, in one place, opened from three.
+
+      `Scheduled sweeping` on Map it out and on Narrow it down used to call
+      `showTab('night')`, which opened the whole gear - nine panels, of which
+      one was about scheduling. The button says what it is about and should open
+      that and nothing else.
+
+      A dialog rather than an expander under each button because the same four
+      controls are wanted from three places, and three copies is three sets of
+      the same ids: `#enabled` twice is a checkbox that reads whichever the DOM
+      found first and saves the other. One editor, three ways in.
+    -->
+    <dialog id="schedule-dialog" class="sheet">
+      <form method="dialog" class="sheet__form">
+        <div class="sheet__head">
+          <h2>Scheduled sweeping</h2>
+          <button class="small" id="schedule-close" value="cancel">Close</button>
+        </div>
+
+        <p class="explain small">
+          Runs in the cloud, on the trip committed to the branch, whether or not this page is
+          open. It is also the only place a full-sized trip finishes: pelikan.cz answers about
+          120 searches from one address, and the cloud splits the plan so no runner is handed
+          more than 100.
+        </p>
+
+        <div class="sheet__block">
+          <label class="check">
+            <input type="checkbox" id="enabled"> Sweep the whole window, nightly at 02:00 UTC
+          </label>
+          <label class="field">Depth
+            <select id="depth">
+              <option value="quick">Quick &mdash; every 7th day</option>
+              <option value="standard">Standard &mdash; every 3rd day</option>
+              <option value="deep">Deep &mdash; every day</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="sheet__block">
+          <label class="check">
+            <input type="checkbox" id="sweep-narrowing"> Sweep just the narrowed dates, at
+            13:00 and 20:00 UTC
+          </label>
+          <label class="field">Depth
+            <select id="final-depth">
+              <option value="quick">Quick &mdash; every 7th day</option>
+              <option value="standard">Standard &mdash; every 3rd day</option>
+              <option value="deep" selected>Deep &mdash; every day</option>
+            </select>
+          </label>
+          <p class="explain small">
+            A fraction of the searches a broad sweep makes, so it can run several times a day
+            against a site that answers about 120 per address. The point is not one more
+            price: it is the same price on Monday, Tuesday and Wednesday, so a drop is
+            visible as a drop. It does not replace the nightly sweep &mdash; that one goes on
+            pricing the whole window, so a cheaper week outside your dates is still found.
+          </p>
+        </div>
+
+        <p class="answer small" id="schedule-cost"></p>
+        <!-- One error box, because `showError` routes to the first
+             `.panel-error` inside an open dialog: a second would be a box that
+             never fills and a save whose reason is somewhere else. -->
+        <div id="schedule-error" class="panel-error badge badge--error" hidden></div>
+
+        <div class="sheet__foot">
+          <button class="small" id="schedule-more" value="cancel">Everything scheduled &rarr;</button>
+          <span class="spacer"></span>
+          <button class="primary" id="night-save-btn" value="save">Save</button>
+        </div>
+      </form>
+    </dialog>
 
   <script type="module" src="/app.js"></script>
 </body>

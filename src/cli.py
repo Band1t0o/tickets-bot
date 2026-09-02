@@ -267,6 +267,7 @@ def run_watch_command(
     choosing between moved", and sends nothing at all when none of them did.
     """
     from .scenario import load_scenario
+    from .sweep.runner import read_status
     from .watch import (
         DEFAULT_WATCH_DIR,
         drops,
@@ -283,11 +284,13 @@ def run_watch_command(
         raise SystemExit(2)
 
     scenario = load_scenario(path)
-    if not scenario.watches and not scenario.leg_watches:
+    if not scenario.preferences and not scenario.leg_watches:
         # Not an error condition so much as nothing to do, but it exits non-zero
         # so a workflow that dispatched this by mistake says so instead of
-        # committing an empty run that reads as a watch which found nothing.
-        print(f"[{scenario_id}] nothing is being watched; pick days on the Watch tab first")
+        # committing an empty run that reads as a check which found nothing.
+        print(
+            f"[{scenario_id}] nothing is being followed; save a preference on Follow it first"
+        )
         raise SystemExit(2)
 
     result = run_sweep_command(
@@ -303,7 +306,7 @@ def run_watch_command(
     )
 
     directory = Path(data_dir) / DEFAULT_WATCH_DIR.name / scenario_id
-    status = json.loads((result.directory / "status.json").read_text(encoding="utf-8"))
+    status = read_status(result.directory)
     rows = record_observations(result.legs, scenario, status, directory)
     for row in rows:
         price = "nothing found" if row["total"] is None else f"{row['total']:,.0f} {row['currency']}"
@@ -324,7 +327,10 @@ def run_watch_command(
         print(f"[{scenario_id}] nothing fell far enough to be worth a message")
         return result
 
-    print(f"[{scenario_id}] {len(fell)} watched day(s) and {len(legs_fell)} watched leg(s) got cheaper")
+    print(
+        f"[{scenario_id}] {len(fell)} preference(s) and {len(legs_fell)} "
+        f"watched leg(s) got cheaper"
+    )
     if notify:
         from .notify_discord import notify_watch
 
@@ -369,22 +375,19 @@ def health_gate_command(
 
     Lives here rather than in workflow YAML so it can be tested.
     """
-    from .sweep.runner import legs_per_search_of
+    from .sweep.runner import legs_per_search_of, read_status, sweep_dirs
 
-    root = Path(data_dir) / "sweeps" / scenario_id
-    directories = sorted((p for p in root.iterdir() if p.is_dir()), reverse=True) if root.exists() else []
+    directories = sweep_dirs(data_dir, scenario_id)
     if not directories:
         # Refusing here would deadlock: only a sweep can open the gate.
         print(f"[gate] no sweep yet for {scenario_id!r}; proceeding")
         return 0
 
     latest = directories[0]
-    try:
-        status = json.loads((latest / "status.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        print(f"[gate] {latest.name}: status unreadable ({exc}); skipping this run")
-        return 1
-
+    status = read_status(latest)
+    # `unreadable` and `unknown` both fall through the check below, which is
+    # what should happen: neither says the last sweep went well, and the gate
+    # only opens on a run that recorded itself `done`.
     if status.get("state") != "done":
         print(f"[gate] {latest.name}: last sweep state is {status.get('state')!r}; skipping this run")
         return 1
@@ -412,12 +415,11 @@ def verify_command(scenario_id: str, stamp: str | None, top: int) -> int:
     succeeded must not be put at risk by a second site being down.
     """
     from .scenario import load_scenario
-    from .sweep.runner import load_legs
+    from .sweep.runner import load_legs, sweep_dirs
     from .verify import letuska_checker, verify_shortlist
 
     scenario = load_scenario(Path("scenarios") / f"{scenario_id}.json")
-    root = Path("data") / "sweeps" / scenario_id
-    directories = sorted((p for p in root.iterdir() if p.is_dir()), reverse=True) if root.exists() else []
+    directories = sweep_dirs("data", scenario_id)
     if stamp:
         directories = [p for p in directories if p.name == stamp]
     if not directories:
@@ -531,7 +533,7 @@ def main():
     p_watch.add_argument("--no-notify", action="store_true")
 
     p_watch_report = sub.add_parser(
-        "watch-report", help="Show how each watched day has moved"
+        "watch-report", help="Show how each preference has moved"
     )
     p_watch_report.add_argument("--scenario", required=True)
     p_watch_report.add_argument("--data-dir", default="data")

@@ -6,9 +6,14 @@ PRG→NRT round trip reading 19,223 Kč and then 19,850 Kč about 20 minutes lat
 or how far prices move.
 
 This samples three fixed routes every couple of hours so the cadence can be set
-from data. It is deliberately tiny (~2 min per run) and **temporary**: seven
-days costs ~168 Actions minutes, but left running it costs ~720/month and would
-break the budget alongside the daily deep sweep.
+from data. It is deliberately tiny (~2 min per run).
+
+It was scheduled for deletion - ~720 Actions minutes a month would have broken
+the 2,000-minute private tier alongside the daily deep sweep - and then the repo
+went public and those minutes became free. It has earned its place twice since:
+it is what established that fares move day-over-day rather than intraday, and
+what caught FRA->NRT climbing 25% in four days. `.github/workflows/probe.yml` is
+the authority on whether it runs, and says the same.
 
 Routes are fixed rather than derived from a scenario, so observations stay
 comparable across the whole collection period.

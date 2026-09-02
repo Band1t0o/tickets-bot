@@ -502,22 +502,30 @@ def test_a_probe_samples_the_whole_window_whatever_the_narrowing():
 
 # ---------------------------------------------------------------- watch plan
 #
-# A watch prices a handful of pinned candidate trips, not a window. Its whole
-# reason to exist is that it fits inside what the site will answer, so the
-# search count is the thing under test.
+# A check prices a handful of preferences, not a window. Its whole reason to
+# exist is that it fits inside what the site will answer, so the search count is
+# the thing under test.
 
 
-def watched(*starts, **overrides):
-    """A trip watching one candidate per start date, ten days a stop."""
+def watched(*starts, slack=0, **overrides):
+    """A trip following one preference per start date, ten days a stop.
+
+    `slack=0` by default, so the tests that are about *which dates a preference
+    pins* are not also tests of how wide the slack happens to be. The slack has
+    its own tests below.
+    """
     from datetime import date
 
-    from src.scenario import Watch
+    from src.scenario import Preference
 
     def candidate(start):
         first = date.fromisoformat(start)
-        return Watch(depart_dates=[first, first + timedelta(days=10), first + timedelta(days=20)])
+        return Preference(
+            depart_dates=[first, first + timedelta(days=10), first + timedelta(days=20)],
+            slack_days=slack,
+        )
 
-    return two_stop(watches=[candidate(s) for s in starts], **overrides)
+    return two_stop(preferences=[candidate(s) for s in starts], **overrides)
 
 
 def test_a_watch_prices_every_airport_pair_on_the_pinned_dates():
@@ -537,7 +545,7 @@ def test_a_watch_prices_every_airport_pair_on_the_pinned_dates():
 
 
 def test_a_watch_never_searches_a_date_the_candidate_did_not_pin():
-    """The saving over a focused sweep is exactly this: no derived dates."""
+    """With no slack the saving over a focused sweep is exactly this."""
     from datetime import date
 
     from src.sweep.planner import plan_watch
@@ -547,10 +555,53 @@ def test_a_watch_never_searches_a_date_the_candidate_did_not_pin():
     assert date(2027, 1, 21) not in dates
 
 
+def test_slack_prices_the_days_either_side_of_every_pinned_leg():
+    """The whole cost of a preference, and the whole reason to pay it.
+
+    Without this a preference can say "your Tuesday has not moved" and nothing
+    else; the neighbouring days are what let it say that leaving two days later
+    is two thousand cheaper.
+    """
+    from datetime import date
+
+    from src.sweep.planner import plan_watch
+
+    dates = {s.depart_date for s in plan_watch(watched("2027-01-10", slack=2))}
+    assert dates == {
+        date(2027, 1, day) for day in (8, 9, 10, 11, 12, 18, 19, 20, 21, 22, 28, 29, 30, 31)
+    } | {date(2027, 2, 1)}
+    # Five dates a leg, on the same 8 pairs-per-pinned-date shape as above.
+    assert len(plan_watch(watched("2027-01-10", slack=2))) == 8 * 5
+
+
+def test_overlapping_slack_windows_are_searched_once():
+    """Two preferences a few days apart cost far less than twice one.
+
+    The dedup is on (origin, destination, date), so the days their windows
+    share are planned once - which is what makes a second preference affordable
+    rather than a doubling of the run.
+    """
+    from datetime import date
+
+    from src.scenario import Preference
+    from src.sweep.planner import plan_watch
+
+    def candidate(day):
+        first = date(2027, 1, day)
+        return Preference(
+            depart_dates=[first, first + timedelta(days=10), first + timedelta(days=20)],
+            slack_days=2,
+        )
+
+    alone = len(plan_watch(two_stop(preferences=[candidate(10)])))
+    together = len(plan_watch(two_stop(preferences=[candidate(10), candidate(12)])))
+    assert together < alone * 2
+
+
 def test_two_candidates_whose_legs_land_on_one_day_share_its_searches():
     """Sharing is per leg, not per date.
 
-    Two candidates a day apart with stays that differ by a day fly their second
+    Two preferences a day apart with stays that differ by a day fly their second
     and third legs on the very same days, and those searches are run once. A
     date shared across *different* legs is not a saving at all - leg 0 on 20
     January is PRG->NRT and leg 1 on 20 January is NRT->MNL, which have no
@@ -558,15 +609,17 @@ def test_two_candidates_whose_legs_land_on_one_day_share_its_searches():
     """
     from datetime import date
 
-    from src.scenario import Watch
+    from src.scenario import Preference
     from src.sweep.planner import plan_watch
 
     def candidate(*days):
-        return Watch(depart_dates=[date(2027, 1, d) for d in days])
+        return Preference(depart_dates=[date(2027, 1, d) for d in days], slack_days=0)
 
-    alone = len(plan_watch(two_stop(watches=[candidate(10, 20, 30)])))
+    alone = len(plan_watch(two_stop(preferences=[candidate(10, 20, 30)])))
     # 11 Jan + 9 days in Japan lands on the same 20th, and home the same 30th.
-    together = len(plan_watch(two_stop(watches=[candidate(10, 20, 30), candidate(11, 20, 30)])))
+    together = len(
+        plan_watch(two_stop(preferences=[candidate(10, 20, 30), candidate(11, 20, 30)]))
+    )
     assert together < alone * 2
 
 
@@ -576,26 +629,62 @@ def test_watching_nothing_plans_nothing():
     assert plan_watch(two_stop()) == []
 
 
-def test_a_watch_of_the_real_trip_fits_inside_what_the_site_answers():
-    """Three candidates on the full trip: the number the cadence rests on.
+def test_a_watch_of_a_settled_trip_fits_inside_what_the_site_answers():
+    """Three preferences at the default slack on a trip whose airports are decided.
 
-    21 routes at one date each per leg is 21 searches a candidate. If this ever
-    exceeds ~120 the four-hourly watch stops being possible from one runner,
-    and it will do so silently - the sweep just stops being answered part way.
+    This is the cadence the four-hourly check rests on. Once a crossing is
+    pinned each leg is one pair, so a preference is five searches a leg and
+    three of them still sit well under the ~120 the site answers from one
+    runner.
     """
     from datetime import date
     from datetime import timedelta as td
 
-    from src.scenario import Watch
+    from src.scenario import DEFAULT_SLACK_DAYS, Preference
+    from src.sweep.planner import plan_watch
 
     def candidate(day):
         first = date(2027, 1, day)
-        return Watch(depart_dates=[first, first + td(days=10), first + td(days=20)])
+        return Preference(
+            depart_dates=[first, first + td(days=10), first + td(days=20)],
+            slack_days=DEFAULT_SLACK_DAYS,
+        )
 
+    trip = make_scenario(
+        origins=["VIE"],
+        stops=[
+            Stop(airports=["HND"], stay_days=(9, 11), label="Japan"),
+            Stop(airports=["MNL"], stay_days=(9, 11), label="Philippines"),
+        ],
+        preferences=[candidate(6), candidate(13), candidate(20)],
+    )
+    assert len(plan_watch(trip)) <= 110
+
+
+def test_slack_on_an_undecided_trip_is_what_the_cap_is_for():
+    """Three preferences at the default slack can absolutely blow the budget.
+
+    Measured on the fixture trip - three departure airports, two in Japan, so
+    21 routes - three preferences at plus-or-minus two days plan 315 searches
+    against the ~120 the site answers. Nothing about the *count* of preferences
+    says so, which is exactly why `web.app` refuses on the planned figure and
+    `MAX_PREFERENCES` is only the cheap guard in front of it.
+    """
+    from datetime import date
+    from datetime import timedelta as td
+
+    from src.scenario import DEFAULT_SLACK_DAYS, Preference
     from src.sweep.planner import plan_watch
 
-    trip = make_scenario(watches=[candidate(6), candidate(13), candidate(20)])
-    assert len(plan_watch(trip)) <= 110
+    def candidate(day):
+        first = date(2027, 1, day)
+        return Preference(
+            depart_dates=[first, first + td(days=10), first + td(days=20)],
+            slack_days=DEFAULT_SLACK_DAYS,
+        )
+
+    trip = make_scenario(preferences=[candidate(6), candidate(13), candidate(20)])
+    assert len(plan_watch(trip)) > 110
 
 
 # ------------------------------------------------ pinning an overland stop

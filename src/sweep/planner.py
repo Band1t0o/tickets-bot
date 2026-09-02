@@ -19,7 +19,7 @@ from dataclasses import dataclass, replace
 from datetime import date, timedelta
 from itertools import zip_longest
 
-from ..scenario import Scenario
+from ..scenario import Scenario, probing
 
 # Wall-clock seconds one worker spends per search, including the politeness
 # delay. Measured, not reasoned: the cloud sweep of 11 Aug 03:24 ran 350
@@ -364,7 +364,14 @@ def plan_exploration(
     "would Philippines first be cheaper?" can be answered for tens of searches
     instead of the several hundred a second sweep would cost. Only here: the
     sweep prices the order the stops are actually listed in.
+
+    Widened by `probe_extra` before anything is planned, so the probe asks about
+    the airports you told it to keep watching as well as the ones the trip still
+    searches. Done here rather than at each call site: this is the one function
+    that says what a probe costs, and `--dry-run`, the estimate endpoint and the
+    cloud's shard sizing all read it.
     """
+    scenario = probing(scenario)
     searches = _explore_pass(scenario, dates_per_leg)
     for other in reordered(scenario):
         searches += _explore_pass(other, dates_per_leg)
@@ -410,34 +417,43 @@ def reordered(scenario: Scenario) -> list[Scenario]:
 
 
 def plan_watch(scenario: Scenario) -> list[LegSearch]:
-    """Every airport pair of every leg, on the dates the watches pinned.
+    """Every airport pair of every leg, on the days each preference pinned.
 
-    The cheap counterpart to `plan_searches`. A watch already knows which trip
-    it is following, so it prices that trip's exact days rather than deriving
-    later legs from the stay ranges: on the Japan/Philippines trip that is 21
-    searches a candidate against 75, which is the whole difference between a
-    watch that can run every four hours and one that cannot run at all.
+    The cheap counterpart to `plan_searches`. A preference already knows which
+    trip it is following, so it prices that trip's own days rather than deriving
+    later legs from the stay ranges: on the Japan/Philippines trip that is 15
+    searches a preference against 75, which is the whole difference between a
+    check that can run every four hours and one that cannot run at all.
     pelikan.cz answers about 120 searches per runner before it stops answering.
 
-    Airports are *not* pinned, only dates. The candidate says which days to
-    look at; which airports win on those days is exactly what is being watched,
-    so a watch can still find that Frankfurt undercut Vienna overnight, or that
+    Each pinned date brings `slack_days` either side of it. That is what lets a
+    follow answer "the same trip two days later is two thousand cheaper" instead
+    of only "your Tuesday has not moved" - the question a decision is actually
+    waiting on. It is also the whole cost of the mode: the slack multiplies
+    across legs and airport pairs, which is why `Scenario` bounds it and
+    `web.app` refuses on the planned count.
+
+    Airports are *not* pinned, only dates. The preference says which days to
+    look at; which airports win on those days is exactly what is being followed,
+    so a check can still find that Frankfurt undercut Vienna overnight, or that
     arriving Haneda and leaving Kansai beat both.
 
-    Dates are pooled across candidates before the pairs are built, so two
-    candidates ten days apart share the search where one's second leg lands on
-    the other's first. `_searches_for` deduplicates the rest.
+    Dates are pooled across preferences before the pairs are built, so two
+    preferences a week apart share every search their slack windows overlap on,
+    and one ten days apart shares the search where one's second leg lands on the
+    other's first. `_searches_for` deduplicates the rest.
 
     Leg watches are added on top, one search each: they name a route and a date
     outright rather than a trip, so there is nothing to expand. A route the trip
     does not fly is still planned - picking freely is the point of them - and
-    the deduplication below means a leg that a trip watch already covers costs
-    nothing extra.
+    the deduplication below means a leg a preference already covers costs
+    nothing extra, which is what makes following a preference's own legs free.
     """
     dates_by_leg: dict[int, list[date]] = {}
-    for watch in scenario.watches:
-        for leg_index, depart in enumerate(watch.depart_dates):
-            dates_by_leg.setdefault(leg_index, []).append(depart)
+    for preference in scenario.preferences:
+        for leg_index, depart in enumerate(preference.depart_dates):
+            for offset in range(-preference.slack_days, preference.slack_days + 1):
+                dates_by_leg.setdefault(leg_index, []).append(depart + timedelta(days=offset))
     searches = _searches_for(scenario, dates_by_leg)
 
     seen = {(s.origin, s.destination, s.depart_date) for s in searches}

@@ -351,7 +351,7 @@ def build_leg_watch_embed(scenario_name: str, drops: list[dict]) -> dict | None:
 
 
 def build_watch_embed(scenario_name: str, drops: list[dict]) -> dict | None:
-    """One embed for the watched days that actually fell, or None.
+    """One embed for the preferences that actually fell, or None.
 
     A different message from `build_price_embed` on purpose. That one answers
     "what is the cheapest this trip has been"; this one answers "one of the
@@ -388,7 +388,7 @@ def build_watch_embed(scenario_name: str, drops: list[dict]) -> dict | None:
         )
 
     return {
-        "title": f"📉 {scenario_name} — a watched day got cheaper",
+        "title": f"📉 {scenario_name} — a preference got cheaper",
         "description": (
             f"{len(drops)} of the days you are watching fell since the last time "
             f"this said anything."
@@ -469,7 +469,7 @@ def notify_watch(
     webhook_url: str | None = None,
     leg_drops: list[dict] | None = None,
 ) -> bool:
-    """Post the watched days and legs that fell, if any.
+    """Post the preferences and legs that fell, if any.
 
     True when something was sent.
 

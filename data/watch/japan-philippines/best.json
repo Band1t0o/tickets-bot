@@ -1,9 +1,23 @@
 {
-  "watch:2027-01-12": {
-    "last_total": 20931.0,
+  "legwatch:KIX-MNL@2027-01-26": {
+    "last_total": 4230.0,
+    "currency": "CZK",
+    "recorded_at": "2026-08-30T17:00:42+00:00",
+    "best_total": 4230.0,
+    "best_at": "2026-08-30T17:00:42+00:00"
+  },
+  "legwatch:MNL-VIE@2027-02-08": {
+    "last_total": 6916.0,
+    "currency": "CZK",
+    "recorded_at": "2026-08-30T17:00:42+00:00",
+    "best_total": 6916.0,
+    "best_at": "2026-08-30T17:00:42+00:00"
+  },
+  "legwatch:VIE-HND@2027-01-12": {
+    "last_total": 10163.0,
     "currency": "CZK",
     "recorded_at": "2026-09-01T22:40:48+00:00",
-    "best_total": 20931.0,
+    "best_total": 10163.0,
     "best_at": "2026-09-01T22:40:48+00:00"
   },
   "legwatch:VIE-HND@2027-01-16": {
@@ -13,11 +27,11 @@
     "best_total": 10105.0,
     "best_at": "2026-08-30T19:23:07+00:00"
   },
-  "legwatch:VIE-HND@2027-01-12": {
-    "last_total": 10163.0,
+  "watch:2027-01-12": {
+    "last_total": 20931.0,
     "currency": "CZK",
     "recorded_at": "2026-09-01T22:40:48+00:00",
-    "best_total": 10163.0,
+    "best_total": 20931.0,
     "best_at": "2026-09-01T22:40:48+00:00"
   }
 }

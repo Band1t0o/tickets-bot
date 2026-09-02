@@ -277,8 +277,20 @@ def seed_sweep(data_dir, stamp, *, status, legs=LEGS, observed_at=None, url=""):
     (directory / "status.json").write_text(json.dumps(status), encoding="utf-8")
 
 
+def open_sub(page, sub):
+    """One of Map it out's three views.
+
+    The step tabs pick the decision; this second row picks which of that step's
+    answers is on screen. Only Map it out has one.
+    """
+    page.locator('#tabs button[data-tab="map"]').click()
+    page.wait_for_timeout(300)
+    page.locator(f'#subtabs button[data-sub="{sub}"]').click()
+    page.wait_for_timeout(900)
+
+
 def open_prices(page):
-    """The by-date chart and the focus picked on it: Narrow it down."""
+    """The narrowing step: the dates, and the narrowed runs read under them."""
     page.locator('#tabs button[data-tab="narrow"]').click()
     page.wait_for_timeout(900)
 
@@ -302,8 +314,7 @@ def test_the_headline_says_when_the_price_was_measured(ui):
         observed_at="2026-08-10T11:59:04+00:00",
     )
     page.reload(wait_until="networkidle")
-    page.locator('#tabs button[data-tab="narrow"]').click()
-    page.wait_for_timeout(900)
+    open_results(page)
 
     headline = page.locator("#headline").inner_text()
     assert "measured" in headline.lower(), headline
@@ -346,8 +357,8 @@ def explore_status(errors=None, state="done"):
 
 
 def open_explore(page):
-    page.locator('#tabs button[data-tab="map"]').click()
-    page.wait_for_timeout(900)
+    """Probe results: what a probe judged, on the step the probe is started."""
+    open_sub(page, "probe")
 
 
 def open_one_run(page):
@@ -364,8 +375,13 @@ def open_one_run(page):
 
 
 def open_results(page):
-    page.locator('#tabs button[data-tab="narrow"]').click()
-    page.wait_for_timeout(900)
+    """Search results: what a sweep found, ranked.
+
+    It was on the narrowing step behind a population switch, which put the
+    answer to "what did my sweep find" on the tab named for cutting the search
+    down. It is now beside the buttons that start the sweep.
+    """
+    open_sub(page, "results")
 
 
 def seed_probe(scenarios, errors=None, legs=None, state="done"):
@@ -547,23 +563,32 @@ def test_a_stopped_run_says_it_was_stopped_rather_than_finished(ui):
     assert not errors
 
 
-def test_the_explore_button_prices_itself_before_you_press_it(ui):
+def test_every_run_button_prices_itself_before_you_press_it(ui):
+    """Three buttons, three costs, none of them requiring a control to be moved.
+
+    The depth was a select and the cost a single badge priced at whatever it
+    happened to say, so finding out what the other depth would cost meant
+    changing the thing that decided what the button would do.
+    """
     page, _, errors = ui
-    page.wait_for_timeout(700)
-    note = page.locator("#explore-cost-line").inner_text()
-    assert "searches" in note and "min" in note, note
+    page.wait_for_timeout(900)
+    for box in ("#probe-cost", "#quick-cost", "#deep-cost"):
+        note = page.locator(box).inner_text()
+        assert "searches" in note and "min" in note, f"{box}: {note}"
     assert not errors
 
 
-def test_the_price_of_a_probe_survives_the_explanations_being_off(ui):
-    """The cost moves with the trip, so it is an answer and not a lesson. It
-    used to sit inside the paragraph explaining what a probe is, which is the
-    paragraph the explanations switch takes away."""
+def test_the_price_of_a_run_survives_the_explanations_being_off(ui):
+    """The cost moves with the trip, so it is an answer and not a lesson - and
+    it is now on the button itself, which the explanations switch cannot take
+    away. It used to sit inside the paragraph explaining what a probe is, which
+    is exactly the paragraph that switch hides."""
     page, _, errors = ui
-    page.wait_for_timeout(700)
+    page.wait_for_timeout(900)
 
-    assert not page.locator("#explore-note").is_visible()      # the lesson
-    assert page.locator("#explore-cost-line").is_visible()     # the number
+    assert not page.locator("#run-note").is_visible()       # the lesson
+    assert page.locator("#probe-cost").is_visible()         # the number
+    assert page.locator("#deep-cost").is_visible()
     assert not errors
 
 
@@ -581,8 +606,16 @@ def add_origin(page, code: str) -> None:
     page.wait_for_timeout(800)
 
 
-def catch_the_sweep(monkeypatch):
-    """Stand in for the sweep and record the trip it was handed."""
+def catch_the_sweep(monkeypatch, cloud=False):
+    """Stand in for the sweep and record the trip it was handed.
+
+    `cloud=True` stands in for the dispatch instead, which is what the two sweep
+    buttons and the narrowed one now do: one address is answered about 120
+    searches, so a full-sized sweep only finishes on runners that shard it. The
+    branch check is stubbed out with it - `conftest.no_real_git` refuses every
+    git call, so every trip reads as one this app cannot find on the branch, and
+    the run would stop at a confirm dialog instead of dispatching.
+    """
     import src.web.app as app_module
 
     seen: dict = {}
@@ -593,28 +626,52 @@ def catch_the_sweep(monkeypatch):
         seen["mode"] = kwargs.get("mode")
         started.set()
 
-    monkeypatch.setattr(app_module, "run_sweep", fake_sweep)
+    def fake_dispatch(scenario_id, depth, mode):
+        seen["scenario_id"] = scenario_id
+        seen["depth"] = depth
+        seen["mode"] = mode
+        started.set()
+
+    if cloud:
+        monkeypatch.setattr(
+            app_module, "_cloud_state",
+            lambda *a, **k: {"known": True, "on_branch": True, "differs": [],
+                             "included": True, "searches": 1},
+        )
+        monkeypatch.setattr(app_module.cloud_runs, "lane_is_busy", lambda: False)
+        monkeypatch.setattr(app_module.cloud_runs, "dispatch", fake_dispatch)
+    else:
+        monkeypatch.setattr(app_module, "run_sweep", fake_sweep)
     return seen, started
 
 
 def test_a_probe_searches_the_trip_on_screen_not_the_one_last_saved(ui, monkeypatch):
-    """The bug, frozen: BCN is on screen, so BCN is what gets searched."""
-    page, _, errors = ui
-    seen, started = catch_the_sweep(monkeypatch)
+    """The bug, frozen: BCN is on screen, so BCN is what gets searched.
+
+    The probe dispatches to the cloud now, along with the sweeps - it is ~50
+    searches against the ~120 one address is answered in a day, which is nearly
+    half the machine's budget on the cheapest question the app asks. The cloud
+    searches the *committed* trip, so "what is on screen" is enforced by saving
+    first and by the branch check refusing when the two differ; both are what
+    this asserts.
+    """
+    page, scenarios, errors = ui
+    seen, started = catch_the_sweep(monkeypatch, cloud=True)
 
     add_origin(page, "BCN")
     page.locator("#explore-btn").click()          # no Save pressed first
 
-    assert started.wait(timeout=15), "the probe never started"
-    assert "BCN" in seen["origins"], f"the probe searched {seen['origins']}"
+    assert started.wait(timeout=15), "the probe never dispatched"
     assert seen["mode"] == "explore"
+    saved = json.loads((scenarios / "jp-ph.json").read_text(encoding="utf-8"))
+    assert "BCN" in saved["origins"], "the run saved the trip it was about to search"
     assert not errors
 
 
 def test_the_probe_button_on_the_explore_tab_saves_the_edits_too(ui, monkeypatch):
     """The tab whose whole design is "drop airports now, save later"."""
     page, scenarios, errors = ui
-    seen, started = catch_the_sweep(monkeypatch)
+    seen, started = catch_the_sweep(monkeypatch, cloud=True)
     seed_probe(scenarios)
     page.reload(wait_until="networkidle")
 
@@ -622,8 +679,8 @@ def test_the_probe_button_on_the_explore_tab_saves_the_edits_too(ui, monkeypatch
     open_explore(page)
     page.locator("#explore-run-btn").click()
 
-    assert started.wait(timeout=15), "the probe never started"
-    assert "BCN" in seen["origins"], f"the probe searched {seen['origins']}"
+    assert started.wait(timeout=15), "the probe never dispatched"
+    assert seen["mode"] == "explore"
     saved = json.loads((scenarios / "jp-ph.json").read_text(encoding="utf-8"))
     assert "BCN" in saved["origins"], "the run saved the trip it was about to search"
     assert not errors
@@ -712,6 +769,56 @@ def test_an_airport_that_was_never_in_your_trip_is_not_drawn_as_one_you_dropped(
     vienna = page.locator("#explore-report tbody tr", has_text="VIE").first
     assert "is-dropped" not in (vienna.get_attribute("class") or "")
     assert "not in this trip" in vienna.inner_text().lower(), vienna.inner_text()
+    assert not errors
+
+
+def test_the_merged_table_says_what_it_was_built_from(ui):
+    """Every group named its own run; nothing named the table's.
+
+    The verdicts are merged across runs by design - a refused probe does not
+    throw away yesterday's complete sweep - and how many runs are behind a floor
+    price, and how old the newest of them is, is the first thing worth knowing
+    about one. Live, so the explanations switch cannot take it away: that switch
+    is off by default and it is how this panel's words went missing before.
+    """
+    page, scenarios, errors = ui
+    seed_probe(scenarios)
+    seed_searched_trip(scenarios)
+    page.reload(wait_until="networkidle")
+    open_explore(page)
+
+    assert "Explanations: off" in page.locator("#hints-toggle").inner_text()
+    line = page.locator("#explore-merge")
+    assert line.is_visible()
+    said = line.inner_text()
+    assert "probe" in said, said
+    assert "11 Aug" in said, said
+    assert not errors
+
+
+def test_a_long_list_of_airports_can_be_filtered_down(ui):
+    """Four pools of airports is a lot of table when the question is one of them."""
+    page, scenarios, errors = ui
+    seed_probe(scenarios)
+    seed_searched_trip(scenarios)
+    page.reload(wait_until="networkidle")
+    open_explore(page)
+
+    rows = page.locator("#explore-verdicts tbody tr")
+    before = rows.count()
+    assert before >= 6, f"only {before} rows, so the box is not offered"
+    assert page.locator("#explore-filter-row").is_visible()
+
+    page.locator("#explore-filter").fill("NRT")
+    page.wait_for_timeout(300)
+    assert page.locator("#explore-verdicts tbody tr:visible").count() < before
+    assert page.locator("#explore-verdicts tbody tr:visible", has_text="NRT").count() > 0
+    assert page.locator("#explore-verdicts tbody tr:visible", has_text="PRG").count() == 0
+
+    # Nothing is thrown away by looking at one thing.
+    page.locator("#explore-filter").fill("")
+    page.wait_for_timeout(300)
+    assert page.locator("#explore-verdicts tbody tr:visible").count() == before
     assert not errors
 
 
@@ -822,51 +929,39 @@ def test_a_lone_comparable_sweep_refuses_to_draw_a_trend(ui):
     assert not errors
 
 
-def test_the_by_date_chart_states_its_sampling_resolution(ui):
-    """A smooth line through points a week apart implies knowledge of the gaps."""
-    page, scenarios, errors = ui
-    seed_sweep(
-        scenarios.parent / "data", "2026-08-10T11-57-06Z",
-        status={"state": "done", "total": 5, "legs_found": 49, "depth": "quick"},
-        legs=[
-            ("PRG", "NRT", "2027-01-05", 12000.0),
-            ("PRG", "NRT", "2027-01-12", 9000.0),
-            ("NRT", "MNL", "2027-01-15", 4000.0),
-            ("NRT", "MNL", "2027-01-22", 4000.0),
-            ("MNL", "PRG", "2027-01-25", 14000.0),
-            ("MNL", "PRG", "2027-02-01", 14000.0),
-        ],
-    )
-    page.reload(wait_until="networkidle")
-    open_prices(page)
-
-    note = page.locator("#by-date-note").inner_text()
-    assert "sampled every 7 days" in note.lower(), note
-    assert "3 days either side" in note, note
-    # 30,000 on 01-05 against 27,000 on 01-12 — a 10% saving for leaving a week
-    # later, not the 11% that max/min - 1 would report.
-    assert "10% below the dearest" in note, note
-    assert not errors
-
-
-# ------------------------------------------------------ notification settings
-#
-# Which deals get sent, and from where. Typed the way a person types, for the
-# same reason the route editor is: the picker below is the same component, and
-# the bug it once had was invisible to every scripted click.
-#
-# Behind the gear since the tabs became three steps: what gets sent is
-# configuration, not a decision about which days to fly.
 
 
 def open_setup(page):
     page.locator("#tabs button[data-tab='setup']").click()
-    page.wait_for_selector("#add-tier-btn")
+    page.wait_for_selector("#home-airports-add-tier")
+
+
+def open_trip_airports(page):
+    """The per-trip ranking, behind a click on the airports panel.
+
+    It is the override and not the normal case: a trip that says nothing follows
+    the global tiers, so the editor is folded shut until someone wants to
+    disagree with them."""
+    open_setup(page)
+    page.locator("#trip-airports > summary").click()
+    page.wait_for_selector("#add-tier-btn", state="visible")
+
+
+def open_schedule(page):
+    """The schedule editor, which is a dialog opened from three places.
+
+    One editor rather than three copies of the same four ids - see
+    `#schedule-dialog`. Opened here from the gear; the two run rows open the
+    same one."""
+    page.locator("#tabs button[data-tab='setup']").click()
+    page.wait_for_selector("#night-edit-btn", state="visible")
+    page.locator("#night-edit-btn").click()
+    page.wait_for_selector("#schedule-dialog[open]")
 
 
 def test_a_preferred_tier_is_typed_and_saved(ui):
     page, scenario_dir, errors = ui
-    open_setup(page)
+    open_trip_airports(page)
     page.locator("#add-tier-btn").click()
     page.wait_for_timeout(300)
 
@@ -876,7 +971,7 @@ def test_a_preferred_tier_is_typed_and_saved(ui):
     page.wait_for_timeout(800)
 
     assert chips(page, "#preferred-tiers") == ["VIE"]
-    page.locator("#notify-save-btn").click()
+    page.locator("#preferred-save-btn").click()
     page.wait_for_timeout(900)
 
     saved = json.loads((scenario_dir / "jp-ph.json").read_text(encoding="utf-8"))
@@ -891,7 +986,7 @@ def test_an_airport_cannot_sit_in_two_tiers_at_once(ui):
     fails on something the form could see coming.
     """
     page, _, errors = ui
-    open_setup(page)
+    open_trip_airports(page)
     for _ in range(2):
         page.locator("#add-tier-btn").click()
         page.wait_for_timeout(250)
@@ -923,10 +1018,10 @@ def test_notification_choices_round_trip(ui):
 
 def test_an_empty_tier_row_is_dropped_rather_than_failing_the_save(ui):
     page, scenario_dir, errors = ui
-    open_setup(page)
+    open_trip_airports(page)
     page.locator("#add-tier-btn").click()
     page.wait_for_timeout(300)
-    page.locator("#notify-save-btn").click()
+    page.locator("#preferred-save-btn").click()
     page.wait_for_timeout(900)
 
     saved = json.loads((scenario_dir / "jp-ph.json").read_text(encoding="utf-8"))
@@ -944,6 +1039,16 @@ def test_an_empty_tier_row_is_dropped_rather_than_failing_the_save(ui):
 
 def open_sources(page):
     page.locator('#tabs button[data-tab="setup"]').click()
+    # Behind a click: this answers a question nobody arrives here asking, and it
+    # is only ever asked when a sweep has already gone wrong. Clicked only when
+    # it is shut - a `<summary>` toggles, so an unconditional click would close
+    # the box for the second caller.
+    page.wait_for_selector("#sources-box > summary")
+    # `is None`, not falsiness: an open `<details>` carries `open=""`, which is
+    # a false-y string in Python - so the obvious check clicked the box shut for
+    # the second caller and left it waiting on a card it had just hidden.
+    if page.locator("#sources-box").get_attribute("open") is None:
+        page.locator("#sources-box > summary").click()
     page.wait_for_selector(".source-card")
 
 
@@ -1202,27 +1307,6 @@ def seed_a_week_of_dates(data_dir):
     )
 
 
-def chart_point(page, index, total):
-    """Click where the nth of `total` points sits, the way a person would.
-
-    The chart pads 44px left and 16px right inside its own viewBox, and scales
-    to the container, so the position is computed from the rendered box rather
-    than from a marker's coordinates - a click has to land near a point, not on
-    a 4px circle.
-    """
-    # Scrolled into view first: `page.mouse.click` takes viewport coordinates
-    # and does not scroll, and the by-date chart now sits under three leg
-    # charts - below the fold on a 1400px viewport, where every click landed on
-    # whatever happened to be at those coordinates instead.
-    page.locator("#chart-by-date").scroll_into_view_if_needed()
-    page.wait_for_timeout(150)
-    box = page.locator("#chart-by-date svg").bounding_box()
-    scale = box["width"] / float(page.locator("#chart-by-date svg").get_attribute("width"))
-    left = 44 * scale
-    plot = box["width"] - (44 + 16) * scale
-    x = box["x"] + left + (plot * index / max(1, total - 1))
-    page.mouse.click(x, box["y"] + box["height"] / 2)
-    page.wait_for_timeout(500)
 
 
 def leave_between(page):
@@ -1233,27 +1317,20 @@ def leave_between(page):
     )
 
 
-def test_clicking_two_points_fills_the_leave_between_boxes(ui):
-    """The click has to land in the field, not in a picker of its own."""
-    page, scenarios, errors = ui
-    seed_a_week_of_dates(scenarios.parent / "data")
-    page.reload(wait_until="networkidle")
-    open_prices(page)
 
-    assert leave_between(page) == ("", "")
 
-    chart_point(page, 1, 5)
-    # A half-open range still shows the day it has, or the first click looks
-    # like it did nothing at all.
-    assert leave_between(page) == ("2027-01-11", ""), leave_between(page)
+def type_leave_between(page, start, end):
+    """Fill the two departure-window boxes, as a person does.
 
-    chart_point(page, 3, 5)
-    assert leave_between(page) == ("2027-01-11", "2027-01-13"), leave_between(page)
-    # Priced against the trip on screen, not guessed - and by the panel's own
-    # estimate line, not by a second one belonging to the chart.
-    cost = page.locator("#narrow-cost").inner_text()
-    assert "searches" in cost and "whole window" in cost, cost
-    assert not errors
+    They used to be filled by clicking a by-date chart above them. That chart is
+    gone - a sum of legs priced on their own days was the weakest of the
+    constraints, and the per-leg charts are where a trip is actually picked - so
+    the boxes are typed into directly and this says so once.
+    """
+    for box, value in (("#narrow-out-start", start), ("#narrow-out-end", end)):
+        page.locator(box).fill(value)
+        page.locator(box).dispatch_event("change")
+        page.wait_for_timeout(200)
 
 
 def test_a_picked_range_is_written_by_the_panels_own_save(ui):
@@ -1263,8 +1340,7 @@ def test_a_picked_range_is_written_by_the_panels_own_save(ui):
     page.reload(wait_until="networkidle")
     open_prices(page)
 
-    chart_point(page, 1, 5)
-    chart_point(page, 3, 5)
+    type_leave_between(page, "2027-01-11", "2027-01-13")
     page.locator("#narrow-save").click()
     page.wait_for_timeout(900)
 
@@ -1285,8 +1361,7 @@ def test_clearing_takes_the_departure_window_with_it(ui):
     page.reload(wait_until="networkidle")
     open_prices(page)
 
-    chart_point(page, 1, 5)
-    chart_point(page, 3, 5)
+    type_leave_between(page, "2027-01-11", "2027-01-13")
     page.locator("#narrow-save").click()
     page.wait_for_timeout(900)
 
@@ -1300,81 +1375,33 @@ def test_clearing_takes_the_departure_window_with_it(ui):
     assert not errors
 
 
-def test_a_third_click_starts_the_range_over(ui):
-    """A picker that could only ever extend would need a Clear button to undo a
-    misclick, which is a button for a mistake the picker caused."""
-    page, scenarios, errors = ui
-    seed_a_week_of_dates(scenarios.parent / "data")
-    page.reload(wait_until="networkidle")
-    open_prices(page)
-
-    chart_point(page, 0, 5)
-    chart_point(page, 4, 5)
-    chart_point(page, 2, 5)
-    assert leave_between(page) == ("2027-01-12", ""), leave_between(page)
-    assert not errors
 
 
-def test_clicking_backwards_still_reads_as_a_range(ui):
-    """The boxes are a from and a to, not a first click and a second one."""
-    page, scenarios, errors = ui
-    seed_a_week_of_dates(scenarios.parent / "data")
-    page.reload(wait_until="networkidle")
-    open_prices(page)
-
-    chart_point(page, 3, 5)
-    chart_point(page, 1, 5)
-    assert leave_between(page) == ("2027-01-11", "2027-01-13"), leave_between(page)
-    assert not errors
 
 
-def test_a_typed_date_draws_on_the_chart_like_a_clicked_one(ui):
-    """One state, drawn twice. The band used to be read off the *saved* trip, so
-    a date typed into the box beside it changed nothing on the chart until a
-    save had happened."""
-    page, scenarios, errors = ui
-    seed_a_week_of_dates(scenarios.parent / "data")
-    page.reload(wait_until="networkidle")
-    open_prices(page)
-
-    page.locator("#narrow-out-start").fill("2027-01-11")
-    page.locator("#narrow-out-start").dispatch_event("change")
-    page.locator("#narrow-out-end").fill("2027-01-13")
-    page.locator("#narrow-out-end").dispatch_event("change")
-    page.wait_for_timeout(900)
-
-    # The band is the one <rect> `lineChart` ever draws, and nothing is saved
-    # until the panel's Save is pressed.
-    assert page.locator("#chart-by-date svg rect").count() == 1
-    saved = json.loads((scenarios / "jp-ph.json").read_text(encoding="utf-8"))
-    assert saved["focus_start"] is None
-    assert not errors
 
 
-def test_an_unpicked_chart_draws_no_band_at_all(ui):
-    """The counterpart, so the assertion above is measuring the band and not
-    merely finding some rectangle that is always there."""
-    page, scenarios, errors = ui
-    seed_a_week_of_dates(scenarios.parent / "data")
-    page.reload(wait_until="networkidle")
-    open_prices(page)
-
-    assert page.locator("#chart-by-date svg rect").count() == 0
-    assert not errors
 
 
-# --------------------------------------------------------------- sources
-#
-# The tab answers one question - is this still working - and keeps the CSS
-# selectors behind Repair, where they belong until the answer is no.
+def test_the_gear_leads_with_discord_and_configures_it_once(ui):
+    """It is what people come here for, and it used to be below a selector form.
 
-
-def test_the_sources_tab_leads_with_the_discord_webhook(ui):
-    """It is what people come here for, and it used to be below a selector form."""
+    It was also configured twice: the webhook on one panel and what gets sent on
+    another, three panels apart, each explaining that it was not the other. Two
+    controls that can only be described by their difference from each other
+    belong next to each other.
+    """
     page, _, errors = ui
-    open_sources(page)
-    panels = page.locator('section[data-panel="sources"] .panel h2').all_inner_texts()
-    assert "Where results get sent" in panels[0], panels
+    page.locator('#tabs button[data-tab="setup"]').click()
+    page.wait_for_selector("#webhook-url")
+
+    panels = page.locator('section[data-panel]:not([hidden]) .panel h2').all_inner_texts()
+    assert panels[0] == "Discord", panels
+    # The webhook and the picks are on that one panel, and nowhere else.
+    panel = page.locator('section[data-panel="notify"] .panel').first
+    assert panel.locator("#webhook-url").count() == 1
+    assert panel.locator("#notify-cheapest").count() == 1
+    assert page.locator("#webhook-url").count() == 1
     assert not errors
 
 
@@ -1444,8 +1471,7 @@ def test_a_sweep_with_holes_says_so_above_the_prices(ui):
                 "coverage": 0.714, "unanswered": 48},
     )
     page.reload(wait_until="networkidle")
-    page.locator('#tabs button[data-tab="narrow"]').click()
-    page.wait_for_timeout(900)
+    open_results(page)
 
     notice = page.locator("#completeness")
     assert notice.is_visible()
@@ -1592,11 +1618,11 @@ def test_results_say_out_loud_that_you_cross_japan_yourself(ui):
 
 
 
-# ------------------------------------------------------------- the watch tab
+# ------------------------------------------------------------- the follow step
 #
-# Picking a few cheap days off the last sweep and following just those, every
-# few hours. The tab is the whole feature's surface: the days being watched,
-# how each has moved since, and what checking them costs.
+# Picking the two or three trips you are deciding between and following just
+# those, every few hours. The step is the whole feature's surface: the
+# preferences, how each has moved since, and what checking them costs.
 
 
 def open_watch(page):
@@ -1625,7 +1651,7 @@ def seed_watch_observations(data_dir, key="2027-01-10", totals=(30000, 28500)):
 def test_the_watch_tab_says_when_nothing_is_being_watched(ui):
     page, _, errors = ui
     open_watch(page)
-    assert "nothing" in page.locator("#watch-empty").inner_text().lower()
+    assert "no preferences yet" in page.locator("#watch-empty").inner_text().lower()
     assert not errors
 
 
@@ -1640,10 +1666,10 @@ def test_a_day_can_be_picked_off_the_last_sweep(ui):
     page.wait_for_timeout(900)
 
     saved = json.loads((scenarios / "jp-ph.json").read_text(encoding="utf-8"))
-    assert saved["watches"][0]["depart_dates"] == ["2027-01-10", "2027-01-20", "2027-01-30"]
+    assert saved["preferences"][0]["depart_dates"] == ["2027-01-10", "2027-01-20", "2027-01-30"]
     # Picked at a price, so the first observation can already say which way it
     # went rather than only establishing a baseline.
-    assert saved["watches"][0]["added_price"] == 30000
+    assert saved["preferences"][0]["added_price"] == 30000
     assert "2027-01-10" in page.locator("#watch-table").inner_text()
     assert not errors
 
@@ -1660,12 +1686,15 @@ def test_the_tab_says_what_checking_the_watched_days_will_cost(ui):
 
     # Said once, above both panels. The two used to carry the same whole-run
     # figure each, so a step costing five searches announced five twice.
+    # 5 pairs a preference at the default slack of two days either side, which
+    # is five dates a leg: 25. The figure the cap is applied to, so a payload
+    # that under-reported it would offer a preference the run cannot afford.
     summary = page.locator("#follow-summary-text").inner_text()
-    assert "5 searches" in summary, summary
+    assert "25 searches" in summary, summary
     assert "min" in summary, summary
     assert "both panels together" in summary, summary
-    # The panel's own badge counts what is in the panel, and nothing else.
-    assert page.locator("#watch-cost").inner_text() == "1 trip"
+    # The panel's own badge counts what is in the panel, against the cap on it.
+    assert page.locator("#watch-cost").inner_text() == "1 of 4"
     assert not errors
 
 
@@ -1679,7 +1708,89 @@ def test_a_watched_day_can_be_dropped_again(ui):
 
     page.locator("#watch-table .watch-drop").first.click()
     page.wait_for_timeout(900)
-    assert json.loads((scenarios / "jp-ph.json").read_text(encoding="utf-8"))["watches"] == []
+    assert json.loads((scenarios / "jp-ph.json").read_text(encoding="utf-8"))["preferences"] == []
+    assert not errors
+
+
+def seed_a_cheaper_neighbour(data_dir, key="2027-01-10"):
+    """One observation whose slack found a better set of dates two days out."""
+    directory = data_dir / "watch" / "jp-ph"
+    directory.mkdir(parents=True, exist_ok=True)
+    with (directory / "observations.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({
+            "ts": "2026-08-20T02:00:00+00:00", "scenario_id": "jp-ph",
+            "depart_date": key, "label": "10+10 from 10 Jan", "slack_days": 2,
+            "pinned_dates": [key, "2027-01-20", "2027-01-30"],
+            "found_dates": [key, "2027-01-20", "2027-01-30"],
+            "route": "PRG \u2192 NRT \u2192 MNL \u2192 PRG",
+            "total": 30000, "total_with_bags": 30000,
+            "nearby_total": 26000, "nearby_total_with_bags": 26000,
+            "nearby_dates": ["2027-01-12", "2027-01-22", "2027-02-01"],
+            "nearby_route": "PRG \u2192 NRT \u2192 MNL \u2192 PRG",
+            "currency": "CZK", "has_overland": False, "coverage": 1.0,
+            "legs_per_search": 9.5, "comparable": True,
+        }) + "\n")
+
+
+def test_a_cheaper_set_of_dates_inside_the_slack_is_offered(ui):
+    """The entire return on the slack.
+
+    Without this the extra searches buy a number nobody sees, and a preference
+    can only ever report that its own Tuesday has not moved.
+    """
+    page, scenarios, errors = ui
+    seed_a_week_of_dates(scenarios.parent / "data")
+    seed_a_cheaper_neighbour(scenarios.parent / "data")
+    page.reload(wait_until="networkidle")
+    open_watch(page)
+    page.locator("#watch-candidates .watch-add").first.click()
+    page.wait_for_timeout(900)
+
+    offer = page.locator("#watch-table .pref-offer").inner_text()
+    assert "2 days later" in offer, offer
+    # `toLocaleString` groups with a non-breaking space, as every other money
+    # figure on the page does.
+    assert "4 000 CZK cheaper" in offer, offer
+    assert "2027-02-01" in offer, offer
+    assert not errors
+
+
+def test_taking_the_offer_moves_the_preference_rather_than_adding_one(ui):
+    """The series belongs to the decision.
+
+    A new preference on every shift would leave you unable to see that the trip
+    has fallen four thousand since you began looking at it.
+    """
+    page, scenarios, errors = ui
+    seed_a_week_of_dates(scenarios.parent / "data")
+    seed_a_cheaper_neighbour(scenarios.parent / "data")
+    page.reload(wait_until="networkidle")
+    open_watch(page)
+    page.locator("#watch-candidates .watch-add").first.click()
+    page.wait_for_timeout(900)
+
+    page.locator("#watch-table .pref-offer button").click()
+    page.wait_for_timeout(900)
+
+    saved = json.loads((scenarios / "jp-ph.json").read_text(encoding="utf-8"))
+    assert len(saved["preferences"]) == 1
+    assert saved["preferences"][0]["depart_dates"] == [
+        "2027-01-12", "2027-01-22", "2027-02-01"
+    ]
+    assert not errors
+
+
+def test_a_preference_already_on_the_best_dates_is_offered_nothing(ui):
+    """`nearby` includes the pinned days, so an equal figure is not a saving."""
+    page, scenarios, errors = ui
+    seed_a_week_of_dates(scenarios.parent / "data")
+    seed_watch_observations(scenarios.parent / "data")
+    page.reload(wait_until="networkidle")
+    open_watch(page)
+    page.locator("#watch-candidates .watch-add").first.click()
+    page.wait_for_timeout(900)
+
+    assert page.locator("#watch-table .pref-offer").count() == 0
     assert not errors
 
 
@@ -1708,7 +1819,12 @@ def test_the_chart_draws_one_line_per_watched_day(ui):
 
     legend = page.locator("#watch-chart .chart-legend__item").all_inner_texts()
     assert len(legend) == 2
-    assert any("2027-01-10" in entry for entry in legend)
+    # Named by rank and shape rather than by the raw departure date, and the
+    # name carries the *day* - two preferences of the same shape a week apart
+    # are exactly the pair this chart exists to compare.
+    assert any("10 Jan" in entry for entry in legend), legend
+    assert any("11 Jan" in entry for entry in legend), legend
+    assert legend[0].startswith("1 ")
     assert not errors
 
 
@@ -1908,17 +2024,17 @@ def test_the_pins_appear_only_once_overland_is_ticked(ui):
 
 
 def test_pinning_a_crossing_drops_the_searches_it_will_cost(ui):
-    """The whole reason to pin: the badge beside the run buttons must fall."""
+    """The whole reason to pin: the cost written on the run button must fall."""
     page, _, errors = ui
     page.wait_for_timeout(600)
     make_stop_crossable(page)
     stop_card(page).locator(".stop__overland input").check()
     page.wait_for_timeout(900)
-    before = page.locator("#estimate").inner_text()
+    before = page.locator("#deep-cost").inner_text()
 
     stop_card(page).locator(".stop__pins select").first.select_option("NRT")
     page.wait_for_timeout(1200)
-    after = page.locator("#estimate").inner_text()
+    after = page.locator("#deep-cost").inner_text()
 
     assert digits(before) != digits(after), f"{before} -> {after}"
     assert int(re.search(r"\d+", digits(after)).group()) < int(
@@ -2030,8 +2146,13 @@ def test_the_probe_says_which_way_round_is_cheaper(ui):
     text = verdict.inner_text()
     assert "Japan first" in text and "Philippines first" in text
     assert "cheapest sampled" in text
-    # Never presented as a bookable trip: three dates a leg rarely chain.
-    assert "not a trip you could book" in text
+    # Never presented as a bookable trip: three dates a leg rarely chain. In the
+    # heading, because the paragraph under it collapses with the explanations
+    # and this is the part of it a reader must not be able to switch off.
+    heading = page.locator("#explore-orders .subhead").inner_text()
+    # Lower-cased:  is uppercased in CSS, so  renders it
+    # that way and a literal comparison would be about the stylesheet.
+    assert "not a trip you could book" in heading.lower(), heading
     assert not errors
 
 
@@ -2200,6 +2321,13 @@ def test_the_follow_step_says_a_follow_does_not_move_when_the_trip_does(ui):
     changes what the next sweep prices and nothing here."""
     page, _, errors = ui
     open_watch(page)
+
+    # It collapses with the rest of the teaching now, which it did not use to:
+    # the switch was scoped to panels and this notice sits directly in its
+    # section, so it was the one paragraph the switch could not reach.
+    assert page.locator("#follow-summary .explain").is_hidden()
+    page.locator("#hints-toggle").click()
+    page.wait_for_timeout(400)
 
     summary = page.locator("#follow-summary").inner_text()
     assert "Nothing here moves when you change the trip or the narrowing" in summary, summary
@@ -2423,34 +2551,72 @@ def test_the_night_sweep_names_when_it_next_runs(ui):
 def test_a_trip_in_the_night_sweep_says_what_tonight_costs_it(ui):
     page, _, _ = ui
     open_night(page)
-    assert page.locator("#enabled").is_checked()
     assert "Tonight this trip is" in page.locator("#night-this-trip").inner_text()
+    open_schedule(page)
+    assert page.locator("#enabled").is_checked()
 
 
 def test_a_trip_taken_out_of_the_night_sweep_says_so_rather_than_going_quiet(ui):
     """Both of this repo's trips sat switched off while their owner watched for
     nightly results. Nothing anywhere said the night sweep had nothing to do."""
     page, _, _ = ui
-    open_night(page)
+    open_schedule(page)
     page.locator("#enabled").uncheck()
     page.locator("#night-save-btn").click()
     page.wait_for_timeout(900)
 
+    # The dialog closes on a save that lands, and the panel behind it repaints.
+    assert page.locator("#schedule-dialog[open]").count() == 0
     assert "Not swept overnight" in page.locator("#night-this-trip").inner_text()
     assert page.locator("#night-badge").inner_text() == "nothing scheduled"
     assert "is-out" in (page.locator("#night-all .night-list__row").first.get_attribute("class"))
 
 
-def test_a_trip_the_branch_has_never_seen_says_the_night_sweep_cannot_run_it(ui):
+def test_a_trip_the_branch_has_never_seen_says_the_night_sweep_cannot_run_it(ui, monkeypatch):
     """Ticking the box is not enough: the workflow reads the trips committed to
     the branch, so a trip that was never pushed is not swept whatever this page
-    says about it."""
+    says about it.
+
+    The absence has to be stated, and it used not to be: `_cloud_state` answered
+    `known: false` both for "the branch has no such trip" and for "this app
+    cannot read the branch", and this panel printed the first one's words for
+    both. `no_real_git` in conftest makes every test the second case, so this
+    test passed on a setup that was never what it describes - and a checkout with
+    no git was told to push a file it may well have pushed already.
+    """
+    import src.web.app as app_module
+
+    monkeypatch.setattr(
+        app_module, "_cloud_state",
+        lambda *a: {"known": False, "on_branch": False, "differs": [],
+                    "included": None, "searches": None},
+    )
+
     page, _, _ = ui
+    page.reload(wait_until="networkidle")
     open_night(page)
     warning = page.locator("#night-cloud")
     assert warning.is_visible()
     assert "not on it" in warning.inner_text()
-    assert "commit and" in warning.inner_text().lower()
+    # It no longer ends in an errand. The one thing to do about it is here.
+    assert page.locator("#night-publish").is_visible()
+
+
+def test_a_branch_this_app_cannot_read_says_that_and_not_go_and_push_it(ui):
+    """The fixture's own case, since `no_real_git` refuses every git call.
+
+    "Cannot say" is a real answer and it is not "your trip is missing". Told the
+    second, the only action offered is one that may already be done.
+    """
+    page, _, _ = ui
+    open_night(page)
+    warning = page.locator("#night-cloud")
+    assert warning.is_visible()
+    text = warning.inner_text()
+    assert "cannot read" in text
+    # And no button, for the same reason: publishing is the answer to "the
+    # branch has not got it", not to "this app cannot see the branch".
+    assert page.locator("#night-publish").count() == 0
 
 
 def test_a_trip_the_branch_has_differently_says_which_trip_tonight_is_about(ui, monkeypatch):
@@ -2481,6 +2647,111 @@ def test_a_trip_the_branch_has_differently_says_which_trip_tonight_is_about(ui, 
     text = warning.inner_text()
     assert "running a different version of this trip" in text
     assert "the airports it searches" in text
+
+
+def branch_without(monkeypatch, trip_on_branch: dict):
+    """A branch that has not got this trip, until something puts it there."""
+    import src.web.app as app_module
+
+    monkeypatch.setattr(
+        app_module, "_cloud_state",
+        lambda *a: {"known": trip_on_branch["has_it"], "on_branch": trip_on_branch["has_it"],
+                    "differs": [], "included": True, "searches": 66},
+    )
+
+
+def test_the_trip_the_branch_never_saw_is_published_from_the_panel(ui, monkeypatch):
+    """The errand, as a button.
+
+    The warning used to end by asking for a commit and a push - in a terminal,
+    on a checkout that is usually sitting on some other branch, so even a push
+    would not have reached the one being swept. The panel whose whole job is to
+    be trusted about tonight could name the problem exactly and do nothing about
+    it, and the answer was to go and ask someone else to run git.
+    """
+    import src.web.app as app_module
+
+    branch = {"has_it": False}
+    branch_without(monkeypatch, branch)
+    published: list[str] = []
+
+    def publish_it(scenario_dir, scenario_id):
+        published.append(scenario_id)
+        branch["has_it"] = True
+        return {"published": True, "removed": False, "already_current": False,
+                "reason": "", "path": f"scenarios/{scenario_id}.json", "url": "",
+                "ref": "origin/main"}
+
+    monkeypatch.setattr(app_module.publish, "publish_trip", publish_it)
+
+    page, _, errors = ui
+    page.reload(wait_until="networkidle")
+    open_night(page)
+    assert page.locator("#night-cloud").is_visible()
+
+    page.locator("#night-publish").click()
+    page.wait_for_selector("#night-cloud", state="hidden")
+
+    assert published == ["jp-ph"]
+    assert errors == []
+
+
+def test_a_publish_that_did_not_land_says_so_where_the_button_is(ui, monkeypatch):
+    """A button that has been pressed once and did nothing is worse than none.
+
+    The warning is still true afterwards - the branch has not got the trip - so
+    it stays, and the reason it has not got it goes with it.
+    """
+    import src.web.app as app_module
+
+    branch_without(monkeypatch, {"has_it": False})
+    monkeypatch.setattr(
+        app_module.publish, "publish_trip",
+        lambda *a: {"published": False, "removed": False, "already_current": False,
+                    "reason": "gh failed: HTTP 403: protected branch", "path": "",
+                    "url": "", "ref": "origin/main"},
+    )
+
+    page, _, errors = ui
+    page.reload(wait_until="networkidle")
+    open_night(page)
+    page.locator("#night-publish").click()
+    page.wait_for_timeout(900)
+
+    warning = page.locator("#night-cloud")
+    assert warning.is_visible()
+    assert "protected branch" in warning.inner_text()
+    assert page.locator("#night-publish").is_visible()
+    assert errors == []
+
+
+def test_saving_a_trip_puts_it_on_the_branch_without_being_asked(ui, monkeypatch):
+    """The whole point: a trip you have just edited is the one swept tonight.
+
+    Every new trip used to end the same way - saved here, absent there, and a
+    correct warning about it that only someone with a terminal could act on.
+    Saving is the moment the two can be brought together, so saving is when it
+    happens; the button above is what is left for when this could not.
+    """
+    import src.web.app as app_module
+
+    published: list[str] = []
+
+    def publish_it(scenario_dir, scenario_id):
+        published.append(scenario_id)
+        return {"published": True, "removed": False, "already_current": False,
+                "reason": "", "path": "", "url": "", "ref": "origin/main"}
+
+    monkeypatch.setattr(app_module.publish, "publish_trip", publish_it)
+
+    page, _, errors = ui
+    page.reload(wait_until="networkidle")
+    page.locator("#trip-name").fill("Japan then the Philippines, March")
+    page.locator("#save-btn").click()
+    page.wait_for_timeout(1500)
+
+    assert published == ["jp-ph"], published
+    assert errors == []
 
 
 # ------------------------------------------------------------ narrowing
@@ -2526,7 +2797,7 @@ def test_the_narrow_step_draws_one_chart_per_leg_on_one_axis(ui):
     page, scenarios, errors = ui
     seed_a_week_of_dates(scenarios.parent / "data")
     page.reload(wait_until="networkidle")
-    open_narrow(page)
+    open_results(page)
 
     charts = page.locator("#leg-charts .leg-chart")
     assert charts.count() == 3, page.locator("#leg-charts").inner_text()
@@ -2544,7 +2815,7 @@ def test_the_readout_prices_the_trip_the_markers_point_at(ui):
     page, scenarios, errors = ui
     seed_a_week_of_dates(scenarios.parent / "data")
     page.reload(wait_until="networkidle")
-    open_narrow(page)
+    open_results(page)
 
     readout = page.locator("#cursor-readout").inner_text()
     # 12,000 + 4,000 + 14,000, every leg bagged, on the cheapest departure.
@@ -2570,7 +2841,7 @@ def test_dragging_a_marker_past_a_stay_range_warns_and_does_not_block(ui):
     page, scenarios, errors = ui
     seed_a_week_of_dates(scenarios.parent / "data")
     page.reload(wait_until="networkidle")
-    open_narrow(page)
+    open_results(page)
 
     before = page.locator("#cursor-readout").inner_text()
     assert "fits every rule" in before, before
@@ -2598,7 +2869,7 @@ def test_a_pick_that_could_not_exist_says_so_and_cannot_be_followed(ui):
     page, scenarios, errors = ui
     seed_a_week_of_dates(scenarios.parent / "data")
     page.reload(wait_until="networkidle")
-    open_narrow(page)
+    open_results(page)
 
     drag_marker(page, 1, 0.0)  # onto the first leg's own departure day
 
@@ -2612,7 +2883,7 @@ def test_snapping_lands_on_what_the_results_table_calls_cheapest(ui):
     page, scenarios, errors = ui
     seed_a_week_of_dates(scenarios.parent / "data")
     page.reload(wait_until="networkidle")
-    open_narrow(page)
+    open_results(page)
 
     drag_marker(page, 1, 0.66)
     assert "fits every rule" not in page.locator("#cursor-readout").inner_text()
@@ -2633,8 +2904,6 @@ def test_saving_a_narrowing_reports_what_it_costs_and_persists(ui):
 
     page.fill("#narrow-back-start", "2027-01-28")
     page.fill("#narrow-back-end", "2027-02-02")
-    page.fill("#narrow-nights-min", "18")
-    page.fill("#narrow-nights-max", "22")
     page.locator("#narrow-save").click()
     page.wait_for_timeout(1200)
 
@@ -2642,10 +2911,11 @@ def test_saving_a_narrowing_reports_what_it_costs_and_persists(ui):
     assert "home 01-28" in page.locator("#narrow-state").inner_text()
     saved = json.loads((scenarios / "jp-ph.json").read_text(encoding="utf-8"))
     assert saved["return_focus_start"] == "2027-01-28"
-    assert saved["total_days"] == [18, 22]
 
-    cost = page.locator("#narrow-cost").inner_text()
-    assert "against" in cost and "whole window" in cost, cost
+    # The cost is written on the button that spends it, not in a line beside a
+    # checkbox two panels away.
+    cost = page.locator("#narrow-sweep-cost").inner_text()
+    assert "searches" in cost and "min" in cost, cost
     assert not errors
 
 
@@ -2655,17 +2925,23 @@ def test_an_impossible_narrowing_is_refused_in_words(ui):
     page.reload(wait_until="networkidle")
     open_narrow(page)
 
-    page.fill("#narrow-nights-min", "40")
-    page.fill("#narrow-nights-max", "50")
+    # Out on the 8th and home by the 12th is four nights; the stays below need
+    # at least eighteen. Stated in dates because that is what the panel now
+    # offers - the nights band lost its box when the stays took over saying how
+    # long the trip is.
+    page.fill("#narrow-out-start", "2027-01-08")
+    page.fill("#narrow-out-end", "2027-01-09")
+    page.fill("#narrow-back-start", "2027-01-11")
+    page.fill("#narrow-back-end", "2027-01-12")
     page.locator("#narrow-save").click()
     page.wait_for_timeout(900)
 
     message = page.locator("#narrow-message").inner_text()
-    assert "unreachable" in message, message
-    assert "9-11 at Japan" in message, message
+    assert "is what the stays allow" in message, message
+    assert "move one of the two windows" in message, message
     # Refused means not written, not written-and-warned.
     saved = json.loads((scenarios / "jp-ph.json").read_text(encoding="utf-8"))
-    assert saved["total_days"] is None
+    assert saved["focus_start"] is None
     assert not errors
 
 
@@ -2723,26 +2999,20 @@ def stay_box(page, index, slot):
 
 
 def test_the_stays_are_editable_where_they_are_quoted(ui):
-    """The ceiling on the nights band was a step away behind the gear.
-
-    "the stays allow 18-22" is computed from the stop ranges, so a band typed
-    past it does nothing and the panel could not say why - the number that
-    refuses you was not a number you could reach from here.
+    """The stays decide how long the trip is, and they were a step away behind
+    the gear. They are what a sweep prices and what makes a set of dates
+    reachable or not, so they belong beside the dates rather than in settings.
     """
     page, scenarios, errors = ui
     page.reload(wait_until="networkidle")
     open_narrow(page)
 
     assert page.locator("#narrow-stays input[data-stay]").count() == 4
-    assert "18–22" in page.locator("#narrow-nights-hint").inner_text()
 
     stay_box(page, 0, 1).fill("13")
-    page.locator("#narrow-nights-hint").click()  # blur, to fire onchange
+    page.locator("#narrow-state").click()  # blur, to fire onchange
     page.wait_for_timeout(600)
 
-    # Live off the boxes, not off the saved trip, or it keeps naming the range
-    # you have just changed.
-    assert "18–24" in page.locator("#narrow-nights-hint").inner_text()
     # Widening is a bigger sweep and nothing else here would say so.
     assert page.locator("#narrow-stays-alert").is_hidden()
 
@@ -2769,7 +3039,7 @@ def test_tightening_a_stay_says_what_it_costs(ui):
     open_narrow(page)
 
     stay_box(page, 0, 0).fill("10")
-    page.locator("#narrow-nights-hint").click()
+    page.locator("#narrow-state").click()
     page.wait_for_timeout(600)
 
     alert = page.locator("#narrow-stays-alert")
@@ -2795,23 +3065,25 @@ def test_saving_a_tighter_stay_moves_nothing_already_on_disk(ui):
     seed_a_week_of_dates(data)
     seed_searched_trip(scenarios, "2026-08-19T02-00-00Z")
     page.reload(wait_until="networkidle")
-    open_narrow(page)
+    open_results(page)
 
     before = page.locator("#results-table tbody tr").count()
     assert before > 0
 
+    open_narrow(page)
     stay_box(page, 0, 0).fill("11")
     # Blur first, as a person tabbing away would. This is what fires the
     # tightening warning, and while that warning sat above the buttons it grew
     # the panel between a click being aimed at Save and the click landing - the
     # press missed, and the test read an unsaved file. It is below them now.
-    page.locator("#narrow-nights-hint").click()
+    page.locator("#narrow-state").click()
     page.wait_for_timeout(600)
     page.locator("#narrow-save").click()
     page.wait_for_timeout(1200)
 
     saved = json.loads((scenarios / "jp-ph.json").read_text(encoding="utf-8"))
     assert saved["stops"][0]["stay_days"] == [11, 11]
+    open_results(page)
     assert page.locator("#results-table tbody tr").count() == before
     assert not errors
 
@@ -2835,7 +3107,7 @@ def test_the_cursor_judges_a_pick_against_the_trip_you_want_now(ui):
     page, scenarios, errors = ui
     _run_under_other_stays(scenarios, 12, 14)
     page.reload(wait_until="networkidle")
-    open_narrow(page)
+    open_results(page)
 
     readout = page.locator("#cursor-readout").inner_text()
     # The seeded legs are 10 nights apart, which the run's own 9-11 allowed.
@@ -2850,6 +3122,10 @@ def test_the_step_says_what_the_sweep_on_screen_was_priced_under(ui):
     page, scenarios, errors = ui
     _run_under_other_stays(scenarios, 12, 14)
     page.reload(wait_until="networkidle")
+    # Read the sweep first, then go and narrow it - which is the order the work
+    # is done in, and the order that puts a run on screen for the boxes to
+    # disagree with. The broad runs answer on Map it out now.
+    open_results(page)
     open_narrow(page)
 
     line = page.locator("#narrow-stays-sweep")
@@ -2889,7 +3165,7 @@ def test_every_picker_says_when_a_run_was_of_another_trip(ui):
     trip["stops"][0]["stay_days"] = [12, 14]
     (scenarios / "jp-ph.json").write_text(json.dumps(trip), encoding="utf-8")
     page.reload(wait_until="networkidle")
-    open_narrow(page)
+    open_results(page)
 
     for picker in ("#sweep-select", "#narrow-sweep"):
         label = page.locator(f'{picker} option[value="2026-08-19T02-00-00Z"]').inner_text()
@@ -2959,22 +3235,26 @@ def test_a_trip_field_written_here_is_not_undone_by_the_setup_form(ui):
 
 
 def test_following_a_rule_breaking_pick_still_works(ui):
-    """A watch prices the dates it is given; the stay ranges never governed it."""
+    """A check prices the dates it is given; the stay ranges never governed it."""
     page, scenarios, errors = ui
     seed_a_week_of_dates(scenarios.parent / "data")
     page.reload(wait_until="networkidle")
-    open_narrow(page)
+    open_results(page)
 
     drag_marker(page, 1, 0.66)
 
     page.locator("#cursor-watch").click()
     page.wait_for_timeout(900)
     message = page.locator("#cursor-message").inner_text()
-    assert "Following it" in message, message
+    assert "Saved as a preference" in message, message
     assert "breaks a rule" in message, message
 
     saved = json.loads((scenarios / "jp-ph.json").read_text(encoding="utf-8"))
-    assert len(saved["watches"]) == 1
+    assert len(saved["preferences"]) == 1
+    # The flights it was picked on come along with it, one search each and each
+    # tagged with the preference that brought it - which is what makes dropping
+    # the preference able to drop them too.
+    assert [w["source"] for w in saved["leg_watches"]] == ["2027-01-10"] * 3
     assert not errors
 
 
@@ -2982,7 +3262,7 @@ def test_expanding_a_leg_shows_one_line_per_airport_pair(ui):
     page, scenarios, errors = ui
     seed_a_week_of_dates(scenarios.parent / "data")
     page.reload(wait_until="networkidle")
-    open_narrow(page)
+    open_results(page)
 
     # Leg 0 is PRG/VIE -> NRT: two routes, so the toggle is live.
     toggle = page.locator("#leg-charts .leg-chart").nth(0).locator("button.small").first
@@ -3007,7 +3287,7 @@ def test_the_narrowing_can_be_switched_off_without_re_sweeping(ui):
     page.reload(wait_until="networkidle")
     open_narrow(page)
 
-    # The seeded legs chain to any span the stays allow, so no nights band can
+    # The seeded legs chain to any span the stays allow, so no stay range can
     # exclude them all. The return window can: they all fly home 30 January to
     # 3 February, and this asks for the week after — inside the trip window, so
     # it saves rather than being refused.
@@ -3019,6 +3299,8 @@ def test_the_narrowing_can_be_switched_off_without_re_sweeping(ui):
         page.locator("#narrow-message").inner_text()
     )
 
+    # Read where the broad runs are: the narrowing filters them there too.
+    open_results(page)
     rows = page.locator("#results-table tbody tr")
     assert rows.count() == 0, page.locator("#results-table").inner_text()
 
@@ -3042,7 +3324,7 @@ def test_a_hand_picked_trip_survives_leaving_the_step(ui):
     page, scenarios, errors = ui
     seed_a_week_of_dates(scenarios.parent / "data")
     page.reload(wait_until="networkidle")
-    open_narrow(page)
+    open_results(page)
 
     drag_marker(page, 1, 0.66)
     picked = page.locator("#cursor-readout").inner_text()
@@ -3050,8 +3332,8 @@ def test_a_hand_picked_trip_survives_leaving_the_step(ui):
 
     page.locator('#tabs button[data-tab="follow"]').click()
     page.wait_for_timeout(700)
-    page.locator('#tabs button[data-tab="narrow"]').click()
-    page.wait_for_timeout(1400)
+    open_results(page)
+    page.wait_for_timeout(700)
 
     assert page.locator("#cursor-readout").inner_text() == picked
     assert not errors
@@ -3076,7 +3358,7 @@ def test_the_explanations_start_out_of_the_way(ui):
     assert "off" in page.locator("#hints-toggle").inner_text()
     panel = page.locator('section[data-panel="narrow"] .panel').first
     assert "is-quiet" in (panel.get_attribute("class") or "")
-    assert not panel.locator(".panel__hint:not(.panel__hint--live)").first.is_visible()
+    assert not panel.locator(".explain").first.is_visible()
     assert not errors
 
 
@@ -3088,9 +3370,9 @@ def test_a_panel_can_be_asked_what_it_is_for(ui):
     panel.locator(".panel__info").click()
     page.wait_for_timeout(300)
 
-    prose = panel.locator(".panel__hint:not(.panel__hint--live)").first
+    prose = panel.locator(".explain").first
     assert prose.is_visible()
-    assert "Three constraints, intersected" in prose.inner_text()
+    assert "shape of the trip" in prose.inner_text()
     assert panel.locator(".panel__info").get_attribute("aria-expanded") == "true"
     assert not errors
 
@@ -3107,9 +3389,10 @@ def test_one_panel_opened_survives_a_reload(ui):
     open_narrow(page)
 
     panel = page.locator('section[data-panel="narrow"] .panel').first
-    assert panel.locator(".panel__hint:not(.panel__hint--live)").first.is_visible()
-    # And only that one. The switch is still off for everything else.
-    other = page.locator('section[data-panel="narrow"] .panel').nth(1)
+    assert panel.locator(".explain").first.is_visible()
+    # And only that one. The switch is still off for everything else - checked
+    # on another step's panel, since the narrowing step now holds just this one.
+    other = page.locator('section[data-panel="final-charts"] .panel').first
     assert "is-quiet" in (other.get_attribute("class") or "")
     assert not errors
 
@@ -3138,25 +3421,44 @@ def test_the_switch_overrules_the_panels_that_disagreed_with_it(ui):
     page.locator("#hints-toggle").click()      # everything on
     page.wait_for_timeout(300)
     assert "on" in page.locator("#hints-toggle").inner_text()
-    assert panel.locator(".panel__hint:not(.panel__hint--live)").first.is_visible()
+    assert panel.locator(".explain").first.is_visible()
 
     page.locator("#hints-toggle").click()      # and everything off again
     page.wait_for_timeout(300)
-    assert not panel.locator(".panel__hint:not(.panel__hint--live)").first.is_visible()
+    assert not panel.locator(".explain").first.is_visible()
     assert not errors
 
 
-def test_a_live_line_is_never_taken_away_with_the_prose(ui):
-    """`#narrow-cost` says what the next sweep costs and moves as the boxes are
-    typed. Collapsing it would hide the one number the panel is deciding by."""
+def test_a_setting_with_no_field_of_its_own_is_a_control_and_not_a_sentence(ui):
+    """The nights-away band, which the narrowing panel has no box for.
+
+    It went on filtering every sweep, and the only thing naming it was a
+    paragraph - so that paragraph had to be exempt from the explanations switch
+    to stay visible, and one live fact kept a screenful of teaching permanently
+    on screen. The fix is not a better exemption: a fact that matters gets a
+    control, and a control is not the kind of thing the switch is about.
+    """
     page, scenarios, errors = ui
-    seed_a_week_of_dates(scenarios.parent / "data")
+    narrow_the_trip(scenarios, total_days=[24, 28])
     page.reload(wait_until="networkidle")
     open_narrow(page)
 
-    cost = page.locator("#narrow-cost")
-    assert cost.is_visible()
-    assert "searches" in cost.inner_text()
+    assert "Explanations: off" in page.locator("#hints-toggle").inner_text()
+    # The band is stated by the badge and removable by its own chip, with every
+    # word of prose on the step collapsed.
+    assert page.locator("#narrow-role").is_hidden()
+    chip = page.locator("#narrow-nights-clear")
+    assert chip.is_visible()
+    assert "nights away" in chip.inner_text()
+    assert "nights" in page.locator("#narrow-state").inner_text()
+
+    # And it clears only itself: `Clear it` drops the two date windows with it,
+    # which is a different thing to want and was the only way to be rid of this.
+    chip.click()
+    page.wait_for_timeout(1000)
+    saved = json.loads((scenarios / "jp-ph.json").read_text(encoding="utf-8"))
+    assert saved["total_days"] is None
+    assert saved["focus_start"], "the departure window should have survived"
     assert not errors
 
 
@@ -3171,7 +3473,7 @@ def test_each_leg_of_a_pick_can_be_booked_and_followed(ui):
     page, scenarios, errors = ui
     seed_for_filters(scenarios, url="https://example.test/search/PRG-NRT")
     page.reload(wait_until="networkidle")
-    open_narrow(page)
+    open_results(page)
 
     rows = page.locator("#cursor-readout .cursor-readout__leg")
     assert rows.count() >= 2, rows.count()
@@ -3189,7 +3491,7 @@ def test_a_leg_the_sweep_saved_no_link_for_says_so(ui):
     page, scenarios, errors = ui
     seed_for_filters(scenarios)
     page.reload(wait_until="networkidle")
-    open_narrow(page)
+    open_results(page)
 
     assert page.locator("#cursor-readout a").count() == 0
     assert "no link saved" in page.locator("#cursor-readout").inner_text()
@@ -3202,7 +3504,7 @@ def test_following_a_leg_from_the_charts_reaches_the_watch(ui):
     page, scenarios, errors = ui
     seed_for_filters(scenarios)
     page.reload(wait_until="networkidle")
-    open_narrow(page)
+    open_results(page)
 
     page.locator("#cursor-readout button", has_text="Follow").first.click()
     page.wait_for_timeout(1200)
@@ -3218,7 +3520,7 @@ def test_a_row_of_the_ranking_can_be_put_on_the_charts(ui):
     page, scenarios, errors = ui
     seed_for_filters(scenarios)
     page.reload(wait_until="networkidle")
-    open_narrow(page)
+    open_results(page)
 
     row = page.locator("#results-table tbody tr[data-dates]").first
     dates = row.get_attribute("data-dates").split(",")
@@ -3235,7 +3537,7 @@ def test_a_pick_is_findable_in_the_ranking_below_it(ui):
     page, scenarios, errors = ui
     seed_for_filters(scenarios)
     page.reload(wait_until="networkidle")
-    open_narrow(page)
+    open_results(page)
 
     page.locator("#cursor-snap").click()
     page.wait_for_timeout(900)
@@ -3253,7 +3555,7 @@ def test_a_combination_the_ranking_never_offered_says_so_rather_than_nothing(ui)
     page, scenarios, errors = ui
     seed_a_week_of_dates(scenarios.parent / "data")
     page.reload(wait_until="networkidle")
-    open_narrow(page)
+    open_results(page)
 
     # Past the stay range, so the ranking cannot contain it: `combine` only ever
     # chains trips that obeyed the stays.
@@ -3278,8 +3580,20 @@ def test_a_combination_the_ranking_never_offered_says_so_rather_than_nothing(ui)
 
 
 def open_final(page):
-    page.locator('#tabs button[data-tab="final"]').click()
+    """The narrowed runs: the narrowing step, which is now only those.
+
+    It was a step of its own, then one side of a switch on this step, and is
+    now the step itself - the broad runs moved to Map it out. One helper still,
+    so every test below says "show me the narrowed runs" rather than knowing
+    how the step is built.
+    """
+    page.locator('#tabs button[data-tab="narrow"]').click()
     page.wait_for_timeout(900)
+
+
+def open_broad(page):
+    """The broad runs, which now live under Map it out -> Search results."""
+    open_sub(page, "results")
 
 
 def narrow_the_trip(scenarios, **overrides):
@@ -3310,74 +3624,146 @@ def broad_status(**overrides):
     } | overrides
 
 
-def test_the_final_sweeps_step_sits_between_narrowing_and_following(ui):
-    """Order is the argument. The tabs are the order the work is done in."""
+def test_the_steps_read_in_the_order_the_work_is_done(ui):
+    """Order is the argument. The tabs are the order the work is done in.
+
+    Three, not four. "Final sweeps" was a copy of the narrowing step's two
+    panels drawn over the narrowed runs, which is one step read two ways - it
+    is a switch inside that step now.
+    """
     page, _, errors = ui
     labels = page.locator("#tabs button[data-tab]").all_inner_texts()
 
-    assert [t.strip() for t in labels][:4] == [
-        "Map it out", "Narrow it down", "Final sweeps", "Follow it",
+    assert [t.strip() for t in labels][:3] == [
+        "Map it out", "Narrow it down", "Follow it",
     ]
+    assert "Final sweeps" not in " ".join(labels)
     assert not errors
 
 
 def test_a_trip_narrowed_to_nothing_says_so_instead_of_offering_a_run(ui):
-    """A final sweep of it would be the broad sweep, run twice."""
-    page, _, errors = ui
-    open_final(page)
+    """A narrow sweep of it would be the broad sweep, run twice.
 
-    said = page.locator("#final-narrowing").inner_text()
-    assert "Nothing has been narrowed" in said, said
+    The controls sit with the boxes that decide what they would search, so the
+    notice is the cost line beside the tick rather than a paragraph on a step
+    of its own. The server refuses it too - these are the notice, not the guard.
+    """
+    page, _, errors = ui
+    open_narrow(page)
+
+    said = page.locator("#narrow-sweep-cost").inner_text()
+    assert "nothing narrowed yet" in said, said
     assert page.locator("#final-run-btn").is_disabled()
-    assert page.locator("#final-run-cloud-btn").is_disabled()
+    # The tick lives in the scheduling panel now; it is refused for the same
+    # reason wherever it is shown.
+    assert page.locator("#sweep-narrowing").is_disabled()
     assert not errors
 
 
-def test_the_step_says_what_a_final_sweep_would_search_and_what_it_costs(ui):
+def test_the_panel_says_what_a_narrow_sweep_would_search_and_what_it_costs(ui):
     page, scenarios, errors = ui
     narrow_the_trip(scenarios)
     page.reload(wait_until="networkidle")
-    open_final(page)
+    open_narrow(page)
 
-    said = page.locator("#final-narrowing").inner_text()
-    assert "2027-01-08" in said and "2027-01-12" in said, said
+    # What it would search is the boxes themselves, which is the whole reason
+    # the run button sits under them.
+    assert page.locator("#narrow-out-start").input_value() == "2027-01-08"
+    assert page.locator("#narrow-out-end").input_value() == "2027-01-12"
     assert not page.locator("#final-run-btn").is_disabled()
-    # In the badge, beside the title, exactly where the sibling Run panel on
-    # Map it out puts the same figure. It used to be a third line under the
-    # sentence, while the badge repeated that sentence word for word.
-    cost = page.locator("#final-state").inner_text()
+
+    # On the button, because pressing it is what spends the figure.
+    cost = page.locator("#narrow-sweep-cost").inner_text()
     assert "searches" in cost and "min" in cost, cost
     assert not errors
 
 
-def test_running_from_the_final_step_sweeps_the_narrowing_and_not_the_window(ui, monkeypatch):
-    """The whole feature, as one keystroke: the button starts `mode=final`."""
+def test_the_tick_decides_whether_the_afternoon_slots_run(ui):
+    """Narrowing to read and narrowing to re-price are different asks.
+
+    They used to be one: `plan_sweep --final` selected on having a narrowing at
+    all, so filtering the charts to a rough plan silently bought two more runs
+    a day.
+    """
     page, scenarios, errors = ui
     narrow_the_trip(scenarios)
     page.reload(wait_until="networkidle")
-    seen, started = catch_the_sweep(monkeypatch)
-    open_final(page)
+    # Both scheduled runs are configured in one editor now: the nightly sweep of
+    # the whole window and the twice-daily sweep of the narrowing. They were a
+    # tick on two different steps, neither naming the other.
+    open_schedule(page)
+
+    page.locator("#sweep-narrowing").uncheck()
+    page.locator("#night-save-btn").click()
+    page.wait_for_timeout(900)
+
+    saved = json.loads((scenarios / "jp-ph.json").read_text(encoding="utf-8"))
+    assert saved["sweep_narrowing"] is False
+    # And it still narrows what you read, which is the half that is kept.
+    assert saved["focus_start"] == "2027-01-08"
+
+    # Said on the button that would have run it, which is where the question is
+    # asked. It used to be said only in a paragraph, and that paragraph had to
+    # be exempt from the explanations switch to be readable at all.
+    open_narrow(page)
+    # The nightly sweep of the window is untouched, so it still says "nightly";
+    # what has gone is the narrowed run this step is about.
+    summary = page.locator("#narrow-schedule-summary").inner_text()
+    assert "narrowed" not in summary, summary
+    assert "nightly" in summary, summary
+
+    # And in full, one click away, for the once it is read.
+    page.locator('section[data-panel="narrow"] .panel__info').first.click()
+    page.wait_for_timeout(300)
+    role = page.locator("#narrow-role").inner_text()
+    assert "filter" in role, role
+    assert "scheduled sweeping is off" in role, role
+    assert not errors
+
+def test_running_from_the_narrowing_panel_sweeps_the_narrowing_not_the_window(ui, monkeypatch):
+    """The whole feature, as one keystroke: the button starts `mode=final`.
+
+    On the panel holding the boxes, because that is what it would search. In
+    the cloud, like every sweep: one address is answered about 120 searches, so
+    the runner that shards the plan is the only one that finishes it.
+    """
+    page, scenarios, errors = ui
+    narrow_the_trip(scenarios)
+    page.reload(wait_until="networkidle")
+    seen, started = catch_the_sweep(monkeypatch, cloud=True)
+    open_narrow(page)
 
     page.locator("#final-run-btn").click()
 
-    assert started.wait(timeout=15), "the final sweep never started"
+    assert started.wait(timeout=15), "the narrowed sweep never started"
     assert seen["mode"] == "final", seen
     assert not errors
 
 
 def test_the_narrowing_step_offers_only_the_broad_runs(ui):
-    """It is where a trip is picked, and picking needs the whole window drawn."""
+    """Each step offers its own runs and nobody else's.
+
+    They used to be two sides of a switch on one step, which is how the results
+    of a sweep over the whole window came to be read on the tab named for
+    cutting the window down. Search results draws the broad runs beside the
+    buttons that start them; the narrowing step draws the narrowed ones.
+    """
     page, scenarios, errors = ui
     narrow_the_trip(scenarios)
     seed_sweep(scenarios.parent / "data", "2026-08-20T02-00-00Z", status=broad_status())
     seed_sweep(scenarios.parent / "data", "2026-08-21T13-00-00Z", status=final_status())
     page.reload(wait_until="networkidle")
-    open_narrow(page)
 
+    open_results(page)
     for picker in ("#narrow-sweep", "#sweep-select"):
         offered = page.locator(f"{picker} option").all_inner_texts()
         assert len(offered) == 1, f"{picker} offered {offered}"
         assert "final" not in offered[0], f"{picker} offered {offered}"
+
+    open_final(page)
+    for picker in ("#final-sweep-charts", "#final-sweep-select"):
+        offered = page.locator(f"{picker} option").all_inner_texts()
+        assert len(offered) == 1, f"{picker} offered {offered}"
     assert not errors
 
 
@@ -3508,13 +3894,77 @@ def test_the_final_step_draws_the_narrowed_run_one_chart_per_leg(ui):
     assert not errors
 
 
-def test_the_final_step_reads_plan_then_pick_then_rank(ui):
-    """The same rhythm as the step before it. Order is the argument."""
+
+
+def test_opening_a_step_redraws_it_rather_than_unhiding_it(ui):
+    """A chart drawn into a hidden section measures its container at zero width.
+
+    So a step is re-rendered when it is opened, not merely unhidden - otherwise
+    the narrowed charts arrive as axes with nothing on them. The population
+    switch is gone; moving between steps is what has to redraw now.
+    """
+    page, scenarios, errors = ui
+    narrow_the_trip(scenarios)
+    seed_a_narrowed_week(scenarios.parent / "data")
+    page.reload(wait_until="networkidle")
+
+    open_results(page)
+    open_final(page)
+
+    width = page.locator("#final-leg-charts svg").first.get_attribute("width")
+    assert int(width) > 200, width
+    assert not errors
+
+
+def test_each_population_keeps_the_run_it_was_reading(ui):
+    """Each step keeps the run it was reading.
+
+    Going to the narrowed runs and back must not lose the broad run you had
+    chosen - which is what one shared `state.stamp` would have done. The two
+    are on two steps now rather than two sides of a switch; the property is the
+    same and is the reason `state.finalStamp` exists.
+    """
+    page, scenarios, errors = ui
+    narrow_the_trip(scenarios)
+    seed_sweep(scenarios.parent / "data", "2026-08-19T02-00-00Z", status=broad_status())
+    seed_sweep(scenarios.parent / "data", "2026-08-20T02-00-00Z", status=broad_status())
+    seed_a_narrowed_week(scenarios.parent / "data")
+    page.reload(wait_until="networkidle")
+
+    open_results(page)
+    chosen = page.locator("#narrow-sweep").evaluate("el => el.options[1].value")
+    page.locator("#narrow-sweep").select_option(chosen)
+    page.wait_for_timeout(900)
+
+    open_final(page)
+    open_results(page)
+    assert page.locator("#narrow-sweep").input_value() == chosen
+    assert not errors
+
+
+def test_the_narrowing_step_reads_plan_then_pick_then_rank(ui):
+    """Plan, then pick, then rank. Order is the argument.
+
+    One population per step now. The narrowing is stated first, the narrowed
+    runs are drawn per leg under it, and the ranking of those runs comes last -
+    and the broad runs answer on the step that starts them, so no panel on this
+    step exists twice over.
+    """
     page, _, errors = ui
-    panels = page.locator('section[data-step="final"]').evaluate_all(
+    panels = page.locator('section[data-step="narrow"]').evaluate_all(
         "els => els.map((e) => e.dataset.panel)"
     )
-    assert panels == ["final-plan", "final-charts", "final-results"], panels
+    assert panels == ["narrow", "final-charts", "final-results"], panels
+
+    # And Map it out reads the same way: fill the form in, then read either
+    # kind of answer it produces.
+    on_map = page.locator('section[data-step="map"]').evaluate_all(
+        "els => els.map((e) => [e.dataset.sub, e.dataset.panel])"
+    )
+    assert on_map == [
+        ["options", "search"], ["probe", "explore"],
+        ["results", "broad-charts"], ["results", "results"],
+    ], on_map
     assert not errors
 
 
@@ -3634,14 +4084,21 @@ def bottom_of(page, selector: str) -> float:
 
 @pytest.mark.parametrize(
     ("field", "button"),
-    [("#depth", "#run-local-btn"), ("#final-depth", "#final-run-btn")],
+    [
+        ("#leg-watch-date", "#leg-watch-add-btn"),
+        ("#preference-add-label", "#preference-add-btn"),
+    ],
 )
 def test_a_control_and_the_button_beside_it_sit_on_one_line(ui, field, button):
-    page, scenarios, errors = ui
-    narrow_the_trip(scenarios)
-    page.reload(wait_until="networkidle")
-    if field.startswith("#final"):
-        open_final(page)
+    """Both rows on Follow it, because that is where the pairing still lives.
+
+    It used to check the depth select against the Save beside it. Both scheduled
+    runs are configured in a dialog now, one to a fenced block, so there is no
+    field-beside-button row left on that panel to measure - the rule is the
+    same, and these are the rows it still applies to.
+    """
+    page, _, errors = ui
+    open_watch(page)
 
     assert abs(bottom_of(page, field) - bottom_of(page, button)) <= 1.0, (
         f"{field} and {button} do not share a bottom edge"
@@ -3653,11 +4110,13 @@ def test_the_same_control_is_the_same_size_on_every_step(ui):
     """The two selects already agree, because `label.field` sets the size and
     the extra `.small` on one of them changes nothing. Pinned so that stripping
     the redundant class - or adding a size to one panel - cannot quietly make
-    the same control two different sizes on two tabs."""
+    the same control two different sizes on two panels."""
     page, scenarios, errors = ui
     narrow_the_trip(scenarios)
     page.reload(wait_until="networkidle")
-    open_final(page)
+    # Both selects are in the schedule dialog now, one to a fenced block. Two
+    # depths for two runs, still one control, still one size.
+    open_schedule(page)
 
     sizes = {
         which: page.locator(which).evaluate("el => getComputedStyle(el).fontSize")
@@ -3674,14 +4133,617 @@ def test_the_trend_says_it_is_counting_rather_than_showing_nothing(ui):
     page, scenarios, errors = ui
     for day in range(20, 24):
         seed_sweep(scenarios.parent / "data", f"2026-08-{day}T02-00-00Z", status=broad_status())
+
     page.reload(wait_until="networkidle")
 
+    # Held open rather than raced. Reading "immediately" used to win the race,
+    # and stopped winning once this step gave up fetching a second chart - but a
+    # faster panel is not a reason to stop saying it is counting, and a test
+    # that only passes while the app is slow is not a test of anything.
+    #
+    # The handler never answers and never blocks: a blocking wait inside a sync
+    # route handler stalls the whole driver, so the click, the timeout and the
+    # read all queue up behind it and the assertion runs against a chart that
+    # has long since drawn.
+    page.route("**/api/history/**", lambda route: None)
+
     page.locator('#tabs button[data-tab="follow"]').click()
-    # Read immediately, before the request can have come back.
+    page.wait_for_timeout(600)
     said = page.locator("#chart-history").inner_text()
+    page.unroute("**/api/history/**")
     assert "Reading every sweep" in said, said
 
     # And it is replaced by the chart, not left there.
     page.wait_for_timeout(4000)
     assert page.locator("#chart-history svg").count() == 1
+    assert not errors
+
+
+# ------------------------------------------------------ your airports, ranked
+#
+# How easy an airport is to get to is a third axis, and nothing knew it. The
+# chip row was sorted by how often a code appears in your saved trips, which
+# cannot discover convenience - the usual reason a convenient airport goes
+# unused is that it has no long-haul inventory.
+
+
+def open_home_airports(page):
+    page.locator('#tabs button[data-tab="setup"]').click()
+    page.wait_for_timeout(600)
+    page.locator('section[data-panel="home-airports"]').scroll_into_view_if_needed()
+    page.wait_for_timeout(300)
+
+
+def add_home_tier(page, *codes):
+    """One rank, holding however many airports are equally awkward.
+
+    The list is tiered: Prague and Vienna are both a morning, and forcing an
+    order on them invents a preference nobody holds.
+    """
+    page.locator("#home-airports-add-tier").click()
+    page.wait_for_timeout(300)
+    index = page.locator("#home-airports .tier").count() - 1
+    for code in codes:
+        box = page.locator(f'#home-airports [data-picker="home-{index}"] .typeahead input')
+        box.click()
+        # Typed at human speed and submitted immediately, because a scripted
+        # click on a suggestion has passed here against a picker that was
+        # entirely broken.
+        box.type(code, delay=60)
+        page.wait_for_timeout(400)
+        box.press("Enter")
+        page.wait_for_timeout(300)
+
+
+def test_a_ranking_becomes_the_chips_in_the_order_it_was_given(ui):
+    page, scenarios, errors = ui
+    open_home_airports(page)
+    # BCN and KIX: the two airports in the fixture catalogue that the fixture
+    # trip does not already use, so the chip row has something to offer.
+    add_home_tier(page, "BCN")
+    add_home_tier(page, "KIX")
+    page.locator("#home-airports-save").click()
+    page.wait_for_timeout(900)
+
+    saved = json.loads(
+        (scenarios.parent / "data" / "home_airports.json").read_text(encoding="utf-8")
+    )
+    assert saved["tiers"] == [["BCN"], ["KIX"]]
+    assert "Saved" in page.locator("#home-airports-message").inner_text()
+
+    page.locator('#tabs button[data-tab="map"]').click()
+    page.wait_for_timeout(600)
+    offered = page.locator("#origins .chips--suggest .chip__code").all_inner_texts()
+    # PRG and VIE are already in the trip, so they are not offered again - the
+    # row has always listed what is *not* on the trip yet.
+    assert [t.strip() for t in offered] == ["+ BCN", "+ KIX"], offered
+    assert not errors
+
+
+def test_two_airports_can_share_a_rank(ui):
+    """The reason the list is tiered rather than flat, and the reason a trip can
+    inherit it: `preferred_origins` has this shape already."""
+    page, scenarios, errors = ui
+    open_home_airports(page)
+    add_home_tier(page, "BCN", "KIX")
+    page.locator("#home-airports-save").click()
+    page.wait_for_timeout(900)
+
+    saved = json.loads(
+        (scenarios.parent / "data" / "home_airports.json").read_text(encoding="utf-8")
+    )
+    assert saved["tiers"] == [["BCN", "KIX"]]
+    # The badge shows the shape, so a shared rank is visible without opening it.
+    assert page.locator("#home-airports-state").inner_text() == "BCN / KIX"
+    assert not errors
+
+
+def test_a_trip_that_ranks_nothing_says_it_follows_your_airports(ui):
+    """The dedupe, stated where the override is. An empty override used to read
+    as "no preference - only the cheapest is ever reported", which stopped being
+    true the moment a trip could inherit."""
+    page, _, errors = ui
+    open_home_airports(page)
+    add_home_tier(page, "BCN")
+    page.locator("#home-airports-save").click()
+    page.wait_for_timeout(900)
+
+    open_trip_airports(page)
+    assert "Following Your airports: BCN" in page.locator("#preferred-inherited").inner_text()
+    assert not errors
+
+
+
+# --------------------------------------------------------- switching trips
+#
+# The picker had never been switched in a browser test: the fixture saves one
+# trip, and the assertion above about the list is the whole of the coverage it
+# had. So nothing noticed that `loadScenario` fills the route form and stops
+# there - every step renderer runs from `showTab` alone, and the step you are
+# already standing on is never told the trip underneath it changed.
+
+
+def save_second_trip(scenarios, **overrides):
+    """A second trip, deliberately unlike the fixture's in every visible way.
+
+    `zz-` so it sorts after `jp-ph` and the page still opens on the trip every
+    other test in this file expects. One stop rather than two, so even the
+    number of date boxes under the preference form differs.
+    """
+    save_scenario(
+        Scenario(
+            id="zz-other",
+            name="Barcelona to Osaka",
+            origins=["BCN"],
+            stops=[Stop(airports=["KIX"], stay_days=(4, 6), label="Japan")],
+            window_start=date(2027, 3, 1),
+            window_end=date(2027, 3, 28),
+            focus_start=date(2027, 3, 2),
+            focus_end=date(2027, 3, 6),
+            total_days=(4, 6),
+            depth="quick",
+            **overrides,
+        ),
+        scenarios,
+    )
+
+
+def switch_trip(page, trip_id):
+    page.locator("#scenario-select").select_option(trip_id)
+    page.wait_for_timeout(1200)
+
+
+def test_switching_trips_repaints_the_narrowing_step_you_are_standing_on(ui):
+    """The complaint, exactly: "the switcher doesn't seem to load my trip".
+
+    It loaded. `loadScenario` refilled the route form and `pollStatus` refilled
+    the run pickers, and nothing redrew the step in front of you - so the boxes,
+    the badge and the charts went on describing the trip you had just left. On a
+    step you are not looking at this is invisible; on the one you are, it reads
+    as the switch having done nothing at all.
+    """
+    page, scenarios, errors = ui
+    narrow_the_trip(scenarios)
+    save_second_trip(scenarios)
+    page.reload(wait_until="networkidle")
+    page.wait_for_selector("#origins .chip__code")
+
+    open_narrow(page)
+    assert page.locator("#narrow-out-start").input_value() == "2027-01-08"
+
+    switch_trip(page, "zz-other")
+
+    assert page.locator("#narrow-out-start").input_value() == "2027-03-02"
+    assert page.locator("#narrow-out-end").input_value() == "2027-03-06"
+    assert "03-02" in page.locator("#narrow-state").inner_text()
+    assert not errors
+
+
+def test_switching_trips_repaints_what_you_are_following(ui):
+    """The same bug on the other step, where it costs more.
+
+    A preference list left over from the previous trip is not merely stale: the
+    prices in it are a different trip's, and the row offers to move dates that
+    do not belong to the trip named in the picker.
+    """
+    page, scenarios, errors = ui
+    save_second_trip(scenarios)
+    page.reload(wait_until="networkidle")
+    page.wait_for_selector("#origins .chip__code")
+
+    open_watch(page)
+    # Two stops, so three legs, so three date boxes on the by-hand form.
+    assert page.locator("#preference-add-dates input").count() == 3
+
+    switch_trip(page, "zz-other")
+
+    assert page.locator("#preference-add-dates input").count() == 2
+    assert not errors
+
+
+def test_a_server_that_stopped_answering_is_named_not_silent(ui):
+    """A dead server used to make the picker look broken instead of absent.
+
+    `api()` let `fetch`'s own "Failed to fetch" through, and the switch handler
+    had no `catch`, so the rejection went nowhere: no message, no status strip,
+    nothing. That is the same shape as the stale-server trap this app already
+    carries a blocker for, and it deserves the same sentence rather than a
+    silence to be diagnosed from scratch.
+    """
+    page, scenarios, _ = ui
+    save_second_trip(scenarios)
+    page.reload(wait_until="networkidle")
+    page.wait_for_selector("#origins .chip__code")
+
+    page.route("**/api/**", lambda route: route.abort())
+    switch_trip(page, "zz-other")
+
+    assert "not answering" in page.locator("body").inner_text()
+
+
+
+
+def test_starting_a_new_trip_disables_the_narrow_sweep_buttons_where_you_stand(ui):
+    """The three buttons on "Map it out" were in `updateNewTripUi` and these
+    two, which moved onto the narrowing panel from a step of their own, were not.
+
+    Pressed from the step they live on, which is the only place it shows: the
+    narrowing is what usually disables them, and leaving and re-entering the step
+    disables them on the way in for that reason instead. Stay put, and they were
+    left enabled over a trip that has no file to sweep.
+    """
+    page, scenarios, errors = ui
+    narrow_the_trip(scenarios)
+    page.reload(wait_until="networkidle")
+    page.wait_for_selector("#origins .chip__code")
+    open_narrow(page)
+    assert page.locator("#final-run-btn").is_enabled()
+
+    # No navigation afterwards: the bug is what the step is left showing.
+    page.locator("#new-trip-btn").click()
+    page.wait_for_timeout(800)
+
+    assert page.locator("#final-run-btn").is_disabled()
+    assert not errors
+
+
+def test_switching_back_draws_the_charts_and_not_an_empty_state(ui):
+    """The same bug one layer down, and the reason the fix is ordered.
+
+    Every panel on this step draws from `state.sweeps`, and `pollStatus` is what
+    refreshes that. Redrawing the step before it ran painted the new trip's boxes
+    and badge correctly over the *previous* trip's list of runs, found nothing in
+    it this trip could draw, and left "no broad sweep with flights on disk yet"
+    above a trip with thirteen of them. Right boxes, empty charts - which is a
+    more convincing way of looking broken than not repainting at all.
+    """
+    page, scenarios, errors = ui
+    seed_sweep(scenarios.parent / "data", "2026-08-11T09-00-00Z", status=broad_status())
+    save_second_trip(scenarios)
+    page.reload(wait_until="networkidle")
+    page.wait_for_selector("#origins .chip__code")
+
+    open_results(page)
+    assert page.locator("#leg-charts .leg-chart").count() == 3
+
+    switch_trip(page, "zz-other")
+    assert page.locator("#leg-charts .leg-chart").count() == 0
+
+    switch_trip(page, "jp-ph")
+    assert page.locator("#leg-charts .leg-chart").count() == 3, (
+        page.locator("#leg-charts").inner_text()
+    )
+    assert not errors
+
+
+def test_the_page_opens_on_a_trip_that_is_being_swept(ui):
+    """`scenarios[0]` is alphabetical by id, which is nobody's answer.
+
+    On the real machine that opened a switched-off trip with no sweeps on disk,
+    named two words differently from the trip actually being decided. Its empty
+    charts are indistinguishable from a trip whose data has gone.
+    """
+    page, scenarios, errors = ui
+    save_second_trip(scenarios, enabled=True)
+    save_scenario(
+        Scenario(
+            id="aa-abandoned",
+            name="Abandoned idea",
+            origins=["PRG"],
+            stops=[Stop(airports=["NRT"], stay_days=(9, 11))],
+            window_start=date(2027, 1, 5),
+            window_end=date(2027, 2, 8),
+            enabled=False,
+        ),
+        scenarios,
+    )
+    page.evaluate("() => localStorage.removeItem('tickets-bot:last-trip')")
+    page.reload(wait_until="networkidle")
+    page.wait_for_selector("#origins .chip__code")
+
+    assert page.locator("#scenario-select").input_value() == "jp-ph"
+    assert not errors
+
+
+def test_the_trip_you_were_last_on_is_the_one_that_reopens(ui):
+    """A reload in the middle of deciding should not move you to another trip."""
+    page, scenarios, errors = ui
+    save_second_trip(scenarios, enabled=True)
+    page.reload(wait_until="networkidle")
+    page.wait_for_selector("#origins .chip__code")
+
+    switch_trip(page, "zz-other")
+    page.reload(wait_until="networkidle")
+    page.wait_for_selector("#origins .chip__code")
+
+    assert page.locator("#scenario-select").input_value() == "zz-other"
+    assert not errors
+
+
+def test_the_step_says_what_the_dates_do_with_explanations_collapsed(ui):
+    """Explanations are off by default, and that is how this step lost its words.
+
+    Everything the panel said about itself was `.panel__hint`, which collapses -
+    so the default view was a pile of date boxes, a checkbox and four buttons
+    with no sentence anywhere saying whether the boxes filter, or sweep, or both.
+    The questions that answers are the ones the step is unusable without.
+    """
+    page, scenarios, errors = ui
+    narrow_the_trip(scenarios)
+    page.reload(wait_until="networkidle")
+    page.wait_for_selector("#origins .chip__code")
+    open_narrow(page)
+
+    # The default, stated rather than assumed: this is the view being tested.
+    assert "Explanations: off" in page.locator("#hints-toggle").inner_text()
+
+    # It used to be answered by an exempt paragraph, which is how the switch
+    # came to be half working. The answers are in things the switch cannot
+    # touch: a badge saying what is set, and a button saying what it buys.
+    assert "out " in page.locator("#narrow-state").inner_text()
+    assert page.locator("#narrow-trip-chain").inner_text().strip()
+    cost = page.locator("#narrow-sweep-cost").inner_text()
+    assert "searches" in cost and "min" in cost, cost
+    assert page.locator("#narrow-schedule-summary").inner_text().strip()
+
+    # And the sentence itself is one click away, for the once it is read.
+    page.locator('section[data-panel="narrow"] .panel__info').first.click()
+    page.wait_for_timeout(300)
+    text = page.locator("#narrow-role").inner_text()
+    assert "filter" in text
+    assert "13:00" in text and "20:00" in text
+    assert not errors
+
+
+def test_switching_the_narrow_sweep_off_changes_what_the_step_says(ui):
+    """Off is not a quieter version of on; it means the dates only filter."""
+    page, scenarios, errors = ui
+    narrow_the_trip(scenarios, sweep_narrowing=False)
+    page.reload(wait_until="networkidle")
+    page.wait_for_selector("#origins .chip__code")
+    open_narrow(page)
+
+    text = page.locator("#narrow-role").inner_text()
+    assert "scheduled sweeping is off" in text, text
+    assert "nightly sweep" in text, "it runs whatever this decision says"
+    assert not errors
+
+
+# ------------------------------------------------- the schedule, in one place
+#
+# `Scheduled sweeping` appears in three places and all three used to call
+# `showTab('night')`, which opened the whole gear - nine panels, one of them
+# about scheduling. A dialog rather than three expanders because three copies of
+# the same four ids is a checkbox that reads whichever the DOM found first and
+# saves the other.
+
+
+def test_the_schedule_button_opens_the_schedule_and_not_the_whole_gear(ui):
+    page, _, errors = ui
+    page.locator("#schedule-btn").click()
+    page.wait_for_selector("#schedule-dialog[open]")
+
+    # The gear's own panels are not what was opened.
+    assert page.locator('section[data-panel="cloud"]').is_hidden()
+    assert page.locator('section[data-panel="sources"]').is_hidden()
+    # And the four controls that decide the schedule are all in it.
+    for control in ("#enabled", "#depth", "#sweep-narrowing", "#final-depth"):
+        assert page.locator(f"#schedule-dialog {control}").is_visible(), control
+    assert not errors
+
+
+def test_the_same_editor_opens_from_all_three_places(ui):
+    """One editor, three ways in. Two copies of `#enabled` would be a checkbox
+    that reads whichever the DOM found first and saves the other."""
+    page, _, errors = ui
+    assert page.locator("#enabled").count() == 1
+    assert page.locator("#depth").count() == 1
+
+    for opener, step in (
+        ("#schedule-btn", "map"),
+        ("#narrow-schedule-btn", "narrow"),
+        ("#night-edit-btn", "setup"),
+    ):
+        page.locator(f"#tabs button[data-tab='{step}']").click()
+        page.wait_for_timeout(500)
+        page.locator(opener).click()
+        page.wait_for_selector("#schedule-dialog[open]")
+        page.locator("#schedule-close").click()
+        page.wait_for_timeout(300)
+        assert page.locator("#schedule-dialog[open]").count() == 0, opener
+    assert not errors
+
+
+def test_the_schedule_prices_both_runs_as_they_are_ticked(ui):
+    """The trade between a nightly deep sweep and a twice-daily narrow one is
+    the reason to choose, and it was a guess."""
+    page, _, errors = ui
+    open_schedule(page)
+
+    page.locator("#enabled").check()
+    page.wait_for_timeout(900)
+    said = page.locator("#schedule-cost").inner_text()
+    assert "02:00" in said and "searches" in said, said
+
+    page.locator("#enabled").uncheck()
+    page.wait_for_timeout(900)
+    assert "02:00" not in page.locator("#schedule-cost").inner_text()
+    assert not errors
+
+
+# ------------------------------------------------------------ the probe list
+#
+# Acting on the probe used to destroy the probe: the verdict table filtered to
+# the trip's own airports, so the row you narrowed *by* vanished the moment you
+# narrowed, and the next probe never asked about it again.
+
+
+def test_an_airport_kept_probed_keeps_its_verdict_after_it_leaves_the_trip(ui):
+    page, scenarios, errors = ui
+    seed_probe(scenarios)
+    page.reload(wait_until="networkidle")
+    open_explore(page)
+
+    # The row for an airport the probe judged and the trip still holds.
+    keep = page.locator("#explore-verdicts tbody tr", has_text="VIE").first
+    assert keep.count() == 1
+    keep.locator('button:text("Keep probing it")').click()
+    page.wait_for_timeout(600)
+
+    # Both halves are pending together, so one Save commits a coherent trip.
+    assert "VIE" in page.locator("#explore-pending-text").inner_text()
+    page.locator("#explore-save").click()
+    page.wait_for_timeout(1200)
+
+    saved = json.loads((scenarios / "jp-ph.json").read_text(encoding="utf-8"))
+    assert "VIE" not in saved["origins"], "it should have left the trip"
+    assert saved["probe_extra"]["origins"] == ["VIE"], saved["probe_extra"]
+
+    # And the verdict is still on screen, marked as no longer searched.
+    row = page.locator("#explore-verdicts tbody tr", has_text="VIE").first
+    assert "is-outside" in (row.get_attribute("class") or "")
+    assert row.locator('button:text("Stop probing")').count() == 1
+    assert row.locator('button:text("Put it back")').count() == 1
+    assert not errors
+
+
+def test_keeping_an_airport_probed_is_the_sweep_getting_cheaper_not_the_probe(ui):
+    """The trade the button offers, in the two numbers it moves.
+
+    The sweep stops pricing the airport and gets cheaper; the probe goes on
+    pricing it and does not, because it was pricing it either way. Both figures
+    are on the Run row before anything is saved, which is what stops the list
+    growing into the cost of the sweep it exists to avoid.
+    """
+    page, scenarios, errors = ui
+    seed_probe(scenarios)
+    page.reload(wait_until="networkidle")
+
+    probe_before = page.locator("#probe-cost").inner_text()
+    deep_before = page.locator("#deep-cost").inner_text()
+
+    open_explore(page)
+    page.locator("#explore-verdicts tbody tr", has_text="VIE").first.locator(
+        'button:text("Keep probing it")'
+    ).click()
+    page.wait_for_timeout(1500)
+
+    page.locator("#subtabs button[data-sub='options']").click()
+    page.wait_for_timeout(900)
+    assert page.locator("#deep-cost").inner_text() != deep_before, "the sweep should be cheaper"
+    assert page.locator("#probe-cost").inner_text() == probe_before, (
+        "the probe still prices it, so its cost must not move"
+    )
+    assert not errors
+
+
+# -------------------------------------------- the explanations switch reaches
+#
+# It was `.panel__hint` with a `--live` modifier that opted out, so every
+# renderer writing grey prose reached for the modifier and got a paragraph the
+# switch could not touch. Turning explanations off left most of the teaching on
+# screen, which is the complaint this answers.
+
+
+def grey_prose(page):
+    """Every paragraph of grey prose currently on screen, longer than a label."""
+    return page.evaluate(
+        """() => {
+            const out = [];
+            for (const s of document.querySelectorAll('section[data-panel]')) {
+              if (s.hidden) continue;
+              for (const el of s.querySelectorAll('p')) {
+                if (getComputedStyle(el).display === 'none') continue;
+                const t = el.textContent.trim();
+                if (t.length > 60) out.push({ cls: el.className, id: el.id, text: t });
+              }
+            }
+            return out;
+        }"""
+    )
+
+
+def test_explanations_off_leaves_no_teaching_on_any_step(ui):
+    page, _, errors = ui
+    assert "off" in page.locator("#hints-toggle").inner_text()
+
+    for step in ("map", "narrow", "follow", "setup"):
+        page.locator(f"#tabs button[data-tab='{step}']").click()
+        page.wait_for_timeout(700)
+        for item in grey_prose(page):
+            # `.answer` is a statement about what is on screen; `.empty` is a
+            # panel saying it has nothing to show. Both are answers and stay by
+            # design. Anything else surviving is teaching the switch missed.
+            kept = {"answer", "empty"} & set(item["cls"].split())
+            assert kept, f"{step}: {item['cls']} — {item['text'][:80]}"
+    assert not errors
+
+
+def test_the_switch_reaches_prose_that_is_not_inside_a_panel(ui):
+    """It was scoped to `.panel`, and the Follow step's summary is a notice
+    sitting directly in its section - so one paragraph of teaching was beyond
+    the switch entirely, for no reason anyone chose."""
+    page, _, errors = ui
+    page.locator("#tabs button[data-tab='follow']").click()
+    page.wait_for_timeout(700)
+    assert page.locator("#follow-summary .explain").is_hidden()
+
+    page.locator("#hints-toggle").click()
+    page.wait_for_timeout(400)
+    assert page.locator("#follow-summary .explain").is_visible()
+    assert not errors
+
+
+def test_a_panel_may_still_disagree_with_the_switch(ui):
+    """Both states are named so the opened one can out-specify the default; a
+    single `is-quiet` could only ever hide, never re-show."""
+    page, _, errors = ui
+    open_setup(page)
+    panel = page.locator('section[data-panel="notify"] .panel').first
+    assert panel.locator(".explain").first.is_hidden()
+
+    panel.locator(".panel__info").click()
+    page.wait_for_timeout(300)
+    assert panel.locator(".explain").first.is_visible()
+    assert not errors
+
+
+# ----------------------------------------------------------------- spacing
+#
+# The scale enumerated which children got air, and a list of that shape is only
+# correct on the day it is written: every element type added since was absent
+# from it and sat flush against whatever was above. Stated as a default with
+# named exceptions, a new kind of block is spaced before anyone thinks about it.
+
+
+def test_every_panel_child_sits_on_the_spacing_scale(ui):
+    page, _, errors = ui
+    allowed = {"0px", "8px", "10px", "12px", "16px", "20px", "-6px"}
+
+    for step in ("map", "narrow", "follow", "setup"):
+        page.locator(f"#tabs button[data-tab='{step}']").click()
+        page.wait_for_timeout(700)
+        offenders = page.evaluate(
+            """() => {
+                const bad = [];
+                for (const s of document.querySelectorAll('section[data-panel]')) {
+                  if (s.hidden) continue;
+                  for (const panel of s.querySelectorAll('.panel')) {
+                    let prev = null;
+                    for (const child of panel.children) {
+                      const cs = getComputedStyle(child);
+                      if (cs.display === 'none') continue;
+                      if (prev !== null) {
+                        bad.push({ panel: s.dataset.panel, cls: child.className,
+                                   margin: cs.marginTop });
+                      }
+                      prev = child;
+                    }
+                  }
+                }
+                return bad;
+            }"""
+        )
+        for item in offenders:
+            assert item["margin"] in allowed, f"{step}: {item}"
     assert not errors

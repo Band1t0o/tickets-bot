@@ -17,8 +17,29 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.scenario import load_scenarios  # noqa: E402
+from src.scenario import read_scenarios  # noqa: E402
 from src.sweep.planner import PLANS, plan_searches, shards_for  # noqa: E402
+
+
+def readable(directory: Path) -> tuple[list, dict[str, str]]:
+    """Every trip that loads, and the reason for each one that does not.
+
+    `load_scenarios` is strict on purpose - a sweep asked for one trip should
+    fail loudly rather than quietly run something else - but every caller here
+    globs the whole directory, so that strictness was landing on trips nobody
+    had named. On 2 Sep a trip file carrying three fields this branch's
+    `Scenario` does not know raised inside the plan step, and took with it the
+    nightly sweep of a different trip that was perfectly readable: the step
+    exited 1, `needs.plan.outputs.*` came back empty, and `merge` was handed
+    `fromJson('')`. A sweep that swept nothing looks exactly like a quiet day.
+
+    The loudness is kept where it was earned. A dispatch that names a trip this
+    code cannot read still fails, by name and with the parse error in the
+    sentence - see `reason_for_nothing`. What it no longer does is fail about
+    the trips it was not asked about.
+    """
+    trips, problems = read_scenarios(directory)
+    return trips, {problem["file"]: problem["error"] for problem in problems}
 
 
 def has_narrowing(scenario) -> bool:
@@ -34,6 +55,18 @@ def has_narrowing(scenario) -> bool:
         or (scenario.return_focus_start and scenario.return_focus_end)
         or scenario.total_days
     )
+
+
+def sweeps_its_narrowing(scenario) -> bool:
+    """Whether the 13:00/20:00 slots should re-price this trip's narrowing.
+
+    Two conditions, and they are different questions. `has_narrowing` asks
+    whether there is anything to sweep; `sweep_narrowing` asks whether you want
+    it swept. Narrowing a trip in order to *read* the window through it is an
+    ordinary thing to do - the boxes filter the charts either way - and it used
+    to be indistinguishable from asking for two more runs a day.
+    """
+    return has_narrowing(scenario) and scenario.sweep_narrowing
 
 
 def choose(
@@ -67,7 +100,7 @@ def choose(
     booking decision is waiting on. If the site is still refusing, coverage
     records it honestly and nothing is lost.
     """
-    trips = list(load_scenarios(directory))
+    trips, _ = readable(directory)
     if wanted:
         # Naming a trip *is* the instruction, so `enabled` does not get a vote
         # here. It used to: the tick was applied first, and dispatching a trip
@@ -83,9 +116,9 @@ def choose(
         # - but the watch is 63, and the days it follows are the ones a booking
         # decision is actually waiting on. If the site is refusing, the watch
         # records that honestly through coverage and says nothing.
-        return [s.id for s in trips if s.watches or s.leg_watches]
+        return [s.id for s in trips if s.preferences or s.leg_watches]
     if final:
-        trips = [s for s in trips if has_narrowing(s)]
+        trips = [s for s in trips if sweeps_its_narrowing(s)]
     return [s.id for s in trips]
 
 
@@ -109,9 +142,22 @@ def reason_for_nothing(
     if not wanted or choose(directory, wanted, final, data_dir, watching):
         return ""
 
-    known = [s.id for s in load_scenarios(directory)]
-    if wanted not in known:
-        listed = ", ".join(sorted(known)) or "none at all"
+    loaded, problems = readable(directory)
+    trips = {s.id: s for s in loaded}
+    # Before "no trip is called that", because the two are opposite answers and
+    # only one of them is true here: the file is on the branch, and this code
+    # could not read it. Told the other, the reply would be "yes it is, I can
+    # see it" - and the actual cause, an app newer than the branch it publishes
+    # to, would go unnamed.
+    broken = problems.get(f"{wanted}.json")
+    if broken:
+        return (
+            f"{wanted!r} is on the branch, but this branch's code cannot read it: "
+            f"{broken}. That is what a trip saved by a newer copy of the app looks "
+            "like here; the branch needs that code before it can sweep the trip."
+        )
+    if wanted not in trips:
+        listed = ", ".join(sorted(trips)) or "none at all"
         return (
             f"No trip is called {wanted!r}. The trips on this branch are: {listed}. "
             "The cloud sweeps the committed branch, so a trip saved only on your "
@@ -119,10 +165,15 @@ def reason_for_nothing(
         )
     if watching:
         return (
-            f"{wanted!r} is not watching anything, so a watch of it would price "
-            "nothing. Pin some days or follow a flight on the Watch tab first."
+            f"{wanted!r} is not following anything, so a check of it would price "
+            "nothing. Save a preference or follow a flight on the Follow it step first."
         )
     if final:
+        if has_narrowing(trips[wanted]):
+            return (
+                f"{wanted!r} is narrowed, but has 'Also sweep just these' switched off, "
+                "so its narrowing filters what you read and costs no searches."
+            )
         return (
             f"{wanted!r} has not been narrowed to anything - no departure window, "
             "no return window, no nights band - so a final sweep of it would price "
@@ -139,6 +190,7 @@ def jobs(
     depth: str = "",
     shards: int = 0,
     final: bool = False,
+    mode: str = "",
 ) -> list[dict]:
     """One matrix entry per runner, sized from each trip's own plan.
 
@@ -155,7 +207,7 @@ def jobs(
     `shards` is the workflow_dispatch override, which exists for testing the
     rate limit and has to mean what it says.
     """
-    by_id = {s.id: s for s in load_scenarios(directory)}
+    by_id = {s.id: s for s in readable(directory)[0]}
     entries: list[dict] = []
     for scenario_id in chosen:
         scenario = by_id[scenario_id]
@@ -164,8 +216,10 @@ def jobs(
         # Sized from the plan this slot will actually run. A final sweep is a
         # fraction of the broad one - 31 searches against 85 on the real trip -
         # and sizing it from `plan_searches` would deal those 31 across the five
-        # runners the broad shape needs, at four searches a runner.
-        planner = PLANS["final"] if final else plan_searches
+        # runners the broad shape needs, at four searches a runner. A probe is
+        # smaller again, and it is dispatched by hand from the app rather than
+        # by a slot, which is why the mode is read here as well as the flag.
+        planner = PLANS.get(mode) or (PLANS["final"] if final else plan_searches)
         count = shards or shards_for(len(planner(scenario)))
         entries += [
             {"scenario": scenario_id, "shard": index, "shard_count": count}
@@ -181,6 +235,13 @@ def main() -> None:
     parser.add_argument("--final", action="store_true",
                         help="The 13:00/20:00 slot, which re-prices the narrowing")
     parser.add_argument("--watching", action="store_true", help="The four-hourly watch slot")
+    parser.add_argument(
+        "--mode",
+        default="",
+        help="The mode the run will use, when it is not one of the slots above. "
+             "`explore` is a probe: ~50 searches, so one runner rather than the "
+             "four the trip's full plan would be dealt across.",
+    )
     parser.add_argument(
         "--shards",
         type=int,
@@ -207,7 +268,16 @@ def main() -> None:
     # a single `include` list rather than as two matrix axes because the count
     # now differs per trip: a cross product of trips and shard indices cannot
     # give one trip five runners and another one.
-    print("jobs=" + json.dumps(jobs(directory, chosen, args.depth, max(0, args.shards), args.final)))
+    # Named, not counted, and on their own line so a trip that quietly stopped
+    # being swept has somewhere to be seen. The workflow turns a non-empty list
+    # into a warning annotation on the run.
+    print("unreadable=" + json.dumps(sorted(readable(directory)[1])))
+    print(
+        "jobs="
+        + json.dumps(
+            jobs(directory, chosen, args.depth, max(0, args.shards), args.final, args.mode)
+        )
+    )
 
 
 if __name__ == "__main__":

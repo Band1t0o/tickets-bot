@@ -59,7 +59,7 @@ on:
         description: 'Scenario id (default: every enabled scenario)'
         required: false
       mode:
-        description: 'sweep (the whole window) | final (only the narrowing)'
+        description: 'sweep (the whole window) | final (only the narrowing) | explore (a probe)'
         required: false
       depth:
         description: 'quick | standard | deep (default: deep)'
@@ -99,6 +99,7 @@ jobs:
       depth: ${{ steps.pick.outputs.depth }}
       mode: ${{ steps.pick.outputs.mode }}
       reason: ${{ steps.pick.outputs.reason }}
+      unreadable: ${{ steps.pick.outputs.unreadable }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -117,6 +118,16 @@ jobs:
           # The slot decides the mode; a dispatch may override it. Both afternoon
           # crons re-price the narrowing, and only 02:00 prices the window.
           MODE="${INPUT_MODE:-sweep}"
+          # The one expression left inside a run: block in this repo, and it is
+          # deliberate: github.event.schedule is GitHub's own cron string for the
+          # slot that fired - not a value anyone can type - and it is matched
+          # against the literals below, so reading it through env would put the
+          # two crons two lines further apart than the comparison they agree with.
+          #
+          # Nothing in a run: block may write an expression in prose. GitHub
+          # substitutes them textually before bash is involved, comments
+          # included, so an empty one is a syntax error in the workflow rather
+          # than a remark - which is how this very comment failed the file.
           case "${{ github.event.schedule }}" in
             "0 13 * * *"|"0 20 * * *") MODE="final" ;;
           esac
@@ -129,8 +140,24 @@ jobs:
           # Sizing a trip saved as `quick` and dispatched as `deep` from the file
           # would hand a seven-times bigger plan to one runner. --final sizes it
           # from the narrowed plan for the same reason, in the other direction.
-          python scripts/plan_sweep.py --depth "$DEPTH" --shards "${INPUT_SHARDS:-0}" --only "${INPUT_SCENARIO:-}" $FINAL >> "$GITHUB_OUTPUT"
+          # --mode as well as --final, because a probe is dispatched by hand
+          # rather than by a slot and is a fraction of the size: grand-tour is
+          # 660 searches swept and 36 probed, and sizing the probe from the
+          # sweep would deal 36 searches across seven runners.
+          python scripts/plan_sweep.py --depth "$DEPTH" --shards "${INPUT_SHARDS:-0}" --only "${INPUT_SCENARIO:-}" --mode "$MODE" $FINAL >> "$GITHUB_OUTPUT"
           cat "$GITHUB_OUTPUT"
+      # A trip the branch cannot read is skipped rather than fatal - one bad
+      # file used to take every other trip's night with it - so the run stays
+      # green and this is the only place that would ever say so. Silence here
+      # is how a trip stops being swept and nobody finds out for weeks.
+      - name: Name the trips that could not be read
+        if: steps.pick.outputs.unreadable != '[]'
+        # Through `env` rather than interpolated, like every other value in this
+        # file: an expression is pasted in as text before bash sees the line.
+        env:
+          UNREADABLE: ${{ steps.pick.outputs.unreadable }}
+        run: |
+          echo "::warning::Not swept, because this branch's code cannot read them: $UNREADABLE"
 
   # A dispatch that named a trip and planned nothing for it is a failure, and
   # has to look like one. Three runs on 22 Aug asked for `tokyo-round-trip`,
@@ -147,8 +174,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Say why this dispatch swept nothing
+        # Through `env`, not interpolated into the script. An expression is
+        # pasted in as text before bash ever sees the line, so a value
+        # carrying a quote or a `$(...)` is running in this job rather than
+        # being printed by it. `reason` is the worst of the two: it is a
+        # sentence assembled by plan_sweep.py. Only a dispatcher with write
+        # access can reach either, which is why this is tidiness rather than a
+        # hole - and the plan step below has always done it this way.
+        env:
+          SCENARIO: ${{ inputs.scenario }}
+          REASON: ${{ needs.plan.outputs.reason }}
         run: |
-          echo "::error::Dispatched '${{ inputs.scenario }}' but planned no searches. ${{ needs.plan.outputs.reason }}"
+          echo "::error::Dispatched '$SCENARIO' but planned no searches. $REASON"
           exit 1
 
   sweep:
@@ -192,8 +229,13 @@ jobs:
       - run: python -m playwright install --with-deps chromium
 
       - name: Report the planned cost before spending it
+        env:
+          SCENARIO: ${{ matrix.scenario }}
+          MODE: ${{ needs.plan.outputs.mode }}
+          DEPTH: ${{ needs.plan.outputs.depth }}
+          SHARD: ${{ matrix.shard }}/${{ matrix.shard_count }}
         run: |
-          python -m src.cli sweep --scenario "${{ matrix.scenario }}" --mode "${{ needs.plan.outputs.mode }}" --depth "${{ needs.plan.outputs.depth }}" --shard "${{ matrix.shard }}/${{ matrix.shard_count }}" --dry-run || true
+          python -m src.cli sweep --scenario "$SCENARIO" --mode "$MODE" --depth "$DEPTH" --shard "$SHARD" --dry-run || true
 
       - name: Sweep this shard
         env:
@@ -202,9 +244,13 @@ jobs:
           # still finishes, low enough that a stuck shard gives up rather than
           # running into timeout-minutes.
           SWEEP_BUDGET_MIN: 140
+          SCENARIO: ${{ matrix.scenario }}
+          MODE: ${{ needs.plan.outputs.mode }}
+          DEPTH: ${{ needs.plan.outputs.depth }}
+          SHARD: ${{ matrix.shard }}/${{ matrix.shard_count }}
         run: |
           set -euo pipefail
-          python -m src.cli sweep --scenario "${{ matrix.scenario }}" --mode "${{ needs.plan.outputs.mode }}" --depth "${{ needs.plan.outputs.depth }}" --shard "${{ matrix.shard }}/${{ matrix.shard_count }}" --data-dir shard-out --max-minutes "$SWEEP_BUDGET_MIN"
+          python -m src.cli sweep --scenario "$SCENARIO" --mode "$MODE" --depth "$DEPTH" --shard "$SHARD" --data-dir shard-out --max-minutes "$SWEEP_BUDGET_MIN"
 
       - name: Hand the shard to the merge
         # Always: legs are appended as they are found, so there is nearly always
@@ -229,7 +275,13 @@ jobs:
     # Always, for the same reason: two shards out of three is a sweep with holes
     # in its date grid, which coverage reports honestly. Losing them all is
     # another blank night.
-    if: always() && needs.plan.outputs.scenarios != '[]'
+    #
+    # `always()` covers a failed *sweep*, never a failed *plan*. A plan that
+    # died leaves every one of its outputs empty, and `'' != '[]'` is true - so
+    # this job used to go on to `fromJson('')` and fail evaluating its own
+    # strategy. On 2 Sep that turned one traceback into three errors, two of
+    # them filed under `sweep`, which had never run at all.
+    if: always() && needs.plan.result == 'success' && needs.plan.outputs.scenarios != '[]'
     runs-on: ubuntu-latest
     strategy:
       # Serial, because every trip commits to the same branch.
@@ -253,12 +305,15 @@ jobs:
       - name: Stitch them into one sweep and report
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          SCENARIO: ${{ matrix.scenario }}
         run: |
           set -euo pipefail
-          python -m src.cli merge-shards --scenario "${{ matrix.scenario }}" --from shards
+          python -m src.cli merge-shards --scenario "$SCENARIO" --from shards
 
       - name: Commit results
         if: always()
+        env:
+          SCENARIO: ${{ matrix.scenario }}
         run: |
           set -euo pipefail
           git config user.name "github-actions"
@@ -271,7 +326,7 @@ jobs:
             echo "No new data to commit"
             exit 0
           fi
-          git commit -m "chore(data): sweep ${{ matrix.scenario }} $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          git commit -m "chore(data): sweep $SCENARIO $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
 
           # Rebase before pushing. probe.yml runs every two hours, which includes
           # the 02:00 slot this fires on, and pushes to the same branch. The two

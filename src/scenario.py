@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -39,14 +39,39 @@ DEPTH_STEP_DAYS = {"quick": 7, "standard": 3, "deep": 1}
 # would otherwise become a search that quietly finds nothing.
 IATA_RE = re.compile(r"^[A-Z]{3}$")
 
-# Days that may be watched at once. Not a taste limit - a budget one. A watch
-# prices every airport pair of every leg on its pinned dates, which is 21
-# searches a candidate on the Japan/Philippines trip, and pelikan.cz answers
-# about 120 per runner before it stops answering at all. Six is the point where
-# a fourth-hourly watch of a trip that size still fits in one runner with room
-# to spare. `web.app` refuses on the real planned count as well, which is the
-# figure that actually binds; this is the cheap guard that needs no planner.
-MAX_WATCHES = 6
+# Preferences that may be followed at once. Not a taste limit - a budget one. A
+# preference prices every airport pair of every leg across its pinned dates and
+# the slack either side of them, and pelikan.cz answers about 120 searches per
+# runner before it stops answering at all.
+#
+# Four rather than six, because a preference is wider than the watch it replaced:
+# the same trip that cost 3 searches pinned costs 15 at the default slack. Four
+# is comfortably inside one runner even at the widest slack allowed, and the
+# realistic number of trips anyone is deciding between is two or three.
+#
+# `web.app` refuses on the real planned count as well, which is the figure that
+# actually binds - a preference's cost depends on its slack and on how many
+# airport pairs each leg has, neither of which a row count can see. This is the
+# cheap guard that needs no planner.
+MAX_PREFERENCES = 4
+
+# Days either side of each pinned leg date that a preference also prices, and
+# the most that may be asked for. Seven would be a fortnight-wide window per leg
+# on a trip whose whole point is that it is already decided; past that the
+# honest tool is a narrowed sweep, not a follow.
+DEFAULT_SLACK_DAYS = 2
+MAX_SLACK_DAYS = 7
+
+
+def _pool_key(role: dict) -> str:
+    """The stable name of the pool a `pool_roles` entry describes.
+
+    "origins", "stop:0", "return_to". Used as the key of `Scenario.probe_extra`,
+    so that a list of airports to keep probing survives the trip growing a stop.
+    """
+    if role["role"] == "stop":
+        return f"stop:{role['stop_index']}"
+    return role["role"]
 
 
 @dataclass(frozen=True)
@@ -71,7 +96,7 @@ class Stop:
     label: str = ""
     # Named for what happens rather than "open jaw", which already means the
     # trip-level "starts and ends at different airports" here (see
-    # `Itinerary.same_airport` and `combine.best_open_jaw`). One word, two
+    # `Itinerary.same_airport` and `CombineResult.best_open_jaw`). One word, two
     # meanings, in files that read each other is how the round-trip and
     # multi-city branches drifted until neither could build a trip.
     overland: bool = False
@@ -107,29 +132,43 @@ class Stop:
 
 
 @dataclass(frozen=True)
-class Watch:
-    """One candidate trip, tracked on the exact dates it was found on.
+class Preference:
+    """One trip you are deciding between, followed on the dates you picked.
 
     `depart_dates` holds one date per leg, in travel order: the day you leave
     home, the day you fly on, the day you fly back. Pinning all of them - rather
     than pinning the departure and deriving the rest through the stay ranges -
-    is what makes a watch cheap enough to run every few hours. On the
-    Japan/Philippines trip that is 21 searches against 75, and the site answers
-    about 120 before it stops answering.
+    is what makes a preference cheap enough to re-price every few hours. On the
+    Japan/Philippines trip that is 3 searches pinned against 75 for a sweep, and
+    the site answers about 120 before it stops answering.
 
-    What it gives up is stay length: a candidate pinned to nine days in Japan
-    will not notice that ten days got cheaper. The daily sweep still prices the
-    whole window, which is what it is for.
+    `slack_days` buys back the one thing pinning gives up. A trip pinned to the
+    12th cannot notice that the 14th is two thousand cheaper, and that is the
+    question a decision is actually waiting on. The slack prices the days either
+    side as well, so it can be answered - while the series drawn for this
+    preference stays the price of *the trip you chose*, which is what makes a
+    fall in it mean something. See `watch.record_observations`.
 
     The first date is the key. It is the one a person means by "the 12th", it is
     stable while the trip is edited around it, and it is what the price series
-    on the Watch tab is drawn against.
+    on the Follow step is drawn against.
+
+    Rank is position in `Scenario.preferences` and nothing hangs off it: it is
+    the order they are listed and drawn in, not a priority anything spends a
+    search on.
     """
 
     depart_dates: list[date]
+    # "13+14, mid-Jan". Blank is legitimate - `describe` derives one - because a
+    # trip dragged off the charts has a name implied by its own dates, and making
+    # someone type one before they may follow it is a toll on the useful path.
+    label: str = ""
+    # Days either side of each pinned leg date that the run also prices. 0 is
+    # exactly the old watch: the pinned dates and nothing else.
+    slack_days: int = DEFAULT_SLACK_DAYS
     added_at: str = ""
     # What it cost when it was picked, so the tab can say "up 900 since you
-    # started watching" on the very first observation rather than after two.
+    # started following" on the very first observation rather than after two.
     added_price: float | None = None
     currency: str = "CZK"
 
@@ -137,18 +176,47 @@ class Watch:
     def key(self) -> str:
         return self.depart_dates[0].isoformat() if self.depart_dates else ""
 
+    @property
+    def nights(self) -> list[int]:
+        """Nights between consecutive departures - the shape of the trip.
+
+        What a person means when they say "13+14": it is the split, not the
+        total, that distinguishes two preferences leaving the same week.
+        """
+        return [
+            (later - earlier).days
+            for earlier, later in zip(self.depart_dates, self.depart_dates[1:], strict=False)
+        ]
+
+    def describe(self) -> str:
+        """The label, or a name built from the shape and the day it leaves.
+
+        The day and not just the month, because two preferences of the same
+        shape a week apart are exactly the pair worth telling apart - and a
+        chart legend naming both of them "13+12, Jan 2027" is a comparison you
+        cannot read. Departure dates are unique across a trip's preferences, so
+        this is too.
+        """
+        if self.label:
+            return self.label
+        if not self.depart_dates:
+            return "(no dates)"
+        split = "+".join(str(n) for n in self.nights) or "one way"
+        leaves = self.depart_dates[0]
+        return f"{split} from {leaves.day} {leaves.strftime('%b')}"
+
 
 @dataclass(frozen=True)
 class LegWatch:
     """One route on one date, followed on its own.
 
-    A `Watch` follows a whole chained trip: every airport pair of every leg on
-    its pinned dates, 21 searches a candidate on the Japan trip. This follows
-    exactly what you point at, and costs one search. The two coexist because
-    they answer different questions - a `Watch` asks "is this trip moving", this
-    asks "is this ticket moving" - and a decision is usually assembled from the
-    second: watch Vienna to Haneda on the 10th and the 12th, and Manila home on
-    the 2nd and the 4th, because those were the days that looked promising.
+    A `Preference` follows a whole chained trip: every airport pair of every leg
+    across its pinned dates and their slack. This follows exactly what you point
+    at, and costs one search. The two coexist because they answer different
+    questions - a `Preference` asks "is this trip moving", this asks "is this
+    ticket moving" - and a decision is usually assembled from the second: follow
+    Vienna to Haneda on the 10th and the 12th, and Manila home on the 2nd and
+    the 4th, because those were the days that looked promising.
 
     Deliberately **not** required to be a leg of a trip the sweep could build.
     Picking freely is the whole point; the API says when a route is not one this
@@ -156,7 +224,7 @@ class LegWatch:
 
     There is no cap here. A leg watch is exactly one search, so the honest limit
     is the one `web.app.WATCH_SEARCH_CAP` applies to the whole planned run -
-    trip watches and leg watches together - rather than a count of rows that
+    preferences and leg watches together - rather than a count of rows that
     would mean something different for each kind.
     """
 
@@ -168,6 +236,18 @@ class LegWatch:
     # way it has gone rather than only setting a baseline.
     added_price: float | None = None
     currency: str = "CZK"
+    # Empty when you picked this route yourself; a preference's key when it came
+    # along with one.
+    #
+    # Following a preference follows its legs too, and those rows are stored
+    # rather than derived at read time. A preference pins dates and not airports,
+    # so a derived row would have no stable key on a leg with several airport
+    # pairs - and `watch.leg_report` keys an entire series on that string. A row
+    # whose key moved would start a new series and abandon the old one, silently.
+    #
+    # What it costs is a deletion rule: dropping a preference drops its rows.
+    # `web.app` owns that, in the one place a preference is removed.
+    source: str = ""
 
     @property
     def key(self) -> str:
@@ -258,15 +338,40 @@ class Scenario:
     preferred_origins: list[list[str]] = field(default_factory=list)
     # Which picks to report. See `src/alerts.py` for what each one means.
     notify: list[str] = field(default_factory=lambda: ["cheapest", "preferred"])
-    # Candidate trips tracked on their exact dates by the four-hourly watch,
-    # rather than by the daily sweep of the whole window. Empty means the trip
-    # is not watched at all, and the watch workflow skips it entirely.
-    watches: list[Watch] = field(default_factory=list)
+    # The trips you are deciding between, re-priced on their own dates by the
+    # four-hourly run rather than by the daily sweep of the whole window. Empty
+    # means the trip is not followed at all, and the watch workflow skips it.
+    #
+    # Ordered: position is rank, and rank is presentation only.
+    preferences: list[Preference] = field(default_factory=list)
     # Individual routes on individual dates, followed one search each. Kept
-    # alongside `watches` rather than replacing them: a trip watch answers what
-    # a whole chained trip costs, a leg watch answers what one ticket costs, and
-    # the second is how a decision is usually put together.
+    # alongside `preferences` rather than replacing them: a preference answers
+    # what a whole chained trip costs, a leg watch answers what one ticket costs,
+    # and the second is how a decision is usually put together. Some of these
+    # rows are a preference's own legs - see `LegWatch.source`.
     leg_watches: list[LegWatch] = field(default_factory=list)
+    # Airports the probe keeps asking about, beyond the ones the trip searches.
+    #
+    # The probe exists to say which airports are worth flying from, and acting
+    # on its answer means taking the losers out of the trip. Doing that used to
+    # delete the evidence: the verdict table filtered to the trip's own pools,
+    # so a dropped airport lost its row, and the next probe never asked about it
+    # again. The one number you narrowed *by* - "Katowice is 82% dearer" - was
+    # gone the moment you narrowed.
+    #
+    # So the probe's list is its own, and it is typed rather than inferred.
+    # Nothing lands here because you edited the route; removing an airport from
+    # a stop removes it from the trip and does nothing else. That is deliberate:
+    # a list that grew on its own would quietly walk a 51-search probe up toward
+    # the cost of the sweep it exists to avoid.
+    #
+    # Keyed by role - "origins", "stop:0", "return_to" - and not by position,
+    # because pools are positional and lining pool 2 of a two-stop trip up with
+    # pool 2 of a three-stop one is how a probe of Prague and Vienna came to be
+    # presented as the verdict for a trip flying out of Katowice. A key naming
+    # no current pool is kept on disk and not probed; the panel says so, because
+    # a stop reordered for an afternoon should not cost a year of probe list.
+    probe_extra: dict[str, list[str]] = field(default_factory=dict)
     # Sample the stops in the reverse order too, but only in the probe.
     #
     # "Is it cheaper to fly Philippines first?" is a real question and an
@@ -277,6 +382,15 @@ class Scenario:
     # day. When the answer is "the other way round", you reorder the stops and
     # sweep that; nothing here reorders anything on its own.
     probe_both_orders: bool = False
+    # Whether the 13:00 and 20:00 slots also sweep what this trip is narrowed to.
+    #
+    # Default True, which is what every trip committed before this field existed
+    # was already doing - `plan_sweep --final` selected on having a narrowing at
+    # all. Off is for a trip you have narrowed in order to *read* the window
+    # through it, without also asking for it to be re-priced twice a day: the
+    # boxes filter the charts either way, and the searches are the part worth
+    # choosing about.
+    sweep_narrowing: bool = True
     # Stay silent unless a pick actually improved on the best recorded for it.
     # Default True: at two sweeps a day, unconditional reporting is ~60 messages
     # a month, most of them "still 21,324". Set false for a digest every run.
@@ -343,6 +457,87 @@ class Scenario:
                 else {"role": "origins", "stop_index": None, "label": "Back home"}
             )
         return roles
+
+    def reporting_tiers(self, data_dir: Path | str | None = None) -> list[list[str]]:
+        """Which airports this trip would rather be reported from, best first.
+
+        Its own `preferred_origins` when it has any, and otherwise the global
+        ranking from `data/home_airports.json`. Both are tiers, so this is a
+        fallback and not a conversion.
+
+        Inherited at read time rather than copied into the file on save. The
+        point of the fallback is that a trip which never said otherwise follows
+        the global list *as the global list changes* - writing today's answer
+        into the trip would freeze it, and would also make every trip claim a
+        preference nobody expressed for it.
+
+        Imported inside the method because `home_airports` imports `IATA_RE`
+        from this module.
+        """
+        if self.preferred_origins:
+            return self.preferred_origins
+        from .home_airports import DATA_DIR, load_tiers
+
+        return load_tiers(DATA_DIR if data_dir is None else data_dir)
+
+    @property
+    def pool_keys(self) -> list[str]:
+        """A stable name per pool, positionally aligned with `airport_pools`.
+
+        `probe_extra` is keyed by these rather than by index. Position is the
+        one thing about a pool that is guaranteed to change - adding a stop
+        renumbers every pool after it - and this whole module already carries
+        the scar of reading one trip's pool 2 as another's.
+
+        Derived from `pool_roles` so the two cannot drift, and deliberately the
+        same for the last pool of a trip with no separate return airports as for
+        its first: that pool *is* the origins list, and probing "the way home"
+        of such a trip means probing the airports you leave from.
+        """
+        return [_pool_key(role) for role in self.pool_roles]
+
+    @property
+    def probe_pools(self) -> list[list[str]]:
+        """`airport_pools`, widened by whatever `probe_extra` names for each.
+
+        What a probe actually asks about. Order is the trip's own airports
+        first, then the extras in the order they were typed, and a code already
+        in the pool is not repeated - the planner walks these to emit searches,
+        and a duplicate is a real search against a site that answers about 120
+        of them per runner.
+        """
+        pools = []
+        for key, airports in zip(self.pool_keys, self.airport_pools, strict=True):
+            extra = [code for code in self._probed(key) if code not in airports]
+            pools.append([*airports, *extra])
+        return pools
+
+    def _probed(self, key: str) -> list[str]:
+        """One pool's extras, ignoring anything that is not a list of codes.
+
+        Loading a trip does not validate it: `load_scenario` parses and returns,
+        so a hand-edited `"probe_extra": {"origins": "KTW"}` would otherwise be
+        iterated as three characters and planned as three airports. The read
+        path repairs and the write path refuses, which is the rule
+        `home_airports` already follows for the same reason.
+        """
+        codes = self.probe_extra.get(key)
+        return codes if isinstance(codes, list) else []
+
+    @property
+    def probe_extra_unused(self) -> dict[str, list[str]]:
+        """Entries of `probe_extra` naming a pool this trip no longer has.
+
+        Kept rather than dropped, so a stop removed for an afternoon does not
+        cost the list. Reported so that a list which is being kept and not used
+        cannot also be invisible.
+        """
+        live = set(self.pool_keys)
+        return {
+            key: codes
+            for key, codes in self.probe_extra.items()
+            if key not in live and isinstance(codes, list) and codes
+        }
 
     @property
     def leg_count(self) -> int:
@@ -500,6 +695,24 @@ class Scenario:
                     )
                 seen[code] = rank
 
+        for key, codes in self.probe_extra.items():
+            if not isinstance(codes, list):
+                raise ValueError(f"probe_extra[{key!r}] must be a list of airport codes")
+            seen_here: set[str] = set()
+            for code in codes:
+                if not IATA_RE.match(code):
+                    raise ValueError(
+                        f"probe_extra[{key!r}]: {code!r} is not a 3-letter IATA code"
+                    )
+                if code in seen_here:
+                    raise ValueError(f"probe_extra[{key!r}]: {code} is in the list twice")
+                seen_here.add(code)
+            # A key naming no current pool is legal and is not probed - see the
+            # field's comment. Overlap with the pool's own airports is legal
+            # too, and deduplicated by `probe_pools`: refusing it would make
+            # putting an airport back into the trip fail to save while it was
+            # still listed here.
+
         if (self.focus_start is None) != (self.focus_end is None):
             raise ValueError(
                 "a focus needs both a first and a last departure date; "
@@ -521,7 +734,7 @@ class Scenario:
                 )
 
         self._validate_narrowing()
-        self._validate_watches()
+        self._validate_preferences()
         self._validate_leg_watches()
 
         unknown = [name for name in self.notify if name not in NOTIFY_SELECTIONS]
@@ -616,49 +829,66 @@ class Scenario:
             for i, stop in enumerate(self.stops[: self.leg_count - 1])
         )
 
-    def _validate_watches(self) -> None:
-        """Every watched candidate must be a trip this scenario could produce.
+    def _validate_preferences(self) -> None:
+        """Every followed preference must be a trip this scenario could produce.
 
-        Checked against the shape rather than merely parsed, because a watch
+        Checked against the shape rather than merely parsed, because a preference
         that cannot chain is worse than a rejected one: the run spends its
         searches, finds legs, and reports no price at all for that day - which
         looks exactly like the site having nothing.
         """
-        if len(self.watches) > MAX_WATCHES:
+        if len(self.preferences) > MAX_PREFERENCES:
             raise ValueError(
-                f"{len(self.watches)} days watched, but only {MAX_WATCHES} may be watched "
-                f"at once - each one is a full set of searches every few hours. "
-                f"Stop watching a day before adding another."
+                f"{len(self.preferences)} preferences, but only {MAX_PREFERENCES} may be "
+                f"followed at once - each one is a set of searches every few hours. "
+                f"Drop one before adding another."
             )
 
         seen: set[str] = set()
-        for watch in self.watches:
-            dates = watch.depart_dates
+        for preference in self.preferences:
+            dates = preference.depart_dates
             if len(dates) != self.leg_count:
                 raise ValueError(
-                    f"the watch on {watch.key or '(no date)'} has {len(dates)} date(s) but "
-                    f"this trip has {self.leg_count} legs; a watch needs one date per leg"
+                    f"the preference leaving {preference.key or '(no date)'} has {len(dates)} "
+                    f"date(s) but this trip has {self.leg_count} legs; a preference needs "
+                    f"one date per leg"
                 )
-            if watch.key in seen:
-                raise ValueError(f"{watch.key} is already being watched; it cannot be watched twice")
-            seen.add(watch.key)
+            if preference.key in seen:
+                raise ValueError(
+                    f"a preference already leaves on {preference.key}; two cannot share a "
+                    f"departure date"
+                )
+            seen.add(preference.key)
+
+            # Bounded rather than merely non-negative. Slack is priced on every
+            # airport pair of every leg, so it multiplies: on a trip with three
+            # departure airports, going from 2 to 7 takes one preference from 35
+            # searches to 105 - the whole of what the site answers - and the
+            # refusal a person would then meet is about the run, not about the
+            # number they typed.
+            if not 0 <= preference.slack_days <= MAX_SLACK_DAYS:
+                raise ValueError(
+                    f"the preference leaving {preference.key} asks for "
+                    f"{preference.slack_days} days of slack; 0 to {MAX_SLACK_DAYS} is what "
+                    f"a follow may spend. Narrow the trip and sweep it instead."
+                )
 
             for earlier, later in zip(dates, dates[1:], strict=False):
                 if later <= earlier:
                     raise ValueError(
-                        f"the watch on {watch.key} has its legs out of order: "
+                        f"the preference leaving {preference.key} has its legs out of order: "
                         f"{later} does not come after {earlier}"
                     )
 
             # The stay ranges are deliberately *not* checked here.
             #
-            # They were, and the reason was sound while it lasted: a watch the
-            # combiner could not chain would spend its searches and report no
+            # They were, and the reason was sound while it lasted: a preference
+            # the combiner could not chain would spend its searches and report no
             # price, which looks exactly like the site having nothing. But a
-            # watch pins every leg's date, so its stays are facts rather than a
-            # search space, and `watch._admitting` now widens the ranges to
-            # admit whatever was pinned before pricing it. There is no longer an
-            # unchainable watch for this to catch.
+            # preference pins every leg's date, so its stays are facts rather
+            # than a search space, and `watch._admitting` now widens the ranges
+            # to admit whatever was pinned before pricing it. There is no longer
+            # an unchainable preference for this to catch.
             #
             # What it did catch was the useful case. The per-leg charts exist so
             # that a fifteen-night stay four thousand cheaper than any legal one
@@ -670,9 +900,9 @@ class Scenario:
 
             if not self.window_start <= dates[0] <= self.window_end:
                 raise ValueError(
-                    f"the watch on {watch.key} leaves outside the window "
-                    f"{self.window_start}..{self.window_end}; widen the window or stop "
-                    f"watching that day"
+                    f"the preference leaving {preference.key} is outside the window "
+                    f"{self.window_start}..{self.window_end}; widen the window or drop "
+                    f"that preference"
                 )
 
     def _validate_leg_watches(self) -> None:
@@ -731,14 +961,16 @@ class Scenario:
         # A list, like `stay_days`, so the JSON on disk reads the same way for
         # both kinds of range rather than one being a pair and one an array.
         data["total_days"] = list(self.total_days) if self.total_days is not None else None
-        data["watches"] = [
+        data["preferences"] = [
             {
-                "depart_dates": [d.isoformat() for d in w.depart_dates],
-                "added_at": w.added_at,
-                "added_price": w.added_price,
-                "currency": w.currency,
+                "depart_dates": [d.isoformat() for d in p.depart_dates],
+                "label": p.label,
+                "slack_days": p.slack_days,
+                "added_at": p.added_at,
+                "added_price": p.added_price,
+                "currency": p.currency,
             }
-            for w in self.watches
+            for p in self.preferences
         ]
         data["leg_watches"] = [
             {
@@ -748,6 +980,7 @@ class Scenario:
                 "added_at": w.added_at,
                 "added_price": w.added_price,
                 "currency": w.currency,
+                "source": w.source,
             }
             for w in self.leg_watches
         ]
@@ -776,15 +1009,21 @@ class Scenario:
             payload[key] = date.fromisoformat(value) if value else None
         total_days = payload.get("total_days")
         payload["total_days"] = tuple(total_days) if total_days else None
-        payload["watches"] = [
-            Watch(
-                depart_dates=[date.fromisoformat(d) for d in w["depart_dates"]],
-                added_at=w.get("added_at", ""),
-                added_price=w.get("added_price"),
-                currency=w.get("currency", "CZK"),
+        payload["preferences"] = [
+            Preference(
+                depart_dates=[date.fromisoformat(d) for d in p["depart_dates"]],
+                label=p.get("label", ""),
+                # `.get` with the default rather than `p["slack_days"]`: every
+                # row migrated from `watches` predates the field, and the
+                # default is what makes those rows preferences rather than
+                # pinned watches with a new name.
+                slack_days=int(p.get("slack_days", DEFAULT_SLACK_DAYS)),
+                added_at=p.get("added_at", ""),
+                added_price=p.get("added_price"),
+                currency=p.get("currency", "CZK"),
             )
-            # Absent from every file written before the Watch tab existed.
-            for w in payload.get("watches") or []
+            # Absent from every file written before the Follow step existed.
+            for p in payload.get("preferences") or []
         ]
         payload["leg_watches"] = [
             LegWatch(
@@ -794,6 +1033,10 @@ class Scenario:
                 added_at=w.get("added_at", ""),
                 added_price=w.get("added_price"),
                 currency=w.get("currency", "CZK"),
+                # Absent from every row written before preferences followed
+                # their own legs, and every one of those was picked by hand -
+                # which is exactly what the empty default means.
+                source=w.get("source", ""),
             )
             # Absent from every file written before leg watches existed.
             for w in payload.get("leg_watches") or []
@@ -813,19 +1056,84 @@ class Scenario:
             )
             for s in payload["stops"]
         ]
+        # Normalised on the way in, not validated: a code typed in lower case
+        # into the probe panel is the same airport, and the shape check that
+        # rejects anything else is `validate`. Absent from every file written
+        # before the probe kept its own list, which is all of them.
+        payload["probe_extra"] = {
+            str(key): (
+                [str(code).strip().upper() for code in codes]
+                if isinstance(codes, list)
+                # Passed through rather than dropped, so `validate` can refuse it
+                # by name. The same rule `preferred_origins` follows: a shape
+                # nobody could have meant is worth being told about, and a value
+                # silently discarded here is a probe list that saves and does
+                # nothing.
+                else codes
+            )
+            for key, codes in (payload.get("probe_extra") or {}).items()
+        }
+
         unknown = set(payload) - set(cls.__dataclass_fields__)
         if unknown:
             raise ValueError(f"unknown scenario fields: {', '.join(sorted(unknown))}")
         return cls(**payload)
 
 
+def probing(scenario: Scenario) -> Scenario:
+    """The trip as the probe searches it: every pool widened by `probe_extra`.
+
+    One helper, called from exactly two places - `PLANS["explore"]`, which sizes
+    and plans the probe, and `run_sweep`, which writes the snapshot the results
+    are later read against. Both read this, so the plan and the record of the
+    plan cannot disagree about which airports were asked about, which is the
+    failure this module keeps having to design against.
+
+    Returns the scenario unchanged when nothing is set, so a trip that has never
+    used the probe list is not copied on every estimate.
+    """
+    if not scenario.probe_extra:
+        return scenario
+    widened = scenario.probe_pools
+    keys = scenario.pool_keys
+    by_key = dict(zip(keys, widened, strict=True))
+
+    # `origins` covers the way home too on a trip with no separate return
+    # airports: `pool_keys` names that last pool `origins`, because it is
+    # literally the same list.
+    stops = [
+        replace(stop, airports=by_key.get(f"stop:{index}", stop.airports))
+        for index, stop in enumerate(scenario.stops)
+    ]
+    return replace(
+        scenario,
+        origins=by_key.get("origins", scenario.origins),
+        stops=stops,
+        return_to=(
+            by_key.get("return_to", scenario.return_to)
+            if scenario.return_to is not None
+            else None
+        ),
+    )
+
+
 def _migrate(payload: dict) -> dict:
-    """Translate a pre-chain scenario file into the current shape.
+    """Translate an older scenario file into the current shape.
 
     Kept rather than one-shot converting the files and deleting this: a
     scenario hand-edited from an old example should load, not fail with a schema
     error naming fields the person never typed.
     """
+    # A watch is a preference with no slack, and it is promoted to one *with*
+    # the default slack rather than to a pinned copy of itself. That is safe
+    # because the price plotted for a preference is the chain on its pinned
+    # dates whatever the slack is - see `watch.record_observations` - so an
+    # observation series recorded before the rename goes on being a series of
+    # the same measurement. What the slack adds is the neighbouring days, which
+    # nothing before could answer about at all.
+    if "watches" in payload:
+        payload["preferences"] = payload.pop("watches")
+
     if "japan_airports" not in payload:
         return payload
 

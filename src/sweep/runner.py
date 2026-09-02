@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Protocol
 
 from ..models import Leg
-from ..scenario import Scenario
+from ..scenario import Scenario, probing
 from .planner import PLANS, LegSearch, shard_of
 
 # Politeness delay between searches on the same worker.
@@ -232,12 +232,18 @@ def is_comparable(
     return legs_per_search is not None and legs_per_search >= MIN_COMPARABLE_LEGS_PER_SEARCH
 
 
-def _narrowing_searched(scenario: Scenario) -> dict:
+def narrowing_searched(scenario: Scenario) -> dict:
     """A trip's three narrowing constraints, as the JSON a status records.
 
     Pairs are recorded only when both ends are set, matching what the planner
     does with them: a half-open focus bounds nothing, so a run carrying one is
     not narrowed by it and must not say it was.
+
+    Public because `web.app` needs exactly this shape to ask which runs on disk
+    were narrowed the way the trip is narrowed now, and had written its own copy
+    of it. Two functions computing one dict from one dataclass is two places for
+    the "both ends or neither" rule to be got wrong, and the second copy had
+    already drifted to testing one end.
     """
     def pair(start, end):
         return [start.isoformat(), end.isoformat()] if start and end else None
@@ -602,8 +608,9 @@ def run_sweep(
 
     `mode="explore"` runs the reconnaissance plan instead: every route on a
     handful of dates, to find out which airports are worth pricing at all.
-    `mode="watch"` runs the pinned candidates of `scenario.watches` and writes
-    to `data/watch/` rather than `data/sweeps/`.
+    `mode="watch"` runs the preferences of `scenario.preferences`, with the
+    slack each one asks for, and writes to `data/watch/` rather than
+    `data/sweeps/`.
     Deliberately a separate argument from `depth` rather than a fourth depth -
     depth is saved on the scenario and read by the nightly cloud workflow, so an
     "explore" depth could be persisted and quietly turn the daily sweep into a
@@ -667,7 +674,12 @@ def run_sweep(
             not in already
         ]
     directory = _new_sweep_directory(Path(data_dir) / MODE_ROOTS[mode] / scenario.id)
-    _write_scenario(directory, scenario)
+    # The probe searches a widened trip - the pools plus whatever `probe_extra`
+    # names - so the snapshot has to record the widened one. `_sweep_scenario`
+    # takes a run's shape from this file, and a snapshot narrower than the plan
+    # would make every extra airport's answer look like it belonged to another
+    # trip, which is the exact failure `_write_scenario` was added to stop.
+    _write_scenario(directory, probing(scenario) if mode == "explore" else scenario)
     if inherited is not None:
         # Copied before the logs open: they open for appending, onto these.
         for name in ("legs.jsonl", "searches.jsonl"):
@@ -686,7 +698,7 @@ def run_sweep(
         # The inherited rows are already on disk; the counters have to agree with
         # them from the first status write, or a resumed run opens at 0 of the
         # plan and reads as though the earlier answers were thrown away.
-        earlier = _read_status_file(inherited)
+        earlier = read_status(inherited)
         result.completed = earlier.get("completed") or 0
         result.answered = earlier.get("answered") or 0
         result.total = result.completed + len(searches)
@@ -720,7 +732,7 @@ def run_sweep(
     # the trip. Only `final` is bound by the narrowing; every other mode prices
     # what its own planner asked for, so recording the trip's fields would
     # describe a constraint the run never obeyed.
-    narrowing = _narrowing_searched(scenario) if mode == "final" else {
+    narrowing = narrowing_searched(scenario) if mode == "final" else {
         "focus": None, "return_focus": None, "total_days": None,
     }
 
@@ -788,11 +800,21 @@ def run_sweep(
             # the trip said at the time. Reading it the other way is how two
             # runs of 48 searches out of 85 were charted as broad ones.
             "narrowing": narrowing,
-            # The candidates this run was following, so a watch directory says
-            # what it is a watch *of* without needing the trip beside it - the
-            # trip is edited, and the run is not.
+            # The preferences this run was following, so a watch directory says
+            # what it is a check *of* without needing the trip beside it - the
+            # trip is edited, and the run is not. The slack travels with them
+            # because it decides what was searched, and two runs of the same
+            # preference at different slacks are not the same plan.
+            #
+            # `watches` is the key every status ever written uses, and every one
+            # of those runs is a run of what are now preferences. Renaming it
+            # would make each of them look like a run that followed nothing.
             "watches": [
-                [d.isoformat() for d in watch.depart_dates] for watch in scenario.watches
+                {
+                    "depart_dates": [d.isoformat() for d in preference.depart_dates],
+                    "slack_days": preference.slack_days,
+                }
+                for preference in scenario.preferences
             ],
             "started_at": result.started_at,
             "finished_at": result.finished_at,
@@ -983,6 +1005,46 @@ def _stamp_to_iso(name: str) -> str | None:
         return None
 
 
+def sweep_dirs(data_dir: Path | str, scenario_id: str, mode: str = "sweep") -> list[Path]:
+    """This trip's run directories, newest first, or [] if it has none.
+
+    One copy of a listing that was written three times - in `web.app`, and twice
+    in `cli` - each time as the same `sorted(..., reverse=True) if root.exists()`
+    expression. Newest-first is not incidental: every caller wants the latest
+    run, and one of them reading oldest-first would gate a sweep on a fortnight
+    -old health check without looking any different.
+
+    Sorting by name is sorting by time, because the stamps are
+    `YYYY-MM-DDTHH-MM-SSZ` and `_new_sweep_directory` guarantees no two runs
+    share one.
+    """
+    root = Path(data_dir) / MODE_ROOTS[mode] / scenario_id
+    if not root.exists():
+        return []
+    return sorted((p for p in root.iterdir() if p.is_dir()), reverse=True)
+
+
+def read_status(directory: Path) -> dict:
+    """A run's `status.json`, or a state saying why it could not be read.
+
+    Never raises, and the two failures are told apart rather than collapsed: a
+    run with no status was killed before it wrote one, while a status that will
+    not parse was half-written when the process died. Both are unusable and only
+    one of them is surprising.
+
+    One reader, because this was written twice - here for merging shards and
+    again in `web.app` for the pickers - and two tolerant readers of one file
+    are two chances to disagree about what a missing file means.
+    """
+    path = Path(directory) / "status.json"
+    if not path.exists():
+        return {"state": "unknown"}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"state": "unreadable"}
+
+
 def answered_searches(directory: Path) -> set[tuple[str, str, str]]:
     """`(origin, destination, depart_date)` this run got an answer for.
 
@@ -1084,9 +1146,10 @@ class _browser_page:
         self._context = None
 
     def __enter__(self):
-        # Providers that never touch `page` (the fake in tests, DemoStatic) do
-        # not justify launching Chromium.
-        if getattr(self.provider, "NAME", "") in {"FAKE", "DEMO_STATIC"}:
+        # The fakes in tests never touch `page`, so they do not justify
+        # launching Chromium. `DEMO_STATIC` stood beside this until its provider
+        # was deleted for being unreachable; the name is gone with it.
+        if getattr(self.provider, "NAME", "") == "FAKE":
             return _NullPage()
         from playwright.sync_api import sync_playwright
 
@@ -1151,7 +1214,17 @@ def _sum_into(target: dict, source: dict) -> None:
 # runner that was throttled means the merged result has holes, and calling the
 # whole thing "done" because two shards finished is how a starved sweep gets
 # charted as a price.
-_STATE_ORDER = ("unhealthy", "throttled", "stopped", "running", "unknown", "done")
+#
+# `unreadable` leads it, ahead even of `unhealthy`. A shard whose status will
+# not parse was half-written when its process died, so nothing about it is
+# known - including whether the legs beside it are the whole of what it found.
+# It used to arrive here as `unknown` and rank fifth of six, one place off
+# `done`, which let a merge of two clean shards and one corpse report itself
+# healthy. A state nothing can be said about is the worst thing a shard can be
+# in, not the second best.
+_STATE_ORDER = (
+    "unreadable", "unhealthy", "throttled", "stopped", "running", "unknown", "done",
+)
 
 
 def merge_shards(shard_dirs: list[Path], destination: Path) -> dict:
@@ -1200,19 +1273,10 @@ def merge_shards(shard_dirs: list[Path], destination: Path) -> dict:
             "".join(line + "\n" for line in lines), encoding="utf-8"
         )
 
-    statuses = [_read_status_file(d) for d in shard_dirs]
+    statuses = [read_status(d) for d in shard_dirs]
     merged = _merged_status(statuses, destination)
     _write_status(destination, merged)
     return merged
-
-
-def _read_status_file(directory: Path) -> dict:
-    try:
-        return json.loads((directory / "status.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        # A shard whose job died before writing one is not a reason to lose the
-        # others, but it must not read as a clean shard either.
-        return {"state": "unknown"}
 
 
 def _merged_status(statuses: list[dict], destination: Path) -> dict:

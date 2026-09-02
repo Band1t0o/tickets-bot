@@ -12,14 +12,14 @@ import json
 from datetime import date
 
 from src.models import Leg
-from src.scenario import LegWatch, Scenario, Stop, Watch
+from src.scenario import LegWatch, Preference, Scenario, Stop
 from tests.conftest import make_scenario
 
 CANDIDATE = [date(2027, 1, 10), date(2027, 1, 20), date(2027, 1, 30)]
 OTHER = [date(2027, 1, 12), date(2027, 1, 22), date(2027, 2, 1)]
 
 
-def trip(*candidates, **overrides) -> Scenario:
+def trip(*candidates, slack=0, **overrides) -> Scenario:
     defaults = dict(
         id="jp-ph",
         origins=["PRG"],
@@ -27,7 +27,12 @@ def trip(*candidates, **overrides) -> Scenario:
             Stop(airports=["NRT"], stay_days=(9, 11), label="Japan"),
             Stop(airports=["MNL"], stay_days=(9, 11), label="Philippines"),
         ],
-        watches=[Watch(depart_dates=list(c)) for c in (candidates or [CANDIDATE])],
+        preferences=[
+            # No slack unless a test asks for it: most of these are about what a
+            # pinned trip records, and the slack has its own tests.
+            Preference(depart_dates=list(c), slack_days=slack)
+            for c in (candidates or [CANDIDATE])
+        ],
         bag_estimate=0,
     )
     defaults.update(overrides)
@@ -255,7 +260,7 @@ def test_the_price_you_picked_it_at_is_what_the_first_run_is_judged_against(tmp_
     from src.watch import drops, record_observations, watch_report
 
     watched = trip()
-    watched.watches[0] = Watch(depart_dates=list(CANDIDATE), added_price=30000.0)
+    watched.preferences[0] = Preference(depart_dates=list(CANDIDATE), added_price=30000.0)
     record_observations(
         legs_for(CANDIDATE, (8000.0, 4000.0, 14000.0)), watched, status(), tmp_path
     )
@@ -326,11 +331,122 @@ def test_watching_nothing_is_refused_rather_than_run_empty(tmp_path, monkeypatch
 
     from src.cli import run_watch_command
 
-    _watched_repo(tmp_path, monkeypatch, watches=[])
+    _watched_repo(tmp_path, monkeypatch, preferences=[])
     with pytest.raises(SystemExit):
         run_watch_command(
             "jp-ph", provider=OneLegProvider(), data_dir=tmp_path / "data", notify=False
         )
+
+
+# ------------------------------------------------------------------- slack
+#
+# A preference prices the days either side of the ones it pinned, and the whole
+# discipline of it is that the extra days must never leak into the series. The
+# line on the chart is the trip that was chosen; the cheaper neighbour is
+# reported beside it, by name, as an offer to move.
+
+
+def test_the_series_stays_on_the_pinned_trip_when_a_neighbour_is_cheaper(tmp_path):
+    """The one thing a followed price must never do is move.
+
+    Without the positional date filter, `best_by_date` hands back the cheapest
+    chain leaving on the pinned morning - which, once the slack has priced the
+    later legs on other days, is a different trip. It would read as your trip
+    falling by four thousand, and there would be nothing on screen to say the
+    dates had changed underneath you.
+    """
+    from src.watch import record_observations
+
+    legs = legs_for(CANDIDATE)
+    # Same departure day, second and third legs two days later and far cheaper.
+    legs += [
+        leg("NRT", "MNL", date(2027, 1, 22), 1000.0),
+        leg("MNL", "PRG", date(2027, 2, 1), 1000.0),
+    ]
+
+    rows = record_observations(legs, trip(slack=2), status(), tmp_path)
+    assert rows[0]["total"] == 30000
+    assert rows[0]["found_dates"] == ["2027-01-10", "2027-01-20", "2027-01-30"]
+
+
+def test_the_cheaper_trip_inside_the_slack_is_reported_beside_it(tmp_path):
+    """The whole reason the slack is paid for.
+
+    "The same trip two days later is 16,000 cheaper" is the answer a decision
+    is waiting on, and no pinned watch could ever give it.
+    """
+    from src.watch import record_observations
+
+    legs = legs_for(CANDIDATE) + legs_for(
+        [date(2027, 1, 12), date(2027, 1, 22), date(2027, 2, 1)],
+        (2000.0, 2000.0, 2000.0),
+    )
+
+    row = record_observations(legs, trip(slack=2), status(), tmp_path)[0]
+    assert row["total"] == 30000
+    assert row["nearby_total"] == 6000
+    assert row["nearby_dates"] == ["2027-01-12", "2027-01-22", "2027-02-01"]
+
+
+def test_a_preference_already_on_the_cheapest_day_reports_no_saving(tmp_path):
+    """`nearby` includes the pinned days themselves, on purpose.
+
+    Excluding them would make the field "the best of the days you are not on",
+    so a preference sitting exactly where it should be would still be offered a
+    move - to something dearer than what it already has.
+    """
+    from src.watch import record_observations
+
+    legs = legs_for(CANDIDATE) + legs_for(
+        [date(2027, 1, 12), date(2027, 1, 22), date(2027, 2, 1)],
+        (20000.0, 20000.0, 20000.0),
+    )
+
+    row = record_observations(legs, trip(slack=2), status(), tmp_path)[0]
+    assert row["nearby_total"] == row["total"] == 30000
+
+
+def test_no_slack_asks_no_second_question(tmp_path):
+    """At zero slack there is no neighbourhood, so there is nothing to report.
+
+    None rather than the pinned total, which would read as "nothing nearby is
+    cheaper" - a claim this run did not make and did not pay to find out.
+    """
+    from src.watch import record_observations
+
+    row = record_observations(legs_for(CANDIDATE), trip(slack=0), status(), tmp_path)[0]
+    assert row["nearby_total"] is None
+
+
+def test_a_pinned_leg_that_went_unpriced_records_a_gap_and_never_a_zero(tmp_path):
+    """A chain that cannot be built is breakage, not a free flight.
+
+    Sharper with slack than without it: the run did find legs, and plenty of
+    them, so "we have prices" is true while "we have a price for your trip" is
+    not. Filling the hole from a neighbouring day would be the series moving.
+    """
+    from src.watch import record_observations
+
+    legs = [
+        leg("PRG", "NRT", CANDIDATE[0], 12000.0),
+        leg("NRT", "MNL", CANDIDATE[1], 4000.0),
+        # Home priced on a day of the slack, but not on the one that was pinned.
+        # 29 Jan is 9 nights after the second leg, so it chains; 28 Jan would be
+        # 8 and the stay ranges would refuse it, which is a different failure.
+        leg("MNL", "PRG", date(2027, 1, 29), 14000.0),
+    ]
+
+    row = record_observations(legs, trip(slack=2), status(), tmp_path)[0]
+    assert row["total"] is None
+    assert row["nearby_total"] == 30000
+
+
+def test_a_preference_carries_a_name_it_can_be_told_apart_by(tmp_path):
+    from src.watch import record_observations
+
+    row = record_observations(legs_for(CANDIDATE), trip(), status(), tmp_path)[0]
+    # 10 nights in Japan, 10 in the Philippines, leaving on 10 January.
+    assert row["label"] == "10+10 from 10 Jan"
 
 
 # --------------------------------------------------------------- leg watches
@@ -353,7 +469,7 @@ def leg_trip(*watched, **overrides) -> Scenario:
             Stop(airports=["NRT"], stay_days=(9, 11), label="Japan"),
             Stop(airports=["MNL"], stay_days=(9, 11), label="Philippines"),
         ],
-        watches=[],
+        preferences=[],
         leg_watches=list(watched or [WATCHED_LEG]),
         bag_estimate=0,
     )

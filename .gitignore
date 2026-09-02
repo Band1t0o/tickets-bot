@@ -28,6 +28,10 @@ data/latest_offer_count.txt
 # Debug screenshots
 debug_*.png
 
+# Snapshots and console logs written by the Chrome/Playwright MCP servers when
+# the app is driven through a browser by hand. Working notes, not findings.
+.playwright-mcp/
+
 # IDE
 .vscode/
 .idea/

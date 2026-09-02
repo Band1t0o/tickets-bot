@@ -436,13 +436,13 @@ def test_a_file_without_overland_still_loads(tmp_path):
 
 
 def _watch(dates=("2027-01-10", "2027-01-20", "2027-01-30"), **overrides):
-    from src.scenario import Watch
+    from src.scenario import Preference
 
-    return Watch(depart_dates=[date.fromisoformat(d) for d in dates], **overrides)
+    return Preference(depart_dates=[date.fromisoformat(d) for d in dates], **overrides)
 
 
 def test_a_trip_watches_nothing_by_default():
-    assert make_scenario().watches == []
+    assert make_scenario().preferences == []
 
 
 def test_a_watch_is_keyed_by_the_day_you_leave():
@@ -450,11 +450,11 @@ def test_a_watch_is_keyed_by_the_day_you_leave():
 
 
 def test_watches_survive_a_save_and_load(tmp_path):
-    original = make_scenario(watches=[_watch(added_price=21000.0)])
+    original = make_scenario(preferences=[_watch(added_price=21000.0)])
     save_scenario(original, tmp_path)
     loaded = load_scenario(tmp_path / "japan-philippines.json")
-    assert loaded.watches[0].depart_dates[0] == date(2027, 1, 10)
-    assert loaded.watches[0].added_price == 21000.0
+    assert loaded.preferences[0].depart_dates[0] == date(2027, 1, 10)
+    assert loaded.preferences[0].added_price == 21000.0
     assert loaded == original
 
 
@@ -463,17 +463,17 @@ def test_a_file_without_watches_still_loads(tmp_path):
     payload.pop("watches", None)
     path = tmp_path / "old.json"
     path.write_text(json.dumps(payload), encoding="utf-8")
-    assert load_scenario(path).watches == []
+    assert load_scenario(path).preferences == []
 
 
 def test_a_watch_needs_one_date_per_leg():
-    trip = make_scenario(watches=[_watch(dates=("2027-01-10", "2027-01-20"))])
+    trip = make_scenario(preferences=[_watch(dates=("2027-01-10", "2027-01-20"))])
     with pytest.raises(ValueError, match="one date per leg"):
         trip.validate()
 
 
 def test_a_watch_may_not_run_backwards():
-    trip = make_scenario(watches=[_watch(dates=("2027-01-10", "2027-01-09", "2027-01-30"))])
+    trip = make_scenario(preferences=[_watch(dates=("2027-01-10", "2027-01-09", "2027-01-30"))])
     with pytest.raises(ValueError, match="order"):
         trip.validate()
 
@@ -489,28 +489,28 @@ def test_a_watch_may_break_the_stay_windows():
     found by eye, and a tool that shows you a saving and will not follow it is
     worse than one that never showed you.
     """
-    trip = make_scenario(watches=[_watch(dates=("2027-01-10", "2027-01-14", "2027-01-24"))])
+    trip = make_scenario(preferences=[_watch(dates=("2027-01-10", "2027-01-14", "2027-01-24"))])
     trip.validate()
 
 
 def test_a_watch_must_start_inside_the_window():
-    trip = make_scenario(watches=[_watch(dates=("2026-12-10", "2026-12-20", "2026-12-30"))])
+    trip = make_scenario(preferences=[_watch(dates=("2026-12-10", "2026-12-20", "2026-12-30"))])
     with pytest.raises(ValueError, match="window"):
         trip.validate()
 
 
 def test_the_same_day_may_not_be_watched_twice():
-    trip = make_scenario(watches=[_watch(), _watch()])
+    trip = make_scenario(preferences=[_watch(), _watch()])
     with pytest.raises(ValueError, match="twice|already"):
         trip.validate()
 
 
 def test_there_is_a_ceiling_on_how_many_days_may_be_watched():
-    from src.scenario import MAX_WATCHES
+    from src.scenario import MAX_PREFERENCES
 
-    starts = [date(2027, 1, 6) + timedelta(days=i) for i in range(MAX_WATCHES + 1)]
+    starts = [date(2027, 1, 6) + timedelta(days=i) for i in range(MAX_PREFERENCES + 1)]
     trip = make_scenario(
-        watches=[
+        preferences=[
             _watch(dates=(s.isoformat(), (s + timedelta(days=10)).isoformat(),
                           (s + timedelta(days=20)).isoformat()))
             for s in starts
@@ -522,7 +522,7 @@ def test_there_is_a_ceiling_on_how_many_days_may_be_watched():
 
 def test_a_valid_set_of_watches_passes():
     make_scenario(
-        watches=[
+        preferences=[
             _watch(),
             _watch(dates=("2027-01-12", "2027-01-22", "2027-02-01")),
         ]
@@ -537,7 +537,7 @@ def test_a_watch_on_a_one_way_trip_has_no_stay_after_the_last_leg():
     trip cannot be saved at all and the error names an index rather than
     anything a person could act on.
     """
-    trip = make_scenario(one_way=True, watches=[_watch(dates=("2027-01-10", "2027-01-20"))])
+    trip = make_scenario(one_way=True, preferences=[_watch(dates=("2027-01-10", "2027-01-20"))])
     trip.validate()
 
 
@@ -645,3 +645,103 @@ def test_a_trip_saved_before_pins_existed_still_loads(tmp_path):
     assert loaded.stops[0].arrive_via is None
     assert loaded.stops[0].depart_via is None
     assert loaded.stops[0].arrive_at == ["NRT", "KIX"]
+
+
+# ------------------------------------------------- preferences, and the rename
+#
+# A watch was a preference with no slack. Every file on disk calls them
+# `watches`, and every one of those trips must go on loading - and go on being
+# followed - without anyone editing JSON by hand.
+
+
+def test_a_file_written_before_the_rename_loads_as_preferences(tmp_path):
+    import json
+
+    from src.scenario import DEFAULT_SLACK_DAYS, load_scenario
+
+    payload = make_scenario().to_dict()
+    payload["watches"] = [
+        {
+            "depart_dates": ["2027-01-10", "2027-01-20", "2027-01-30"],
+            "added_at": "2026-08-23T20:01:54+00:00",
+            "added_price": 26544,
+            "currency": "CZK",
+        }
+    ]
+    del payload["preferences"]
+    path = tmp_path / "old.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = load_scenario(path)
+    assert len(loaded.preferences) == 1
+    assert loaded.preferences[0].added_price == 26544
+    # Promoted to a preference rather than pinned as a copy of itself. Safe
+    # because the plotted price is the pinned chain whatever the slack is, so
+    # the series it has already traced stays a series of the same measurement.
+    assert loaded.preferences[0].slack_days == DEFAULT_SLACK_DAYS
+
+
+def test_a_migrated_file_writes_itself_back_under_the_new_name(tmp_path):
+    """One save and the old key is gone, rather than both keys living on."""
+    import json
+
+    from src.scenario import load_scenario, save_scenario
+
+    payload = make_scenario().to_dict()
+    payload["watches"] = [{"depart_dates": ["2027-01-10", "2027-01-20", "2027-01-30"]}]
+    del payload["preferences"]
+    (tmp_path / "old.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    saved = json.loads(
+        save_scenario(load_scenario(tmp_path / "old.json"), tmp_path).read_text(encoding="utf-8")
+    )
+    assert "watches" not in saved
+    assert len(saved["preferences"]) == 1
+
+
+def test_slack_wider_than_a_follow_may_spend_is_refused_by_name():
+    """Bounded rather than merely non-negative.
+
+    Slack multiplies across legs and airport pairs, so a number typed here can
+    put the run past what the site answers - and the refusal a person would
+    then meet is about the whole plan, not about the box they typed in.
+    """
+    import pytest
+
+    from src.scenario import MAX_SLACK_DAYS, Preference
+
+    trip = make_scenario(
+        preferences=[
+            Preference(
+                depart_dates=[date(2027, 1, 10), date(2027, 1, 20), date(2027, 1, 30)],
+                slack_days=MAX_SLACK_DAYS + 1,
+            )
+        ]
+    )
+    with pytest.raises(ValueError, match="slack"):
+        trip.validate()
+
+
+def test_a_preference_is_named_by_its_shape_when_it_has_no_label():
+    """A trip dragged off the charts has a name implied by its own dates.
+
+    Making someone type one before they may follow it is a toll on the useful
+    path, and "2027-01-10" is not a name anybody uses for a trip. The day is in
+    it because two preferences of the same shape a week apart are exactly the
+    pair worth telling apart on a shared chart.
+    """
+    from src.scenario import Preference
+
+    unnamed = Preference(depart_dates=[date(2027, 1, 10), date(2027, 1, 23), date(2027, 2, 6)])
+    assert unnamed.nights == [13, 14]
+    assert unnamed.describe() == "13+14 from 10 Jan"
+    assert Preference(depart_dates=[date(2027, 1, 10)], label="Tokyo run").describe() == "Tokyo run"
+
+
+def test_a_trip_sweeps_its_narrowing_unless_told_otherwise():
+    """Default True, which is what every trip committed before it existed did.
+
+    `plan_sweep --final` selected on having a narrowing at all, so flipping the
+    default would silently stop two runs a day for every trip on the branch.
+    """
+    assert make_scenario().sweep_narrowing is True

@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import json
 from datetime import timedelta
+from pathlib import Path
 
-from scripts.plan_sweep import choose, jobs, reason_for_nothing
+from scripts.plan_sweep import choose, jobs, readable, reason_for_nothing
 from src.scenario import save_scenario
 from tests.conftest import WINDOW_START, make_scenario
 
@@ -39,6 +40,68 @@ def healthy_sweep(tmp_path, scenario_id, **status):
     return tmp_path / "data"
 
 
+def unreadable(directory, scenario_id="from-the-future"):
+    """A trip file this code cannot load, in the shape that really happened.
+
+    Not a corrupt file: a perfectly good trip saved by a *newer* copy of the
+    app, carrying a field this branch's `Scenario` has never heard of.
+    """
+    path = Path(directory) / f"{scenario_id}.json"
+    payload = json.loads((Path(directory) / "a.json").read_text(encoding="utf-8"))
+    payload["id"] = scenario_id
+    payload["a_field_this_branch_never_heard_of"] = True
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def test_a_trip_this_code_cannot_read_does_not_take_the_others_with_it(tmp_path):
+    """The 2 Sep failure: one file, and the whole night gone.
+
+    `load_scenarios` raises on the first file it cannot read and every caller
+    globs the directory, so a trip published from an app newer than this branch
+    stopped the plan step dead - and with it the nightly sweep of a different
+    trip that read perfectly well.
+    """
+    directory = trips(tmp_path, make_scenario(id="a", enabled=True))
+    unreadable(directory)
+
+    assert choose(directory) == ["a"]
+    assert jobs(directory, choose(directory)), "the readable trip still gets runners"
+
+
+def test_the_unreadable_trip_is_named_rather_than_passed_over_in_silence(tmp_path):
+    """A trip that quietly stops being swept is the failure this repo keeps
+    paying for. Skipping it is right; skipping it silently is not."""
+    directory = trips(tmp_path, make_scenario(id="a", enabled=True))
+    unreadable(directory)
+
+    assert sorted(readable(directory)[1]) == ["from-the-future.json"]
+
+
+def test_a_dispatch_of_a_trip_that_cannot_be_read_says_exactly_that(tmp_path):
+    """"On the branch but unreadable" and "not on the branch" are opposites.
+
+    Told the second, the answer would be "yes it is, I can see the file" - and
+    the real cause, an app newer than the branch it published to, would never
+    be named.
+    """
+    directory = trips(tmp_path, make_scenario(id="a", enabled=True))
+    unreadable(directory)
+
+    assert choose(directory, "from-the-future") == []
+    reason = reason_for_nothing(directory, "from-the-future")
+    assert "cannot read it" in reason
+    assert "a_field_this_branch_never_heard_of" in reason
+    assert "newer copy of the app" in reason
+
+
+def test_a_trip_that_is_simply_absent_still_says_so(tmp_path):
+    """The other answer, unchanged: no file of that name at all."""
+    directory = trips(tmp_path, make_scenario(id="a", enabled=True))
+
+    assert "No trip is called" in reason_for_nothing(directory, "never-existed")
+
+
 def test_the_nightly_run_sweeps_every_enabled_trip(tmp_path):
     directory = trips(
         tmp_path,
@@ -59,6 +122,28 @@ def test_the_final_slot_skips_a_trip_that_has_been_narrowed_to_nothing(tmp_path)
     directory = trips(tmp_path, make_scenario(id="a"))
     data = healthy_sweep(tmp_path, "a")
     assert choose(directory, final=True, data_dir=data) == []
+
+
+def test_the_final_slot_skips_a_narrowed_trip_that_asked_it_not_to(tmp_path):
+    """Two different questions, and they used to have one answer.
+
+    `has_narrowing` asks whether there is anything to sweep. `sweep_narrowing`
+    asks whether you want it swept - and narrowing a trip in order to *read* the
+    window through it is an ordinary thing to do that was indistinguishable
+    from asking for two more runs a day.
+    """
+    directory = trips(tmp_path, focused(id="a", sweep_narrowing=False))
+    data = healthy_sweep(tmp_path, "a")
+    assert choose(directory, final=True, data_dir=data) == []
+
+
+def test_a_dispatch_of_a_trip_that_opted_out_says_which_of_the_two_it_is(tmp_path):
+    """Not the same sentence as an unnarrowed trip, because it is not the same
+    problem: one needs a narrowing typed, the other needs a box ticked."""
+    directory = trips(tmp_path, focused(id="a", sweep_narrowing=False))
+    data = healthy_sweep(tmp_path, "a")
+    said = reason_for_nothing(directory, "a", final=True, data_dir=data)
+    assert "switched off" in said
 
 
 def test_the_final_slot_runs_a_trip_that_has_a_focus(tmp_path):
@@ -132,11 +217,11 @@ def test_the_broad_slot_is_never_gated(tmp_path):
 def watching(**overrides):
     from datetime import date
 
-    from src.scenario import Watch
+    from src.scenario import Preference
 
     return make_scenario(
-        watches=[
-            Watch(depart_dates=[date(2027, 1, 10), date(2027, 1, 20), date(2027, 1, 30)])
+        preferences=[
+            Preference(depart_dates=[date(2027, 1, 10), date(2027, 1, 20), date(2027, 1, 30)])
         ],
         **overrides,
     )
@@ -316,9 +401,31 @@ def test_a_dispatch_of_a_trip_with_nothing_to_watch_says_that_instead(tmp_path):
     directory = trips(tmp_path, make_scenario(id="plain"))
     reason = reason_for_nothing(directory, "plain", watching=True)
     assert "plain" in reason
-    assert "watch" in reason.lower()
+    assert "following" in reason.lower()
 
 
 def test_nothing_to_explain_when_the_dispatch_planned_something(tmp_path):
     directory = trips(tmp_path, make_scenario(id="real"))
     assert reason_for_nothing(directory, "real") == ""
+
+
+def test_a_probe_is_sized_from_the_probe_plan_not_the_sweeps(tmp_path):
+    """A probe dispatched by hand from the app is a fraction of the sweep it
+    exists to avoid: grand-tour is 660 searches swept and 36 probed. Sized from
+    `plan_searches` those 36 would be dealt across seven runners.
+    """
+    directory = trips(tmp_path, make_scenario(id="big", depth="deep", enabled=True))
+    swept = jobs(directory, ["big"], depth="deep")
+    probed = jobs(directory, ["big"], depth="deep", mode="explore")
+
+    assert len(swept) > 1, "this trip must need sharding for the comparison to mean anything"
+    assert len(probed) == 1
+    assert probed[0]["shard_count"] == 1
+
+
+def test_the_slot_flags_still_decide_when_no_mode_is_given(tmp_path):
+    """The crons pass --final and no --mode. Adding one must not change them."""
+    directory = trips(tmp_path, focused(id="narrowed", depth="deep", enabled=True))
+    assert jobs(directory, ["narrowed"], depth="deep", final=True) == jobs(
+        directory, ["narrowed"], depth="deep", final=True, mode=""
+    )

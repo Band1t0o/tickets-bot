@@ -116,7 +116,8 @@ def select_alerts(legs: list[Leg], scenario: Scenario) -> list[Pick]:
     # one, which is the whole point of ranking them.
     preferred: Itinerary | None = None
     preferred_tier: int | None = None
-    for rank, tier in enumerate(scenario.preferred_origins, start=1):
+    tiers = scenario.reporting_tiers()
+    for rank, tier in enumerate(tiers, start=1):
         found = _best_in_tier(legs, scenario, tier)
         if found is not None:
             preferred, preferred_tier = found, rank
@@ -132,7 +133,7 @@ def select_alerts(legs: list[Leg], scenario: Scenario) -> list[Pick]:
             Pick(
                 "cheapest",
                 cheapest,
-                tier=preferred_tier if collapses else _tier_of(cheapest, scenario.preferred_origins),
+                tier=preferred_tier if collapses else _tier_of(cheapest, tiers),
                 also_preferred=collapses,
             )
         )

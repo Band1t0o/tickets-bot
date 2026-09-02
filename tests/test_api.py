@@ -11,7 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.models import Leg
-from src.scenario import Scenario, Stop, save_scenario
+from src.scenario import DEFAULT_SLACK_DAYS, Scenario, Stop, save_scenario
 
 AIRPORTS = [
     {"iata": "PRG", "name": "Vaclav Havel", "city": "Prague", "country": "CZ", "rank": 0,
@@ -1252,6 +1252,41 @@ def test_an_empty_card_selector_is_rejected(client):
     assert api.put("/api/sources", json=current).status_code == 400
 
 
+def test_a_url_template_naming_a_value_this_app_cannot_fill_is_refused(client):
+    """The Sources tab exists so a broken scraper is repairable without editing
+    code, which only holds if a bad repair is recoverable from the same screen.
+
+    An unknown placeholder used to save cleanly and then raise KeyError from
+    inside `.format` on every search: the test button answered 500 with nothing
+    to read, and the next sweep died the same way with no working template to
+    fall back on.
+    """
+    api, _ = client
+    current = api.get("/api/sources").json()
+    current["PELIKAN"]["url_template"] = "T:{trip_type},CDF:{oops}"
+    response = api.put("/api/sources", json={"PELIKAN": current["PELIKAN"]})
+    assert response.status_code == 400
+    assert "oops" in response.json()["detail"]
+    # And nothing was written: the working template is still what a sweep reads.
+    assert "{oops}" not in api.get("/api/sources").json()["PELIKAN"]["url_template"]
+
+
+def test_a_url_template_with_an_unbalanced_brace_is_refused(client):
+    api, _ = client
+    current = api.get("/api/sources").json()
+    current["PELIKAN"]["url_template"] = "T:{trip_type},CDF:{origin"
+    response = api.put("/api/sources", json={"PELIKAN": current["PELIKAN"]})
+    assert response.status_code == 400
+    assert "format string" in response.json()["detail"]
+
+
+def test_the_real_template_still_saves(client):
+    """The guard above must not refuse the thing it is guarding."""
+    api, _ = client
+    current = api.get("/api/sources").json()
+    assert api.put("/api/sources", json={"PELIKAN": current["PELIKAN"]}).status_code == 200
+
+
 def test_testing_a_source_reports_what_the_selectors_found(client, monkeypatch):
     """One click that answers "is it the URL or the markup?"
 
@@ -1757,7 +1792,7 @@ def test_candidates_offer_the_cheapest_trip_per_departure_date(client):
 def test_a_trip_starts_out_watching_nothing(client):
     api, _ = client
     body = api.get("/api/watch/jp-ph").json()
-    assert body["candidates"] == []
+    assert body["preferences"] == []
     assert body["searches"] == 0
 
 
@@ -1769,20 +1804,38 @@ def test_adding_a_day_writes_it_to_the_trip(client):
     )
     assert response.status_code == 201
     trip = api.get("/api/scenarios/jp-ph").json()
-    assert trip["watches"][0]["depart_dates"] == ["2027-01-10", "2027-01-20", "2027-01-30"]
-    assert trip["watches"][0]["added_price"] == 27000
-    assert trip["watches"][0]["added_at"]
+    saved = trip["preferences"][0]
+    assert saved["depart_dates"] == ["2027-01-10", "2027-01-20", "2027-01-30"]
+    assert saved["added_price"] == 27000
+    assert saved["added_at"]
+    assert saved["slack_days"] == DEFAULT_SLACK_DAYS
 
 
 def test_adding_a_day_reports_what_watching_it_will_cost(client):
     api, _ = client
     body = api.post(
         "/api/watch/jp-ph",
-        json={"depart_dates": ["2027-01-10", "2027-01-20", "2027-01-30"]},
+        json={"depart_dates": ["2027-01-10", "2027-01-20", "2027-01-30"], "slack_days": 0},
     ).json()
-    # 2 origins x 1 Japanese airport, 1 x 1, 1 x 2 = 2 + 1 + 2 per candidate.
+    # 2 origins x 1 Japanese airport, 1 x 1, 1 x 2 = 2 + 1 + 2 per preference.
     assert body["searches"] == 5
     assert body["minutes"] > 0
+
+
+def test_slack_multiplies_what_a_preference_costs(client):
+    """Five dates a leg instead of one, and the badge has to say so.
+
+    The count is what the cap is applied to, so a preference whose cost the
+    payload under-reported would be one the page offered to add and the run
+    could not afford.
+    """
+    api, _ = client
+    body = api.post(
+        "/api/watch/jp-ph",
+        json={"depart_dates": ["2027-01-10", "2027-01-20", "2027-01-30"], "slack_days": 2},
+    ).json()
+    assert body["searches"] == 5 * 5
+    assert body["preferences"][0]["slack_days"] == 2
 
 
 def test_a_hand_picked_day_outside_the_stays_may_still_be_followed(client):
@@ -1817,9 +1870,13 @@ def test_watching_more_than_the_site_will_answer_is_refused(client, monkeypatch)
 
     monkeypatch.setattr(app_module, "WATCH_SEARCH_CAP", 6)
     api, _ = client
-    api.post("/api/watch/jp-ph", json={"depart_dates": ["2027-01-10", "2027-01-20", "2027-01-30"]})
+    api.post(
+        "/api/watch/jp-ph",
+        json={"depart_dates": ["2027-01-10", "2027-01-20", "2027-01-30"], "slack_days": 0},
+    )
     response = api.post(
-        "/api/watch/jp-ph", json={"depart_dates": ["2027-01-12", "2027-01-22", "2027-02-01"]}
+        "/api/watch/jp-ph",
+        json={"depart_dates": ["2027-01-12", "2027-01-22", "2027-02-01"], "slack_days": 0},
     )
     assert response.status_code == 400
     assert "10" in response.json()["detail"]  # the count it would have reached
@@ -1829,7 +1886,7 @@ def test_a_watched_day_can_be_dropped(client):
     api, _ = client
     api.post("/api/watch/jp-ph", json={"depart_dates": ["2027-01-10", "2027-01-20", "2027-01-30"]})
     assert api.delete("/api/watch/jp-ph/2027-01-10").status_code == 200
-    assert api.get("/api/scenarios/jp-ph").json()["watches"] == []
+    assert api.get("/api/scenarios/jp-ph").json()["preferences"] == []
 
 
 def test_dropping_a_day_that_is_not_watched_is_a_404(client):
@@ -1858,7 +1915,7 @@ def test_the_watch_reports_the_series_it_has_recorded(client):
             }) + "\n")
 
     body = api.get("/api/watch/jp-ph").json()
-    candidate = body["candidates"][0]
+    candidate = body["preferences"][0]
     assert candidate["depart_date"] == "2027-01-10"
     assert candidate["latest"] == 28500
     assert candidate["net_change"] == -1500
@@ -1866,6 +1923,140 @@ def test_the_watch_reports_the_series_it_has_recorded(client):
     # Carried through from the trip so the tab can say "down 1,500 since you
     # picked it" rather than only "down since the first observation".
     assert candidate["added_price"] == 30000
+
+
+# ------------------------------------------- a preference brings its legs along
+#
+# Following a trip follows each of its flights, because that is how the decision
+# is actually read: the trip line says whether to keep waiting, the leg lines say
+# which flight is the one moving. They cost nothing extra - `plan_watch` dedupes
+# them against the preference's own searches.
+
+
+PREF = {
+    "depart_dates": ["2027-01-10", "2027-01-20", "2027-01-30"],
+    "routes": [
+        {"origin": "PRG", "destination": "NRT", "price": 12000},
+        {"origin": "NRT", "destination": "MNL", "price": 4000},
+        {"origin": "MNL", "destination": "PRG", "price": 14000},
+    ],
+}
+
+
+def test_saving_a_preference_follows_each_of_its_flights(client):
+    api, _ = client
+    body = api.post("/api/watch/jp-ph", json=PREF).json()
+    assert [leg["key"] for leg in body["legs"]] == [
+        "PRG-NRT@2027-01-10", "NRT-MNL@2027-01-20", "MNL-PRG@2027-01-30"
+    ]
+    # Tagged with the preference that brought them, so the table can say so and
+    # can suppress an unfollow that would leave the two lists disagreeing.
+    assert {leg["source"] for leg in body["legs"]} == {"2027-01-10"}
+
+
+def test_a_preferences_legs_cost_nothing_on_top_of_it(client):
+    """The dedup is the whole reason this is affordable.
+
+    Every route/date a preference's legs name is one the preference already
+    searches, so following them adds no searches at all.
+    """
+    api, _ = client
+    with_legs = api.post("/api/watch/jp-ph", json={**PREF, "slack_days": 0}).json()["searches"]
+    api.delete("/api/watch/jp-ph/2027-01-10")
+    bare = api.post(
+        "/api/watch/jp-ph",
+        json={"depart_dates": PREF["depart_dates"], "slack_days": 0},
+    ).json()["searches"]
+    assert with_legs == bare
+
+
+def test_dropping_a_preference_drops_its_legs_and_leaves_yours(client):
+    """Its own legs only.
+
+    A route you picked by hand was asked for independently of any trip, and
+    un-picking the trip is not a request to stop following it.
+    """
+    api, _ = client
+    api.post(
+        "/api/watch/jp-ph/legs",
+        json={"origin": "FRA", "destination": "NRT", "depart_date": "2027-01-15"},
+    )
+    api.post("/api/watch/jp-ph", json=PREF)
+
+    body = api.delete("/api/watch/jp-ph/2027-01-10").json()
+    assert body["preferences"] == []
+    assert [leg["key"] for leg in body["legs"]] == ["FRA-NRT@2027-01-15"]
+
+
+def test_a_flight_you_already_followed_stays_yours(client):
+    """One flight, one row, one series.
+
+    Adding it a second time under the preference would give one ticket two rows
+    writing to the same series key - and dropping the preference would then take
+    a flight you had picked yourself with it.
+    """
+    api, _ = client
+    api.post(
+        "/api/watch/jp-ph/legs",
+        json={"origin": "PRG", "destination": "NRT", "depart_date": "2027-01-10"},
+    )
+    body = api.post("/api/watch/jp-ph", json=PREF).json()
+
+    rows = [leg for leg in body["legs"] if leg["key"] == "PRG-NRT@2027-01-10"]
+    assert len(rows) == 1
+    assert rows[0]["source"] == ""
+
+
+def test_moving_a_preference_takes_its_legs_with_it(client):
+    """What the "two days later is cheaper" line does.
+
+    A move rather than a new preference: the series belongs to this decision,
+    and starting a fresh one on every shift would leave you unable to see that
+    the trip has fallen since you began. The key moves with the first date, so
+    the legs are re-pointed in the same write or they are orphans no deletion
+    could find.
+    """
+    api, _ = client
+    api.post("/api/watch/jp-ph", json=PREF)
+    body = api.patch(
+        "/api/watch/jp-ph/2027-01-10",
+        json={"depart_dates": ["2027-01-12", "2027-01-22", "2027-02-01"]},
+    ).json()
+
+    assert body["preferences"][0]["depart_date"] == "2027-01-12"
+    assert [leg["key"] for leg in body["legs"]] == [
+        "PRG-NRT@2027-01-12", "NRT-MNL@2027-01-22", "MNL-PRG@2027-02-01"
+    ]
+    assert {leg["source"] for leg in body["legs"]} == {"2027-01-12"}
+
+
+def test_a_preference_can_be_renamed_and_its_slack_changed(client):
+    api, _ = client
+    api.post("/api/watch/jp-ph", json={**PREF, "slack_days": 0})
+    body = api.patch(
+        "/api/watch/jp-ph/2027-01-10", json={"label": "the good one", "slack_days": 2}
+    ).json()
+    assert body["preferences"][0]["label"] == "the good one"
+    assert body["preferences"][0]["slack_days"] == 2
+    # And the badge moves with it, because the cap is applied to this figure.
+    assert body["searches"] == 25
+
+
+def test_widening_the_slack_past_what_the_site_answers_is_refused(client, monkeypatch):
+    """The cap binds on a change, not only on an addition.
+
+    A preference added inside the budget and then widened would otherwise walk
+    straight past the cliff, which is silent: the site simply stops answering
+    part way through.
+    """
+    import src.web.app as app_module
+
+    monkeypatch.setattr(app_module, "WATCH_SEARCH_CAP", 6)
+    api, _ = client
+    api.post("/api/watch/jp-ph", json={**PREF, "slack_days": 0})
+    response = api.patch("/api/watch/jp-ph/2027-01-10", json={"slack_days": 2})
+    assert response.status_code == 400
+    assert "25" in response.json()["detail"]
 
 
 # ------------------------------------------------------- results: narrowing
@@ -2484,6 +2675,42 @@ def test_a_cloud_run_of_a_committed_trip_is_dispatched(client, cloud, monkeypatc
     assert cloud == [("jp-ph", "deep", "sweep")]
 
 
+def test_a_cloud_run_at_a_depth_that_is_not_a_depth_is_refused(client, cloud, monkeypatch):
+    """`run` and `estimate` get this free by validating the scenario they build
+    with it. This endpoint builds none - it hands the string to `gh workflow
+    run` as an input - so nothing checked it, and an unrecognised depth was
+    spent in Actions rather than refused here."""
+    app, _ = client
+    agreeing(monkeypatch)
+    response = app.post("/api/scenarios/jp-ph/run-cloud?depth=thorough")
+    assert response.status_code == 400
+    assert "thorough" in response.json()["detail"]
+    assert cloud == []
+
+
+def test_a_probe_is_dispatched_to_the_cloud_like_a_sweep(client, cloud, monkeypatch):
+    """It always could be - `explore` is in MODES, `_checked_mode` accepts it and
+    the workflow forwards the mode verbatim. The button ran it here instead, and
+    a probe is ~51 searches against the ~120 this machine gets in a day."""
+    app, _ = client
+    agreeing(monkeypatch)
+    body = app.post("/api/scenarios/jp-ph/run-cloud?mode=explore&depth=deep").json()
+    assert body["dispatched"] is True
+    assert body["mode"] == "explore"
+    assert cloud == [("jp-ph", "deep", "explore")]
+
+
+def test_a_cloud_probe_of_an_uncommitted_trip_is_refused_by_name(client, cloud, monkeypatch):
+    """The cloud probes the branch's airports, not the screen's. Refused here
+    rather than as a red run in Actions twenty seconds from now."""
+    app, _ = client
+    agreeing(monkeypatch, differs=["the airports it searches"])
+    response = app.post("/api/scenarios/jp-ph/run-cloud?mode=explore")
+    assert response.status_code == 400
+    assert "the airports it searches" in response.json()["detail"]
+    assert cloud == []
+
+
 def test_a_cloud_run_is_refused_when_the_branch_holds_a_different_trip(client, cloud, monkeypatch):
     """The cloud sweeps the branch, not the screen. A whole day was spent
     reading results of a trip nobody was still planning."""
@@ -2705,6 +2932,54 @@ def test_taking_when_there_is_nothing_to_take_is_not_an_error(client, monkeypatc
     assert client[0].post("/api/cloud-sync/take").status_code == 200
 
 
+# -------------------------------------------------- publishing a trip
+#
+# The other direction of the same boundary: `cloud-sync` brings the branch's
+# results here, and this puts the trip the cloud will run onto the branch. Until
+# it existed, every panel that could name the gap ended by asking for a commit
+# and a push in a terminal.
+
+
+def test_publishing_when_the_branch_cannot_be_reached_answers_rather_than_fails(client):
+    """Its usual caller is a save that has already succeeded.
+
+    `no_real_git` refuses every git call, which is what a checkout with no
+    remote looks like from in here. The file is written either way, so a 500
+    would be a complaint about a save that worked - and being offline is not a
+    failed save.
+    """
+    response = client[0].post("/api/scenarios/jp-ph/publish")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["published"] is False
+    assert body["reason"]
+
+
+def test_a_deleted_trip_can_still_be_published_because_that_is_how_it_leaves(client):
+    """Not behind `_scenario_or_404`, on purpose.
+
+    Publishing a trip whose file is gone is what takes it off the branch, and a
+    404 here would leave the night sweep planning a trip that no longer exists
+    anywhere else.
+    """
+    assert client[0].delete("/api/scenarios/jp-ph").status_code == 200
+
+    assert client[0].post("/api/scenarios/jp-ph/publish").status_code == 200
+
+
+def test_the_trip_id_is_checked_before_it_becomes_a_path(client):
+    """The name goes into a filename and into a URL on github.com.
+
+    `_safe_id` is what stands between the two, and this endpoint is one of the
+    few that is deliberately not behind `_scenario_or_404` - so it is the one
+    place where an unchecked name would not be caught by the file not existing.
+    """
+    response = client[0].post("/api/scenarios/..%5C..%5Cwin.ini/publish")
+
+    assert response.status_code == 400
+
+
 # ------------------------------------------------------- airport verdicts
 #
 # The Explore tab used to open on a picker of runs by date and time: you chose
@@ -2732,6 +3007,72 @@ def seed_verdict_run(data_dir, stamp, priced, *, searches=3):
         "route_errors": {},
     }))
     return stamp
+
+
+def narrow_to(api, **fields):
+    """Save the trip with one field changed, as the route editor would."""
+    trip = api.get("/api/scenarios/jp-ph").json()
+    trip.update(fields)
+    response = api.put("/api/scenarios/jp-ph", json=trip)
+    assert response.status_code == 200, response.json()
+    return response.json()
+
+
+def test_an_airport_taken_out_of_the_trip_keeps_its_verdict(client):
+    """The whole point of the probe list. Acting on this table used to destroy
+    it: the row you narrowed by - "Vienna is 100% dearer" - vanished the moment
+    you took Vienna out, so the comparison could never be checked again."""
+    api, data = client
+    seed_verdict_run(data, "2026-08-06T02-00-00Z", {
+        ("PRG", "NRT"): 12000, ("VIE", "NRT"): 24000,
+        ("NRT", "MNL"): 4000, ("MNL", "PRG"): 14000, ("MNL", "VIE"): 15000,
+    })
+    narrow_to(api, origins=["PRG"], probe_extra={"origins": ["VIE"]})
+
+    pool = api.get("/api/scenarios/jp-ph/airport-verdicts").json()["pools"][0]
+    rows = {row["iata"]: row for row in pool["airports"]}
+    assert set(rows) == {"PRG", "VIE"}
+    assert rows["PRG"]["in_trip"] is True
+    # Still judged, and visibly the odd one out rather than silently gone.
+    assert rows["VIE"]["in_trip"] is False
+    assert rows["VIE"]["verdict"] == "poor"
+
+
+def test_an_airport_dropped_without_being_kept_does_go(client):
+    """The list is typed, not inferred. Editing the route removes an airport
+    from the trip and does nothing else - a list that grew on its own would walk
+    a 51-search probe up toward the cost of the sweep it exists to avoid."""
+    api, data = client
+    seed_verdict_run(data, "2026-08-06T02-00-00Z", {
+        ("PRG", "NRT"): 12000, ("VIE", "NRT"): 24000,
+        ("NRT", "MNL"): 4000, ("MNL", "PRG"): 14000, ("MNL", "VIE"): 15000,
+    })
+    narrow_to(api, origins=["PRG"])
+
+    pool = api.get("/api/scenarios/jp-ph/airport-verdicts").json()["pools"][0]
+    assert [row["iata"] for row in pool["airports"]] == ["PRG"]
+
+
+def test_a_pool_carries_the_key_the_probe_list_is_addressed_by(client):
+    """Sent rather than re-derived on the page. Two places deciding what a pool
+    is called is how a list gets edited into a key nothing reads."""
+    api, data = client
+    seed_verdict_run(data, "2026-08-06T02-00-00Z", {("PRG", "NRT"): 12000})
+    body = api.get("/api/scenarios/jp-ph/airport-verdicts").json()
+    assert [pool["key"] for pool in body["pools"]] == [
+        "origins", "stop:0", "stop:1", "origins",
+    ]
+
+
+def test_a_probe_list_for_a_pool_the_trip_no_longer_has_is_reported(client):
+    """Kept on disk deliberately. A list being kept and not used must not also
+    be invisible."""
+    api, data = client
+    seed_verdict_run(data, "2026-08-06T02-00-00Z", {("PRG", "NRT"): 12000})
+    narrow_to(api, probe_extra={"stop:9": ["CTS"]})
+
+    body = api.get("/api/scenarios/jp-ph/airport-verdicts").json()
+    assert body["probe_extra_unused"] == {"stop:9": ["CTS"]}
 
 
 def test_every_airport_of_the_trip_is_judged_without_choosing_a_run(client):
@@ -2899,3 +3240,110 @@ def test_a_followed_flight_carries_a_link_to_buy_it(client):
     # The three things that define the watch are all in it.
     assert "PRG" in leg["book_url"] and "NRT" in leg["book_url"]
     assert "2027_1_14" in leg["book_url"]
+
+
+# ------------------------------------------------------- the airport ranking
+#
+# A global list, ranked by how easy each airport is to reach. It replaces the
+# frequency-derived suggestions in the chip row when it is set, because
+# frequency cannot discover convenience - the usual reason a convenient airport
+# goes unused is that it has no inventory.
+
+
+def test_without_a_ranking_the_chips_are_what_your_trips_use(client):
+    """The behaviour this always had, and the fallback it degrades to."""
+    api, _ = client
+    body = api.get("/api/airports/frequent").json()
+    assert body["ranked"] is False
+
+
+def test_a_ranking_replaces_the_chips_and_keeps_its_order(client):
+    api, _ = client
+    api.put("/api/home-airports", json={"airports": ["BRQ", "PRG", "VIE"]})
+
+    body = api.get("/api/airports/frequent").json()
+    assert [airport["iata"] for airport in body["origins"]] == ["BRQ", "PRG", "VIE"]
+    # So the row can label itself honestly - "yours, in order" is a different
+    # claim from "airports you have used".
+    assert body["ranked"] is True
+
+
+def test_the_ranking_does_not_touch_the_destination_chips(client):
+    """There is no convenient end to a trip to Japan."""
+    api, _ = client
+    before = api.get("/api/airports/frequent").json()["destinations"]
+    api.put("/api/home-airports", json={"airports": ["BRQ"]})
+    assert api.get("/api/airports/frequent").json()["destinations"] == before
+
+
+def test_the_ranking_comes_back_described_so_the_page_can_show_cities(client):
+    api, _ = client
+    body = api.put("/api/home-airports", json={"airports": ["PRG"]}).json()
+    assert body["airports"] == ["PRG"]
+    assert body["described"][0]["city"]
+
+
+def test_a_mistyped_airport_is_refused_with_words_the_page_can_show(client):
+    api, _ = client
+    response = api.put("/api/home-airports", json={"airports": ["Brno"]})
+    assert response.status_code == 400
+    assert "Brno" in response.json()["detail"]
+
+
+def test_a_trip_the_branch_has_never_seen_is_refused_by_name(client, cloud, monkeypatch):
+    """A dispatch of an uncommitted trip cannot do anything but fail.
+
+    `plan` filters on the branch's own scenario files, so an unknown name plans
+    nothing, and `dispatched-nothing` then fails the run twenty seconds later.
+    That happened for real to a trip saved only on this machine. The sentence
+    the workflow printed is the one the app can print before spending a run, so
+    it says it here - and offers no override, because there is nothing on the
+    other side of one.
+
+    It asks to publish rather than naming the file to commit. The errand is now
+    a button: the page reads this phrase, offers to publish, and dispatches
+    again unforced.
+    """
+    app, _ = client
+    import src.web.app as app_module
+
+    monkeypatch.setattr(app_module, "_fetch_cloud_ref", lambda: None)
+    monkeypatch.setattr(
+        app_module, "_cloud_state",
+        lambda *a: {"known": False, "on_branch": False, "differs": [],
+                    "included": None, "searches": None},
+    )
+
+    response = app.post("/api/scenarios/jp-ph/run-cloud")
+    detail = response.json()["detail"]
+    assert response.status_code == 400
+    assert "jp-ph" in detail
+    # The exact phrase the page keys its "publish it now and run?" offer off.
+    assert "Publish it to the branch first" in detail
+    # No escape hatch: the page offers "run it anyway" on that phrase, and a
+    # forced dispatch here is a guaranteed red run.
+    assert "run it anyway" not in detail.lower()
+    assert cloud == []
+
+
+def test_a_branch_that_cannot_be_read_still_offers_the_override(client, cloud, monkeypatch):
+    """"Cannot say" and "definitely not there" are different answers.
+
+    Sweeping the branch's version on purpose is a real thing to want when this
+    app simply cannot see the branch; it is not a thing to want when the trip is
+    known to be absent from it.
+    """
+    app, _ = client
+    import src.web.app as app_module
+
+    monkeypatch.setattr(app_module, "_fetch_cloud_ref", lambda: None)
+    monkeypatch.setattr(
+        app_module, "_cloud_state",
+        lambda *a: {"known": False, "on_branch": None, "differs": [],
+                    "included": None, "searches": None},
+    )
+
+    response = app.post("/api/scenarios/jp-ph/run-cloud")
+    assert response.status_code == 400
+    assert "run it anyway" in response.json()["detail"].lower()
+    assert cloud == []

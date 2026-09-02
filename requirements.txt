@@ -7,8 +7,12 @@
 # Test-only dependencies live in requirements-dev.txt so the Docker image and
 # the scheduled run do not ship the test stack.
 
+# pydantic is not imported anywhere here - it arrives as fastapi's own
+# dependency - but it is pinned for the reason above: fastapi's range would
+# otherwise let a major bump in on a night with no commit in this repo to
+# explain it. `pydantic-settings` sat beside it and was imported by nothing at
+# all, and `pip show` reported no package depending on it either.
 pydantic==2.13.4
-pydantic-settings==2.15.0
 beautifulsoup4==4.15.0
 lxml==6.1.1
 requests==2.34.2

@@ -2,7 +2,11 @@
  * Component styles ported from the Finance-planner project
  * (/Users/vojtano/Projects/Finance-planner/src/styles/app.css), trimmed to the
  * classes this UI actually uses and extended with a few flight-specific ones
- * (.airport-grid, .chart, .status-strip).
+ * (.chart, .status-strip, .typeahead).
+ *
+ * Unlike palette.css and theme.css beside it, this file is trimmed rather than
+ * kept verbatim - so a block nothing carries the classes for is deleted. An
+ * .airport-grid card grid lived here until the typeahead and chips replaced it.
  *
  * A copy, not a shared dependency: the two projects will drift. Style fixes
  * worth keeping should be made in both.
@@ -90,18 +94,14 @@ table.data th.num,
   flex-wrap: wrap;
 }
 
-.panel__hint {
+/* Grey prose, in two kinds that look identical and behave differently. See
+   "explanations on demand" below for which is which. */
+.explain,
+.answer {
   margin: 8px 0 14px;
   color: var(--color-pageTextLight);
   font-size: 13px;
 }
-
-/* Under the panel's own title, a hint tucks up by 6px to cancel the header's
-   bottom margin. That tuck used to be the default and every other position an
-   exception to it - four adjacency rules undoing it, plus inline margins on the
-   paragraphs those four missed. Stated the other way round it is one rule, and
-   a hint anywhere else simply sits 8px below whatever it follows. */
-.panel__header + .panel__hint { margin-top: -6px; }
 
 /* ------------------------------------------------------------------ spacing --
 
@@ -109,11 +109,20 @@ table.data th.num,
    than typed onto each element. It used to be thirty-one inline margins across
    twelve values - 0, 6, 8, 10, 12, 14, 16, 18, 20, 22 - chosen a panel at a
    time, which is why no two sub-sections on the page began at the same distance
-   from the heading above them. `tests/test_web_contract.py` keeps them out. */
-.panel > * + .row,
-.panel > * + .disclosure,
-.panel > * + .stat-row,
-.panel > * + .table-scroll { margin-top: 16px; }
+   from the heading above them. `tests/test_web_contract.py` keeps them out.
+
+   **Everything gets air; the exceptions are named.** This was the other way
+   round - four selectors listing which children were spaced - and the trouble
+   with enumerating what gets a margin is that the list is only correct on the
+   day it is written. Every element type added since was absent from it and sat
+   flush against whatever was above: the run buttons under their heading, the
+   date grid, the airport chips, an empty-state. Stated as a default, a new kind
+   of block is spaced correctly before anyone thinks about it, and the four
+   things that genuinely differ say so below.
+
+   A hidden sibling generates no box, so the visible element after it still gets
+   its margin from here - the behaviour the enumerated rule already relied on. */
+.panel > * + * { margin-top: 16px; }
 
 /* A row inside a disclosure is enclosed rather than the panel's own, and needs
    air on both sides of it. */
@@ -121,10 +130,26 @@ table.data th.num,
 
 /* A line a renderer writes under the controls it describes: what tonight costs
    this trip, what a saved webhook answered, which routes a run left unpriced.
-   Empty most of the time, so it carries no bottom margin - a gap under nothing
-   reads as a panel that failed to draw something. */
-.panel__line { margin-top: 12px; }
-.panel__line:empty { margin-top: 0; }
+   Empty most of the time, so it carries no margin at all then - a gap under
+   nothing reads as a panel that failed to draw something. */
+.panel > .panel__line { margin-top: 12px; }
+.panel > .panel__line:empty { margin-top: 0; }
+
+/* Prose sits closer to what it is about than two blocks sit to each other: a
+   paragraph belongs to the thing above it. */
+.panel > * + .explain,
+.panel > * + .answer { margin-top: 8px; }
+
+/* And directly under the panel's own title it tucks up by 6px to cancel the
+   header's bottom margin. Written after the two rules above because all three
+   have the same specificity and the last one wins - this tuck was above them
+   for a while and was quietly doing nothing. */
+.panel > .panel__header + .explain,
+.panel > .panel__header + .answer { margin-top: -6px; }
+
+/* An error box is hidden until it is not, and when it appears it belongs to the
+   control that produced it rather than floating a block away from it. */
+.panel > * + .panel-error { margin-top: 10px; }
 
 /* A sub-heading inside a panel. One treatment, shared with the exploration
    report's sections below, because a panel divided into parts should look
@@ -149,15 +174,34 @@ table.data th.num,
    most of them record a failure that cost a day. What they should not be is
    the first thing read, every time, on a screen you have already understood.
 
-   The split is between teaching and telling. A `.panel__hint` is prose about
-   how a mechanic works and collapses; a `.panel__hint--live` is written by a
-   renderer - a cost, a sampling resolution, which stays a sweep ran under - and
-   never collapses, because it is an answer rather than a lesson. Notices and
-   warnings are not hints at all and are untouched.
+   The split is between teaching and telling, and it is now one class per
+   meaning rather than a class and an exemption from it:
+
+     `.explain`  prose about how a mechanic works. Collapses.
+     `.answer`   a statement about what is on screen - which run priced this
+                 pool, how many routes are not drawn, what a source replied.
+                 Never collapses.
+
+   It was `.panel__hint` with a `--live` modifier that opted out, which meant
+   every renderer writing grey prose reached for the modifier and got a
+   paragraph the switch could not touch. Turning explanations off then left
+   most of the teaching on screen, which is exactly the complaint. A modifier
+   naming the thing it exempts invites that; two names do not.
+
+   Notices and warnings are neither and are untouched.
 
    Collapsed by a class on the panel rather than `hidden` on the prose, so the
    text stays in the DOM for find-in-page and for anything reading it. */
-.panel.is-quiet .panel__hint:not(.panel__hint--live) { display: none; }
+/* The global default reaches everything, including prose that is not inside a
+   panel - a notice in a section, a line a renderer appended somewhere else.
+   Scoping the switch to panels left exactly that kind of paragraph on screen. */
+body.hints-off .explain { display: none; }
+
+/* And a panel is allowed to disagree with the default, in either direction.
+   Both states are named so that the "opened" one can out-specify the rule
+   above; a single `is-quiet` could only ever hide, never re-show. */
+.panel.is-loud .explain { display: revert; }
+.panel.is-quiet .explain { display: none; }
 
 .panel__info {
   padding: 2px 8px;
@@ -485,41 +529,6 @@ label.field > select { font-weight: 400; color: var(--color-formInputText); }
 
 .stat.is-headline .stat__value { font-size: 26px; }
 
-/* --------------------------------------------------------- airport picker */
-
-.airport-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
-  gap: 8px;
-}
-
-.airport {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  padding: 9px 11px;
-  border: 1px solid var(--color-tableBorder);
-  border-radius: 8px;
-  background: var(--color-panelBackground);
-  cursor: pointer;
-}
-
-.airport:hover { border-color: var(--color-tableBorderStrong); }
-
-.airport.is-unavailable {
-  opacity: 0.6;
-  cursor: not-allowed;
-  background: var(--color-tableRowAlternate);
-}
-
-.airport__body { min-width: 0; }
-.airport__code { font-weight: 600; }
-.airport__note {
-  font-size: 11px;
-  color: var(--color-pageTextLight);
-  white-space: normal;
-}
-
 /* ------------------------------------------------------------------ charts */
 
 .chart { width: 100%; overflow-x: auto; }
@@ -680,6 +689,13 @@ label.field > select { font-weight: 400; color: var(--color-formInputText); }
 .chip--dead {
   border-color: var(--color-warningText);
 }
+
+/* A chip that is itself the button that removes what it names. Used where a
+   setting has no field of its own and would otherwise be removable only by a
+   control that clears three other things with it. */
+.chip--clearable { cursor: pointer; }
+.chip--clearable:hover { border-color: var(--color-errorText); }
+.chip--clearable:hover .chip__remove { color: var(--color-errorText); }
 
 .chip__remove {
   border: 0;
@@ -1046,3 +1062,299 @@ tr.is-cursor > td:first-child { font-weight: 600; }
    step of the work — it is the drawer the work is configured from. */
 .tabs .spacer { flex: 1; }
 .tabs__gear { font-size: 16px; line-height: 1; }
+
+/* One rank of a tier list: a label, a Remove, and the airports at that rank.
+   Used by both rankings - the global one and a trip's override of it - because
+   they are the same kind of object and were only ever drawn differently. */
+.tier + .tier { margin-top: 12px; }
+
+/* The rank number in front of a preference's name. */
+.rank {
+  display: inline-block;
+  min-width: 18px;
+  margin-right: 6px;
+  color: var(--color-pageTextLight);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+/* The row under a preference offering a cheaper set of dates inside its slack.
+   Indented and unruled, so it reads as a note on the row above rather than as
+   another preference. */
+.pref-offer td {
+  border-top: none;
+  padding-top: 0;
+  padding-left: 26px;
+  font-size: 12px;
+}
+
+.pref-offer button { margin-left: 6px; }
+
+.pref-actions { white-space: nowrap; }
+.pref-actions > * { margin-left: 4px; }
+
+/* ------------------------------------------------------------- sub-tabs --
+
+   A second nav row, under the step tabs and only on the step that has one.
+   Lighter than `.tabs` on purpose: a pill row rather than an underlined bar,
+   so two rows of navigation never read as the same level. The step you are on
+   is said once, by the row above; this one says which of that step's answers
+   you are looking at. */
+
+.subtabs {
+  display: flex;
+  gap: 4px;
+  margin: -8px 0 18px;
+  padding: 3px;
+  border: 1px solid var(--color-tableBorder);
+  border-radius: 8px;
+  background: var(--color-tableRowAlternate);
+  width: fit-content;
+  max-width: 100%;
+  flex-wrap: wrap;
+}
+
+.subtabs button {
+  border: none;
+  background: none;
+  border-radius: 6px;
+  color: var(--color-pageTextLight);
+  padding: 5px 12px;
+  font-weight: 500;
+}
+
+.subtabs button:hover:not(:disabled) {
+  background: var(--color-pageBackground);
+  color: var(--color-pageText);
+}
+
+.subtabs button.is-active {
+  background: var(--color-panelBackground);
+  color: var(--color-accentText);
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 8%);
+}
+
+/* ---------------------------------------------------------- the run row --
+
+   One button per kind of run, each carrying its own cost. This replaced a
+   depth select and two destination buttons: three controls for what is one
+   decision - how much of the window to price - plus a choice between a machine
+   that cannot finish the job and one that can.
+
+   Sized so the cost line fits under the name without wrapping at the widths a
+   trip name can push this row to. `align-items: stretch` keeps the schedule
+   button the same height as the run buttons when one of them wraps. */
+
+.runs {
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+/* Between the runs and the thing that is not a run. It was a `.spacer`, which
+   flexes: on a wide window the schedule button ended up alone at the far right
+   of an otherwise empty row, and on the narrowing step - where there is one run
+   button rather than three - the gap was most of the panel. A measured
+   separation says "different kind of button" at every width. */
+.runs__gap {
+  width: 1px;
+  align-self: stretch;
+  margin: 4px 14px;
+  background: var(--color-tableBorder);
+}
+
+.run-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 4px;
+  min-width: 150px;
+  padding: 12px 16px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  text-align: left;
+}
+
+.run-btn__name { font-size: 15px; font-weight: 600; line-height: 1.2; }
+
+/* Never collapses with the explanations: it is the number the button is being
+   pressed on, and a run whose cost is hidden is the run that gets started by
+   accident. */
+.run-btn__cost {
+  font-size: 12px;
+  line-height: 1.3;
+  opacity: 0.85;
+  font-variant-numeric: tabular-nums;
+}
+
+.run-btn--probe {
+  background: var(--color-runProbeBackground);
+  border-color: var(--color-runProbeBorder);
+  color: var(--color-runProbeText);
+}
+
+.run-btn--quick {
+  background: var(--color-runQuickBackground);
+  border-color: var(--color-runQuickBackground);
+  color: var(--color-runText);
+}
+
+.run-btn--deep {
+  background: var(--color-runDeepBackground);
+  border-color: var(--color-runDeepBackground);
+  color: var(--color-runText);
+}
+
+/* Not a run at all, which is why it is the one that is not purple: it opens
+   what happens when nobody presses anything. */
+.run-btn--schedule {
+  background: var(--color-runScheduleBackground);
+  border-color: var(--color-runScheduleBorder);
+  color: var(--color-runText);
+}
+
+.run-btn:hover:not(:disabled) { filter: brightness(1.08); }
+.run-btn:disabled { opacity: 0.5; filter: none; }
+
+/* ------------------------------------------------------- the trip strip --
+
+   The route, read-only, at the top of the narrowing step. That step opened on
+   three date fields and never said which trip they belonged to, so the thing
+   being narrowed was on another tab. Chips rather than a sentence, because it
+   is the same vocabulary the route editor uses one step back. */
+
+.trip-strip {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 20px;
+  padding: 10px 16px;
+  border: 1px solid var(--color-tableBorder);
+  border-radius: 10px;
+  background: var(--color-tableRowAlternate);
+}
+
+.trip-strip__chain {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-weight: 600;
+}
+
+.trip-strip__arrow { color: var(--color-pageTextSubdued); }
+
+.trip-strip__stop {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border: 1px solid var(--color-tableBorder);
+  border-radius: 999px;
+  background: var(--color-panelBackground);
+  white-space: nowrap;
+}
+
+.trip-strip__nights { font-weight: 400; color: var(--color-pageTextLight); font-size: 12px; }
+
+/* ------------------------------------------------------------- the sheet --
+
+   A small modal for one subject. Used by the schedule editor, which is wanted
+   from three places and must exist once: three copies of `#enabled` is a
+   checkbox that reads whichever the DOM found first and saves the other.
+
+   A native `<dialog>` rather than a positioned div, for the things a dialog
+   already does correctly and a div has to be taught: focus is trapped in it,
+   Escape closes it, the rest of the page goes inert, and it is on the top
+   layer so no stacking context can bury it. */
+
+.sheet {
+  border: 1px solid var(--color-tableBorder);
+  border-radius: 12px;
+  background: var(--color-panelBackground);
+  color: var(--color-pageText);
+  padding: 0;
+  width: min(560px, calc(100vw - 32px));
+  max-height: calc(100vh - 64px);
+  box-shadow: 0 12px 40px rgb(0 0 0 / 22%);
+}
+
+.sheet::backdrop { background: rgb(0 0 0 / 38%); }
+
+.sheet__form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 18px 20px;
+  max-height: calc(100vh - 64px);
+  overflow-y: auto;
+}
+
+.sheet__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.sheet__head h2 { margin: 0; }
+
+/* One scheduled run per block, fenced, because the question the dialog answers
+   is "which of these two happens" and two ticks in one column read as a list of
+   options for one run. */
+.sheet__block {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--color-tableBorder);
+  border-radius: 8px;
+  background: var(--color-tableRowAlternate);
+}
+
+.sheet__block .explain { margin: 0; }
+
+.sheet__foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* The sheet is not a panel, so the panel scale does not reach it; its own gap
+   handles the rhythm and the prose must not add to it. */
+.sheet .explain,
+.sheet .answer { margin: 0; }
+
+/* The probe's own airport list, under the pool it belongs to. Set apart from
+   the verdict table above it by a rule rather than a box: it is an edit to the
+   same pool, not a second subject. */
+.probe-list {
+  padding-top: 10px;
+  border-top: 1px dashed var(--color-tableBorder);
+  align-items: baseline;
+}
+
+/* Prose inside a source card sits tighter than prose in a panel: the card is
+   already a small box and the panel scale would push its parts apart. */
+.source-card .explain,
+.source-card .answer { margin: 0 0 10px; }
+
+/* The verdict tables' last column: what this row's state is, then what can be
+   done about it. Wrapped, because an outside row carries a label and two
+   buttons and a table cell is not wide.
+
+   Scoped to the two panels that judge airports, not to `.data` at large: every
+   ranking and leg table in the app shares that class, and their last cells are
+   prices. */
+#explore-verdicts .data td:last-child,
+#explore-report .data td:last-child {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: baseline;
+}

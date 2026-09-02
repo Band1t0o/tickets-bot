@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import date
 
-from src.combine import best_open_jaw, best_same_airport, combine, combine_all
+from src.combine import combine, combine_all, series_from_result
 from src.models import Leg
 from src.scenario import Scenario, Stop
 from tests.conftest import make_scenario
@@ -101,14 +101,15 @@ def test_open_jaw_itineraries_are_allowed_and_flagged():
 
 def test_best_same_airport_and_best_open_jaw_are_reported_separately():
     to_vie = leg("MNL", "VIE", date(2027, 1, 30), 11000)  # cheaper, open jaw
-    result = combine([LEG_A, LEG_B, LEG_C, to_vie], scenario())
-    assert best_open_jaw(result).total_price == 27000
-    assert best_same_airport(result).total_price == 30000
+    result = combine_all([LEG_A, LEG_B, LEG_C, to_vie], scenario())
+    assert result.best_open_jaw.total_price == 27000
+    assert result.best_same_airport.total_price == 30000
 
 
-def test_best_helpers_return_none_when_nothing_qualifies():
-    assert best_same_airport([]) is None
-    assert best_open_jaw([]) is None
+def test_best_fields_are_none_when_nothing_qualifies():
+    result = combine_all([], scenario())
+    assert result.best_same_airport is None
+    assert result.best_open_jaw is None
 
 
 def test_round_trip_scenario_pairs_outbound_with_return():
@@ -141,15 +142,15 @@ def test_limit_none_returns_every_itinerary():
 
 
 def test_by_date_series_keeps_the_cheapest_per_departure_date():
-    from src.combine import cheapest_by_departure_date
-
     # Two departure dates; the 12th has a cheaper option available.
     second_a = leg("PRG", "NRT", date(2027, 1, 12), 9000)
     second_b = leg("NRT", "MNL", date(2027, 1, 22), 4000)
     second_c = leg("MNL", "PRG", date(2027, 2, 1), 14000)
-    itineraries = combine([LEG_A, LEG_B, LEG_C, second_a, second_b, second_c], scenario(), limit=None)
+    result = combine_all(
+        [LEG_A, LEG_B, LEG_C, second_a, second_b, second_c], scenario(), limit=None
+    )
 
-    series = cheapest_by_departure_date(itineraries)
+    series = series_from_result(result)
     assert [row["depart_date"] for row in series] == ["2027-01-10", "2027-01-12"]
     assert series[1]["cheapest_total"] == 27000
 

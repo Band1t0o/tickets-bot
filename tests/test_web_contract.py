@@ -113,3 +113,49 @@ def test_every_colour_the_stylesheets_use_is_a_token_that_exists():
         defined |= set(re.findall(r"(--[\w-]+)\s*:", body))
         used |= set(re.findall(r"var\((--[\w-]+)", body))
     assert not (used - defined), f"used but never defined: {sorted(used - defined)}"
+
+
+# The tab bar lost a step and four paragraphs went on describing it. "The step
+# after this one" named a tab that no longer exists, "a step back" and "the step
+# before" named the switch you had just flipped, and "run one above" pointed at
+# buttons on the other side of it. The page was the only documentation of a
+# layout it had stopped having.
+STALE_STEP_WORDING = [
+    "step after this",
+    "a step back",
+    "the step before",
+    "Run one above",
+    "run one above",
+    # The switch between the two populations, deleted when the broad runs moved
+    # to Map it out. An empty state went on telling people to flip it for
+    # another session, because this list only ever read the markup and that
+    # sentence is written by a renderer.
+    "Switch to",
+    "the whole window”",
+    "Run a narrow sweep here",
+]
+
+
+def test_no_screen_describes_a_step_or_a_switch_that_was_merged_away():
+    """Both files, because half this app's prose is written by a renderer.
+
+    Checking only the markup is why "Switch to the whole window and press Run a
+    narrow sweep here" survived the switch being deleted: it lives in a template
+    literal in `app.js`, and nothing was looking there.
+    """
+    markup = (STATIC / "index.html").read_text(encoding="utf-8")
+    script = (STATIC / "app.js").read_text(encoding="utf-8")
+    # Comments record why wording is what it is, including wording that was
+    # replaced, and those quotations are not on screen.
+    visible = re.sub(r"<!--.*?-->", "", markup, flags=re.S)
+    # Two passes, and a class that cannot match a newline for the line
+    # comments. With `re.S` a single `//.*$` is greedy across newlines and
+    # backtracks only to the *last* line end in the file, so one `//` near the
+    # top erases everything after it - which is exactly what this test did on
+    # its first outing: it passed against a deliberately reintroduced stale
+    # string, and proving that it bites is the only reason it was caught.
+    script = re.sub(r"/\*.*?\*/", "", script, flags=re.S)
+    script = re.sub(r"^[ \t]*//[^\r\n]*$", "", script, flags=re.M)
+    visible += script
+    found = [phrase for phrase in STALE_STEP_WORDING if phrase in visible]
+    assert not found, f"the page still points at something that was merged away: {found}"

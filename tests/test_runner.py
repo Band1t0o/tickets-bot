@@ -22,6 +22,7 @@ from src.sweep.runner import (
     is_comparable,
     load_legs,
     merge_shards,
+    read_status,
     run_sweep,
 )
 from tests.conftest import make_scenario
@@ -975,6 +976,38 @@ def test_a_shard_whose_job_died_does_not_read_as_a_clean_one(tmp_path):
     assert status["coverage"] < 1.0
 
 
+def test_a_half_written_status_is_told_apart_from_a_missing_one(tmp_path):
+    """Two different failures, and only one of them is surprising.
+
+    `read_status` is the one tolerant reader for this file, and it used to have
+    a twin in `web.app`. Both had to survive the merge: a run killed before it
+    wrote a status is `unknown`, a status half-written when the process died is
+    `unreadable`, and collapsing them loses which of the two happened.
+    """
+    shards = run_shards(tmp_path, count=2)
+    assert read_status(shards[0])["state"] == "done"
+
+    (shards[0] / "status.json").write_text('{"state": "do', encoding="utf-8")
+    assert read_status(shards[0])["state"] == "unreadable"
+
+    (shards[1] / "status.json").unlink()
+    assert read_status(shards[1])["state"] == "unknown"
+
+
+def test_a_shard_whose_status_will_not_parse_is_the_worst_thing_a_shard_can_be(tmp_path):
+    """It used to rank one place off `done`.
+
+    A corrupt status arrived at the merge as `unknown`, which sits fifth of six
+    in `_STATE_ORDER` - so a merge of two clean shards and one corpse reported
+    itself healthy. Nothing is known about that shard, including whether its
+    legs are all of what it found, which is the worst state to be in and not
+    the second best.
+    """
+    shards = run_shards(tmp_path)
+    (shards[1] / "status.json").write_text("{not json", encoding="utf-8")
+    assert merge_shards(shards, tmp_path / "merged")["state"] == "unreadable"
+
+
 def test_the_merged_sweep_carries_the_shard_roll_call(tmp_path):
     """A run that lost a shard must say so, not report a smaller sweep that
     looks complete."""
@@ -1123,11 +1156,17 @@ def test_without_recycling_a_session_limit_stops_the_sweep_dead(tmp_path):
 
 
 def watched_scenario(**overrides) -> Scenario:
-    from src.scenario import Watch
+    from src.scenario import Preference
 
     defaults = dict(
-        watches=[
-            Watch(depart_dates=[date(2027, 1, 10), date(2027, 1, 20), date(2027, 1, 30)]),
+        preferences=[
+            Preference(
+                depart_dates=[date(2027, 1, 10), date(2027, 1, 20), date(2027, 1, 30)],
+                # No slack: these tests are about where a watch run's output
+                # lands and what its status records, not about how wide a
+                # preference searches. `test_planner` owns the slack.
+                slack_days=0,
+            ),
         ]
     )
     defaults.update(overrides)
@@ -1157,7 +1196,11 @@ def test_a_watch_run_records_what_it_was_watching(tmp_path):
     )
     status = json.loads((result.directory / "status.json").read_text(encoding="utf-8"))
     assert status["mode"] == "watch"
-    assert status["watches"] == [["2027-01-10", "2027-01-20", "2027-01-30"]]
+    # The slack travels with the dates, because two runs of the same preference
+    # at different slacks did not plan the same thing.
+    assert status["watches"] == [
+        {"depart_dates": ["2027-01-10", "2027-01-20", "2027-01-30"], "slack_days": 0}
+    ]
 
 
 def test_a_sweep_records_that_it_was_watching_nothing(tmp_path):
