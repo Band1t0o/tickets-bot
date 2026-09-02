@@ -5,7 +5,7 @@ twelve seconds having swept nothing, and two more were cancelled while pending
 without ever starting a job - and from the app all five looked identical, because
 all five had produced the words "Dispatched to GitHub Actions" and nothing else.
 
-Nothing here shells out. `gh` is monkeypatched at `_gh`, the one boundary.
+Nothing here shells out. `gh` is monkeypatched at `gh`, the one boundary.
 """
 from __future__ import annotations
 
@@ -16,8 +16,8 @@ import pytest
 from src.web import cloud_runs
 
 # Captured before `no_real_gh` in conftest replaces it, for the one test below
-# that is about `_gh` itself rather than about a caller of it.
-REAL_GH = cloud_runs._gh
+# that is about `gh` itself rather than about a caller of it.
+REAL_GH = cloud_runs.gh
 
 
 @pytest.fixture(autouse=True)
@@ -43,7 +43,7 @@ def run(**overrides) -> dict:
 
 
 def answering(monkeypatch, runs):
-    monkeypatch.setattr(cloud_runs, "_gh", lambda *a, **k: json.dumps(runs))
+    monkeypatch.setattr(cloud_runs, "gh", lambda *a, **k: json.dumps(runs))
 
 
 # ------------------------------------------------------------ reading a run
@@ -90,7 +90,7 @@ def test_a_run_cancelled_before_it_started_is_told_apart_from_one_stopped_late(m
 
 
 def test_gh_answering_nonsense_is_a_cloud_error_not_a_crash(monkeypatch):
-    monkeypatch.setattr(cloud_runs, "_gh", lambda *a, **k: "<!DOCTYPE html>")
+    monkeypatch.setattr(cloud_runs, "gh", lambda *a, **k: "<!DOCTYPE html>")
     with pytest.raises(cloud_runs.CloudError):
         cloud_runs.list_runs()
 
@@ -101,7 +101,7 @@ def test_a_missing_gh_says_the_schedule_is_unaffected(monkeypatch):
     def missing(*args, **kwargs):
         raise FileNotFoundError("gh")
 
-    monkeypatch.setattr(cloud_runs, "_gh", REAL_GH)
+    monkeypatch.setattr(cloud_runs, "gh", REAL_GH)
     monkeypatch.setattr(cloud_runs.subprocess, "run", missing)
     with pytest.raises(cloud_runs.CloudError, match="schedule in GitHub Actions is unaffected"):
         cloud_runs.list_runs()

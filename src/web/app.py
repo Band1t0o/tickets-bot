@@ -72,7 +72,7 @@ from ..sweep.runner import (
 from ..viability import report as viability_report
 from ..webhook_store import clear_webhook, load_webhook, save_webhook
 from ..webhook_store import mask as mask_webhook
-from . import branch_sync, cloud_runs
+from . import branch_sync, cloud_runs, publish
 
 SCENARIO_DIR = Path(os.getenv("SCENARIO_DIR", "scenarios"))
 DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
@@ -132,7 +132,7 @@ FORCED_DEPTH = re.compile(r"INPUT_DEPTH:-(\w+)")
 # and 400s for things it needs, and renders them as emptiness - which is
 # indistinguishable from "you have no saved trips". `static/app.js` carries the
 # same number and refuses to render until they match.
-API_CONTRACT = 15
+API_CONTRACT = 16
 
 app = FastAPI(title="Flight scenario watcher")
 
@@ -804,17 +804,20 @@ def run_in_cloud(
         _fetch_cloud_ref()
         cloud = _cloud_state(scenario, _night_depth())
         if cloud.get("on_branch") is False:
-            # No override offered, because there is nothing on the other side of
-            # one: `plan` reads the branch's own scenario files, so a name it
-            # does not have plans no searches, the two sweep jobs skip, and
-            # `dispatched-nothing` fails the run. Refused here rather than as a
-            # red run in Actions twenty seconds from now.
+            # Still no "run it anyway", because there is nothing on the other
+            # side of one: `plan` reads the branch's own scenario files, so a
+            # name it does not have plans no searches, the two sweep jobs skip,
+            # and `dispatched-nothing` fails the run. Refused here rather than as
+            # a red run in Actions twenty seconds from now.
+            #
+            # What is on the other side now is `POST .../publish`, which is why
+            # this asks for that by name rather than for a commit and a push:
+            # the sentence used to end in an errand nothing on screen could do.
             raise HTTPException(
                 400,
                 f"'{scenario_id}' is not on {CLOUD_REF}. The cloud sweeps the trips "
                 f"committed to that branch, so it has never seen this one and a run "
-                f"would sweep nothing. Commit and push "
-                f"scenarios/{scenario_id}.json first.",
+                f"would sweep nothing. Publish it to the branch first.",
             )
         if not cloud["known"]:
             raise HTTPException(
@@ -829,8 +832,8 @@ def run_in_cloud(
                 "The cloud sweeps the trip committed to the branch, not the one on this "
                 "screen, and the two differ in "
                 + ", ".join(cloud["differs"])
-                + ". Commit and push this trip first, or run it anyway and read the "
-                "results as being about the branch's version.",
+                + ". Publish this trip to the branch first, or run it anyway and "
+                "read the results as being about the branch's version.",
             )
 
     try:
@@ -934,6 +937,29 @@ def cloud_sync_take() -> dict:
     if not result["took"] and result["reason"]:
         raise HTTPException(409, result["reason"])
     return result
+
+
+@app.post("/api/scenarios/{scenario_id}/publish")
+def publish_scenario(scenario_id: str) -> dict:
+    """Put this trip on the branch the cloud sweeps, from here.
+
+    The one thing every panel that talks about the branch used to end by asking
+    a person to go and do: `_cloud_state` could tell you the night sweep had
+    never seen this trip, and the only cure was a commit and a push in a
+    terminal - on a checkout that is usually sitting on some other branch, so
+    even a push would not have reached it.
+
+    Deliberately not behind `_scenario_or_404`. The same call is what takes a
+    deleted trip *off* the branch, and by then there is no file to find;
+    `publish_trip` reads the disk itself and treats an absence as the
+    instruction it is.
+
+    200 with a reason rather than an error when it cannot be done. Its usual
+    caller is a save that has already succeeded, and colouring that red would be
+    a complaint about the wrong thing; the panel that asked decides how loudly
+    to say it.
+    """
+    return publish.publish_trip(SCENARIO_DIR, _safe_id(scenario_id))
 
 
 @app.delete("/api/cloud-queue/{scenario_id}")

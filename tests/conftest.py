@@ -60,7 +60,7 @@ def no_real_gh(monkeypatch):
     test that merely queues something would poll a real GitHub in the background
     for as long as the suite ran.
 
-    A test proving cloud behaviour monkeypatches `_gh` itself; those run after
+    A test proving cloud behaviour monkeypatches `gh` itself; those run after
     this and win.
     """
     from src.web import cloud_runs
@@ -68,7 +68,7 @@ def no_real_gh(monkeypatch):
     def refuse(*args, **kwargs):
         raise cloud_runs.CloudError("gh is not available in tests")
 
-    monkeypatch.setattr(cloud_runs, "_gh", refuse)
+    monkeypatch.setattr(cloud_runs, "gh", refuse)
     monkeypatch.setattr(cloud_runs, "_start_worker", lambda: None)
 
 

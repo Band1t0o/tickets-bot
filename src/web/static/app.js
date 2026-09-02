@@ -44,7 +44,7 @@ const state = {
    was lost: the page rendered an empty trip picker and empty charts, which is
    exactly what a deleted database looks like, when in fact nothing on disk had
    changed and the answer was `make ui` again. */
-const EXPECTED_CONTRACT = 15;
+const EXPECTED_CONTRACT = 16;
 
 /* Preferences that may be followed at once, mirroring `scenario.MAX_PREFERENCES`.
    Only ever used to *say* the number - "2 of 4" - never to refuse anything. The
@@ -1584,6 +1584,38 @@ async function renderNightSweep() {
     : 'The schedule could not be read from the workflow file.';
 }
 
+/* The button that ends the errand.
+
+   Both warnings below used to finish by asking for a commit and a push, in a
+   terminal, on a checkout that is usually sitting on some other branch entirely
+   — so the one panel whose job is to be trusted about tonight could name the
+   problem exactly and offer nothing. It is one file onto the branch, which is
+   what `POST /api/scenarios/<id>/publish` does.
+
+   The last failure is printed with it rather than swallowed: a button that has
+   already been pressed once and did nothing is worse than no button. */
+const publishAction = (label) =>
+  ` <button class="small" id="night-publish" type="button">${label}</button>` +
+  (state.publishError
+    ? `<div class="small">Last attempt: ${escapeHtml(state.publishError)}</div>`
+    : '');
+
+function wirePublish(tripId) {
+  const button = $('night-publish');
+  if (!button) return;
+  button.onclick = async () => {
+    button.disabled = true;
+    button.textContent = 'Publishing…';
+    state.publishError = await publishTrip(tripId);
+    // Redrawn rather than patched: whether the warning is still true is the
+    // whole answer, and the server has just been asked afresh.
+    await renderNightSweep();
+    // One commit further behind, and the panel that counts that is on another
+    // tab. Not awaited - nothing already drawn depends on it.
+    renderCloudSync();
+  };
+}
+
 /* The two lines about the trip on screen: what tonight costs it, and whether
    tonight is even about this version of it. */
 function renderNightTrip(body, trip) {
@@ -1623,10 +1655,11 @@ function renderNightTrip(body, trip) {
     // was being told to push a file it may well already have pushed.
     warning.innerHTML = cloud.on_branch === false
       ? `The night sweep runs the trips committed to <code>${ref}</code>, and this one is ` +
-        `not on it. Tonight will not include it whatever the box above says — commit and ` +
-        `push <code>scenarios/${escapeHtml(trip.id)}.json</code>.`
+        `not on it. Tonight will not include it whatever the box above says.` +
+        publishAction('Publish it to the branch')
       : `This app cannot read <code>${ref}</code>, so it cannot say whether tonight's sweep ` +
         `is about this version of the trip — or about it at all.`;
+    wirePublish(trip.id);
     return;
   }
   if (!cloud.differs.length) return;
@@ -1639,8 +1672,9 @@ function renderNightTrip(body, trip) {
     `${count(cloud.searches)} searches` +
     `${cloud.included ? '' : ', except it is switched off there'}, not ` +
     `${count(trip.searches)} — so results committed overnight are about that trip, not ` +
-    `this one. Commit and push to change it.` +
+    `this one.` + publishAction('Publish this version') +
     (seen ? ` <span class="muted">(<code>${ref}</code> as last fetched, ${escapeHtml(seen)})</span>` : '');
+  wirePublish(trip.id);
 }
 
 /* -------------------------------------------------------------- save/run */
@@ -1713,6 +1747,36 @@ window.addEventListener('unhandledrejection', (event) => {
   event.preventDefault();
 });
 
+/* Both save buttons, driven together so neither can disagree with the other:
+   the trip's is on Map it out, the notification panel's is behind the gear, and
+   flashing the hidden one confirms nothing. */
+const SAVE_BUTTONS = [
+  ['save-btn', 'Save trip'], ['notify-save-btn', 'Save'], ['night-save-btn', 'Save'],
+];
+
+const saveButtons = (text) => {
+  for (const [id] of SAVE_BUTTONS) { if ($(id)) $(id).textContent = text; }
+};
+
+const restoreSaveButtons = () => setTimeout(() => {
+  for (const [id, label] of SAVE_BUTTONS) { if ($(id)) $(id).textContent = label; }
+}, 1500);
+
+/* Put the saved trip on the branch the cloud sweeps. Answers with the reason it
+   could not, or '' when it is there.
+
+   Never throws, because its callers are things that have already worked - a
+   save, a delete - and a trip that is on disk but not on the branch is a state
+   to report, not an operation to fail. `renderNightSweep` prints the reason
+   under the warning it is the answer to. */
+async function publishTrip(id) {
+  try {
+    return (await api(`/api/scenarios/${id}/publish`, { method: 'POST' })).reason || '';
+  } catch (error) {
+    return error.message;
+  }
+}
+
 /* Write the edited trip back. Shared with the Explore tab's pending-changes
    bar, which drops airports and then has to save them the same way. Returns
    true when it stuck, so a caller can clear its own state only if it did. */
@@ -1750,6 +1814,16 @@ async function saveTrip() {
     pending.length = 0;
     renderPending();
     await refreshEstimate();
+    // A save that stops at the disk is half a save. The cloud plans from the
+    // copy committed to the branch, so until this ran, saving a new trip left
+    // two different trips with one name - and every panel could say so while
+    // nothing on screen could do anything about it.
+    //
+    // Not fatal, and deliberately not an error: the file is written either way,
+    // and being offline is not a failed save. The night panel below is where
+    // the reason belongs, next to the warning it explains.
+    saveButtons('Publishing…');
+    state.publishError = await publishTrip(state.scenario.id);
     // Saving is the moment the night sweep's answer can change: the box above
     // is part of this form, and so is everything the branch is compared on.
     await renderNightSweep();
@@ -1757,17 +1831,8 @@ async function saveTrip() {
     // different trip, so the flags in the sweep picker are stale the instant a
     // save lands. Re-read them rather than waiting for the next poll.
     await pollStatus();
-    // Both save buttons, because the same call backs them and only one of
-    // them is on screen: the trip's is on Map it out, the notification panel's
-    // is behind the gear, and flashing the hidden one confirms nothing.
-    for (const [id, label] of [
-      ['save-btn', 'Save trip'], ['notify-save-btn', 'Save'], ['night-save-btn', 'Save'],
-    ]) {
-      const button = $(id);
-      if (!button) continue;
-      button.textContent = 'Saved';
-      setTimeout(() => { button.textContent = label; }, 1500);
-    }
+    saveButtons('Saved');
+    restoreSaveButtons();
     return true;
   } catch (error) {
     showError(error.message);
@@ -1780,10 +1845,20 @@ $('save-btn').onclick = saveTrip;
 $('delete-trip-btn').onclick = async () => {
   clearError();
   if (state.isNew) { await reloadScenarioList(); return; }
-  if (!confirm(`Delete “${state.scenario.name}”? Sweep results already gathered are kept.`)) return;
+  if (!confirm(`Delete “${state.scenario.name}”? It stops being swept in the cloud too. ` +
+    'Sweep results already gathered are kept.')) return;
+  const deleted = state.scenario.id;
   try {
-    await api(`/api/scenarios/${state.scenario.id}`, { method: 'DELETE' });
+    await api(`/api/scenarios/${deleted}`, { method: 'DELETE' });
     await reloadScenarioList();
+    // The night sweep plans from the branch, so a trip deleted only here goes on
+    // being swept every night - the same gap as a new trip, the other way round.
+    // The same call publishes the absence.
+    const reason = await publishTrip(deleted);
+    if (reason) {
+      showError(`Deleted here, but it is still on the branch the cloud sweeps, so it ` +
+        `will run again tonight. ${reason}`, 'warning');
+    }
     // Not awaited: it shells out to git and the page must not wait on it, and
     // nothing already drawn depends on the answer.
     renderCloudSync();
@@ -2008,7 +2083,8 @@ stopButtons((button) => { button.onclick = askToStop; });
    or was cancelled ten minutes later without starting a job. Three outcomes, one
    sentence. Now a run is either refused with a reason, held with a reason, or
    sent - and the Cloud tab carries it from there. */
-async function dispatchCloudRun(force, mode = 'sweep', depth = scheduledDepth()) {
+async function dispatchCloudRun(force, mode = 'sweep', depth = scheduledDepth(),
+  published = false) {
   const query =
     `depth=${depth}&mode=${mode}${force ? '&force=true' : ''}`;
   try {
@@ -2018,6 +2094,27 @@ async function dispatchCloudRun(force, mode = 'sweep', depth = scheduledDepth())
       ? 'Held until the cloud is free — see the Cloud tab'
       : 'Dispatched to GitHub Actions';
   } catch (error) {
+    // "The branch has never seen this trip" still has no "run it anyway" on the
+    // other side of it - a run of a trip the branch does not have sweeps
+    // nothing - but it now has a fix, and the fix is one press.
+    //
+    // Dispatched again unforced rather than with force=true: the second attempt
+    // goes back through the branch check, so if publishing did not really land,
+    // this refuses again instead of quietly sweeping nothing. `published` stops
+    // that from becoming a loop over the same question.
+    if (!force && !published && /Publish it to the branch first/i.test(error.message)) {
+      if (!confirm(`${error.message}
+
+Publish it now and run?`)) {
+        $('status-text').textContent = 'Cloud run cancelled';
+        return;
+      }
+      $('status-text').textContent = 'Publishing…';
+      state.publishError = await publishTrip(state.scenario.id);
+      await renderNightSweep();
+      if (state.publishError) { showError(state.publishError); return; }
+      return dispatchCloudRun(false, mode, depth, true);
+    }
     // The refusal is about the branch, and it is worth overriding on purpose:
     // sweeping the committed version is a real thing to want, as long as the
     // results are read as being about that version.

@@ -46,7 +46,13 @@ class CloudError(Exception):
     """`gh` could not answer. Carries the sentence to show, not a traceback."""
 
 
-def _gh(*args: str, timeout: int = 30) -> str:
+def gh(*args: str, timeout: int = 30) -> str:
+    """The one `gh` boundary for the whole app, as `branch_sync.git` is for git.
+
+    Public because `publish` goes through it too. A second copy of "gh missing,
+    not logged in, or offline are all one kind of answer" is a second copy to
+    get wrong - and the suite keeps the network out by closing exactly one door.
+    """
     try:
         done = subprocess.run(
             ["gh", *args], capture_output=True, text=True, timeout=timeout
@@ -65,7 +71,7 @@ def _gh(*args: str, timeout: int = 30) -> str:
 
 def list_runs(limit: int = 12) -> list[dict]:
     """The most recent sweep runs, newest first. Raises CloudError if it cannot."""
-    raw = _gh(
+    raw = gh(
         "run", "list", "--workflow", WORKFLOW, "--limit", str(limit), "--json", FIELDS
     )
     try:
@@ -142,7 +148,7 @@ def dispatch(scenario_id: str, depth: str | None = None, mode: str | None = None
         command += ["-f", f"depth={depth}"]
     if mode:
         command += ["-f", f"mode={mode}"]
-    _gh(*command)
+    gh(*command)
 
 
 def lane_is_busy(runs: list[dict] | None = None) -> bool:

@@ -2598,7 +2598,8 @@ def test_a_trip_the_branch_has_never_seen_says_the_night_sweep_cannot_run_it(ui,
     warning = page.locator("#night-cloud")
     assert warning.is_visible()
     assert "not on it" in warning.inner_text()
-    assert "commit and" in warning.inner_text().lower()
+    # It no longer ends in an errand. The one thing to do about it is here.
+    assert page.locator("#night-publish").is_visible()
 
 
 def test_a_branch_this_app_cannot_read_says_that_and_not_go_and_push_it(ui):
@@ -2613,7 +2614,9 @@ def test_a_branch_this_app_cannot_read_says_that_and_not_go_and_push_it(ui):
     assert warning.is_visible()
     text = warning.inner_text()
     assert "cannot read" in text
-    assert "commit and" not in text.lower()
+    # And no button, for the same reason: publishing is the answer to "the
+    # branch has not got it", not to "this app cannot see the branch".
+    assert page.locator("#night-publish").count() == 0
 
 
 def test_a_trip_the_branch_has_differently_says_which_trip_tonight_is_about(ui, monkeypatch):
@@ -2644,6 +2647,111 @@ def test_a_trip_the_branch_has_differently_says_which_trip_tonight_is_about(ui, 
     text = warning.inner_text()
     assert "running a different version of this trip" in text
     assert "the airports it searches" in text
+
+
+def branch_without(monkeypatch, trip_on_branch: dict):
+    """A branch that has not got this trip, until something puts it there."""
+    import src.web.app as app_module
+
+    monkeypatch.setattr(
+        app_module, "_cloud_state",
+        lambda *a: {"known": trip_on_branch["has_it"], "on_branch": trip_on_branch["has_it"],
+                    "differs": [], "included": True, "searches": 66},
+    )
+
+
+def test_the_trip_the_branch_never_saw_is_published_from_the_panel(ui, monkeypatch):
+    """The errand, as a button.
+
+    The warning used to end by asking for a commit and a push - in a terminal,
+    on a checkout that is usually sitting on some other branch, so even a push
+    would not have reached the one being swept. The panel whose whole job is to
+    be trusted about tonight could name the problem exactly and do nothing about
+    it, and the answer was to go and ask someone else to run git.
+    """
+    import src.web.app as app_module
+
+    branch = {"has_it": False}
+    branch_without(monkeypatch, branch)
+    published: list[str] = []
+
+    def publish_it(scenario_dir, scenario_id):
+        published.append(scenario_id)
+        branch["has_it"] = True
+        return {"published": True, "removed": False, "already_current": False,
+                "reason": "", "path": f"scenarios/{scenario_id}.json", "url": "",
+                "ref": "origin/main"}
+
+    monkeypatch.setattr(app_module.publish, "publish_trip", publish_it)
+
+    page, _, errors = ui
+    page.reload(wait_until="networkidle")
+    open_night(page)
+    assert page.locator("#night-cloud").is_visible()
+
+    page.locator("#night-publish").click()
+    page.wait_for_selector("#night-cloud", state="hidden")
+
+    assert published == ["jp-ph"]
+    assert errors == []
+
+
+def test_a_publish_that_did_not_land_says_so_where_the_button_is(ui, monkeypatch):
+    """A button that has been pressed once and did nothing is worse than none.
+
+    The warning is still true afterwards - the branch has not got the trip - so
+    it stays, and the reason it has not got it goes with it.
+    """
+    import src.web.app as app_module
+
+    branch_without(monkeypatch, {"has_it": False})
+    monkeypatch.setattr(
+        app_module.publish, "publish_trip",
+        lambda *a: {"published": False, "removed": False, "already_current": False,
+                    "reason": "gh failed: HTTP 403: protected branch", "path": "",
+                    "url": "", "ref": "origin/main"},
+    )
+
+    page, _, errors = ui
+    page.reload(wait_until="networkidle")
+    open_night(page)
+    page.locator("#night-publish").click()
+    page.wait_for_timeout(900)
+
+    warning = page.locator("#night-cloud")
+    assert warning.is_visible()
+    assert "protected branch" in warning.inner_text()
+    assert page.locator("#night-publish").is_visible()
+    assert errors == []
+
+
+def test_saving_a_trip_puts_it_on_the_branch_without_being_asked(ui, monkeypatch):
+    """The whole point: a trip you have just edited is the one swept tonight.
+
+    Every new trip used to end the same way - saved here, absent there, and a
+    correct warning about it that only someone with a terminal could act on.
+    Saving is the moment the two can be brought together, so saving is when it
+    happens; the button above is what is left for when this could not.
+    """
+    import src.web.app as app_module
+
+    published: list[str] = []
+
+    def publish_it(scenario_dir, scenario_id):
+        published.append(scenario_id)
+        return {"published": True, "removed": False, "already_current": False,
+                "reason": "", "path": "", "url": "", "ref": "origin/main"}
+
+    monkeypatch.setattr(app_module.publish, "publish_trip", publish_it)
+
+    page, _, errors = ui
+    page.reload(wait_until="networkidle")
+    page.locator("#trip-name").fill("Japan then the Philippines, March")
+    page.locator("#save-btn").click()
+    page.wait_for_timeout(1500)
+
+    assert published == ["jp-ph"], published
+    assert errors == []
 
 
 # ------------------------------------------------------------ narrowing

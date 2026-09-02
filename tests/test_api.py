@@ -2932,6 +2932,54 @@ def test_taking_when_there_is_nothing_to_take_is_not_an_error(client, monkeypatc
     assert client[0].post("/api/cloud-sync/take").status_code == 200
 
 
+# -------------------------------------------------- publishing a trip
+#
+# The other direction of the same boundary: `cloud-sync` brings the branch's
+# results here, and this puts the trip the cloud will run onto the branch. Until
+# it existed, every panel that could name the gap ended by asking for a commit
+# and a push in a terminal.
+
+
+def test_publishing_when_the_branch_cannot_be_reached_answers_rather_than_fails(client):
+    """Its usual caller is a save that has already succeeded.
+
+    `no_real_git` refuses every git call, which is what a checkout with no
+    remote looks like from in here. The file is written either way, so a 500
+    would be a complaint about a save that worked - and being offline is not a
+    failed save.
+    """
+    response = client[0].post("/api/scenarios/jp-ph/publish")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["published"] is False
+    assert body["reason"]
+
+
+def test_a_deleted_trip_can_still_be_published_because_that_is_how_it_leaves(client):
+    """Not behind `_scenario_or_404`, on purpose.
+
+    Publishing a trip whose file is gone is what takes it off the branch, and a
+    404 here would leave the night sweep planning a trip that no longer exists
+    anywhere else.
+    """
+    assert client[0].delete("/api/scenarios/jp-ph").status_code == 200
+
+    assert client[0].post("/api/scenarios/jp-ph/publish").status_code == 200
+
+
+def test_the_trip_id_is_checked_before_it_becomes_a_path(client):
+    """The name goes into a filename and into a URL on github.com.
+
+    `_safe_id` is what stands between the two, and this endpoint is one of the
+    few that is deliberately not behind `_scenario_or_404` - so it is the one
+    place where an unchecked name would not be caught by the file not existing.
+    """
+    response = client[0].post("/api/scenarios/..%5C..%5Cwin.ini/publish")
+
+    assert response.status_code == 400
+
+
 # ------------------------------------------------------- airport verdicts
 #
 # The Explore tab used to open on a picker of runs by date and time: you chose
@@ -3251,6 +3299,10 @@ def test_a_trip_the_branch_has_never_seen_is_refused_by_name(client, cloud, monk
     the workflow printed is the one the app can print before spending a run, so
     it says it here - and offers no override, because there is nothing on the
     other side of one.
+
+    It asks to publish rather than naming the file to commit. The errand is now
+    a button: the page reads this phrase, offers to publish, and dispatches
+    again unforced.
     """
     app, _ = client
     import src.web.app as app_module
@@ -3266,7 +3318,8 @@ def test_a_trip_the_branch_has_never_seen_is_refused_by_name(client, cloud, monk
     detail = response.json()["detail"]
     assert response.status_code == 400
     assert "jp-ph" in detail
-    assert "scenarios/jp-ph.json" in detail
+    # The exact phrase the page keys its "publish it now and run?" offer off.
+    assert "Publish it to the branch first" in detail
     # No escape hatch: the page offers "run it anyway" on that phrase, and a
     # forced dispatch here is a guaranteed red run.
     assert "run it anyway" not in detail.lower()

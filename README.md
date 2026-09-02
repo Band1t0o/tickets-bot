@@ -889,7 +889,11 @@ the other half of the same arithmetic: it is ~50 searches, which is not too many
 nearly half of what this machine gets in a day, spent on the cheapest question the app asks.
 
 The cloud searches the trip **committed to the branch**, so all four buttons refuse, by name, a trip
-that is not on it or differs from it — commit and push first. Running a sweep on this machine is
+that is not on it or differs from it. Saving now publishes it: the trip file goes onto `origin/main`
+through the GitHub contents API — one file, no local commit, no merge, whatever branch this checkout
+happens to be sitting on — and deleting a trip takes it off again, so a deleted trip stops being
+swept. When that could not be done (offline, no `gh`, a protected branch), the warning in the
+schedule panel says why and carries the button to try again. Running a sweep on this machine is
 still what `make run` is for.
 
 Sizing follows the mode: `scripts/plan_sweep.py --mode explore` shards from the probe's own plan.
