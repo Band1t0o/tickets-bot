@@ -2750,7 +2750,13 @@ def test_saving_a_trip_puts_it_on_the_branch_without_being_asked(ui, monkeypatch
     page.locator("#save-btn").click()
     page.wait_for_timeout(1500)
 
-    assert published == ["jp-ph"], published
+    # Twice, and on purpose. The save itself publishes, because every write of a
+    # trip file does - the page was one writer out of seven and the other six
+    # never did. The page then asks again, which is how the reason gets on
+    # screen: a publish inside a save cannot fail loudly without colouring a save
+    # that worked. The second call answers from the last fetch and writes
+    # nothing, since the branch already holds those bytes.
+    assert published == ["jp-ph", "jp-ph"], published
     assert errors == []
 
 
@@ -4047,25 +4053,65 @@ def test_a_pick_on_the_final_charts_is_found_in_the_final_ranking(ui):
     assert not errors
 
 
-def test_the_final_step_says_when_cloud_runs_are_waiting(ui):
-    """It is the step the cloud files two runs a day into, and it was the one
-    step that could not say any had arrived."""
+def waiting_run(page, **overrides):
+    """Answer `/api/cloud-sync` with one run on the branch and none on disk."""
+    body = {
+        "known": True, "missing_count": 1, "can_fast_forward": True,
+        "blocked_by": "", "missing": {"jp-ph": ["2026-08-21T13-00-00Z"]},
+        **overrides,
+    }
+    page.route("**/api/cloud-sync", lambda route: route.fulfill(
+        status=200, content_type="application/json", body=json.dumps(body),
+    ))
+
+
+def test_a_waiting_cloud_run_is_announced_above_every_tab(ui):
+    """It used to say so from inside three panels, each of them a screenful down.
+
+    So a sweep that landed while you were reading a table announced itself under
+    the table, and on 2 Sep that is exactly where it stayed. One fact about the
+    whole app is one bar at the top of it, on whichever tab you are reading.
+    """
     page, scenarios, errors = ui
     narrow_the_trip(scenarios)
-    page.route("**/api/cloud-sync", lambda route: route.fulfill(
-        status=200, content_type="application/json",
-        body=json.dumps({
-            "known": True, "missing_count": 1, "can_fast_forward": True,
-            "blocked_by": "", "missing": {"jp-ph": ["2026-08-21T13-00-00Z"]},
-        }),
-    ))
+    waiting_run(page)
     page.reload(wait_until="networkidle")
-    open_final(page)
 
-    notice = page.locator("#final-cloud-sync")
+    notice = page.locator("#cloud-sync")
     assert notice.is_visible(), notice.inner_text()
     assert "not on this machine" in notice.inner_text()
-    assert page.locator("#final-cloud-sync-get").is_visible()
+    assert page.locator("#cloud-sync-get").is_visible()
+    # In the strip that sticks to the top, not inside a panel that scrolls away
+    # under it.
+    assert page.locator("#topbar #cloud-sync").count() == 1
+
+    # And still there on the step the cloud files two runs a day into.
+    open_final(page)
+    assert notice.is_visible()
+    assert not errors
+
+
+def test_a_run_that_cannot_be_merged_in_is_not_offered_as_one_that_can(ui):
+    """`can_fast_forward` was `ahead == 0` and nothing else, so on 2 Sep the
+    button was offered over an open trip file, git refused, and the run stayed
+    on the branch behind a button that had promised to fetch it. What is offered
+    instead is the thing that works: the runs need no merge."""
+    page, scenarios, errors = ui
+    narrow_the_trip(scenarios)
+    waiting_run(
+        page,
+        can_fast_forward=False,
+        blocked_by="This checkout has unsaved changes to scenarios/jp-ph.json, "
+                   "which origin/main has also changed, so git will not "
+                   "fast-forward over them.",
+    )
+    page.reload(wait_until="networkidle")
+
+    notice = page.locator("#cloud-sync")
+    assert notice.is_visible(), notice.inner_text()
+    assert "unsaved changes to scenarios/jp-ph.json" in notice.inner_text()
+    assert not page.locator("#cloud-sync-get").is_visible()
+    assert page.locator("#cloud-sync-take").is_visible()
     assert not errors
 
 

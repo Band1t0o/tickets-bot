@@ -325,6 +325,18 @@ tr.is-outside { opacity: 0.6; }
   flex-wrap: wrap;
   padding: 10px 14px;
 }
+
+/* The same notice as a full-width bar under the status strip: square, flush to
+   both edges and with no margin under it, so the page below starts where it
+   would if the bar were not there. It is hidden far more often than not. */
+.cloud-sync--bar {
+  margin: 0;
+  border-width: 0 0 1px;
+  border-radius: 0;
+  padding: 8px 32px;
+}
+
+.cloud-sync--bar button { margin-top: 0; }
 .cloud-sync button { margin-top: 0; flex: none; }
 
 .notice h2 { margin: 0 0 8px; font-size: 16px; }
@@ -567,12 +579,19 @@ label.field > select { font-weight: 400; color: var(--color-formInputText); }
 
 /* ------------------------------------------------------------ status strip */
 
-/* Mirrors Finance-planner's sidebar save-state readout: the thing you glance at
-   to know whether work is happening. */
-.status-strip {
+/* The strip and the cloud-results bar under it stick as one block, so a run that
+   landed while you were reading a table is announced where you are looking
+   rather than a screenful above it. Sticky lives on the wrapper: two sticky
+   siblings both pinned to `top: 0` would sit on top of each other. */
+.topbar {
   position: sticky;
   top: 0;
   z-index: 10;
+}
+
+/* Mirrors Finance-planner's sidebar save-state readout: the thing you glance at
+   to know whether work is happening. */
+.status-strip {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -655,6 +674,7 @@ label.field > select { font-weight: 400; color: var(--color-formInputText); }
 @media (max-width: 720px) {
   .main { padding: 20px 16px 48px; }
   .status-strip { padding: 8px 16px; }
+  .cloud-sync--bar { padding: 8px 16px; }
 }
 
 /* ------------------------------------------------------------------ chips --

@@ -38,6 +38,7 @@ import base64
 import hashlib
 import json
 import re
+import threading
 from pathlib import Path
 
 from . import branch_sync, cloud_runs
@@ -47,6 +48,13 @@ REPO_URL = re.compile(r"github\.com[:/](?P<owner>[^/]+)/(?P<repo>[^/]+?)(?:\.git
 
 # Where the branch keeps the definition of what a trip file may contain.
 SCHEMA = "src/scenario.py"
+
+# One publish at a time. Every write of a trip file now goes through here, and
+# the server runs them on a threadpool, so a save and the narrowing panel behind
+# it are two writers of one path a second apart. Serialised, the second reads
+# the sha the first has just made; overlapping, it reads the sha from before and
+# GitHub refuses it for a conflict this app invented on its own.
+_lock = threading.Lock()
 
 
 def _target() -> tuple[str, str, str] | None:
@@ -225,7 +233,11 @@ def publish_trip(scenario_dir: Path, scenario_id: str) -> dict:
     that is worth interrupting someone over; on a save it is not, and on a run
     that is about to sweep the wrong trip it is.
     """
-    local = Path(scenario_dir) / f"{scenario_id}.json"
+    with _lock:
+        return _publish(Path(scenario_dir) / f"{scenario_id}.json", scenario_id)
+
+
+def _publish(local: Path, scenario_id: str) -> dict:
     target = _target()
     if target is None:
         return _answer(

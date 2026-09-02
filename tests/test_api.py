@@ -2968,6 +2968,92 @@ def test_a_deleted_trip_can_still_be_published_because_that_is_how_it_leaves(cli
     assert client[0].post("/api/scenarios/jp-ph/publish").status_code == 200
 
 
+def published(monkeypatch) -> list[str]:
+    """Every trip the server puts on the branch, in order, without leaving here."""
+    import src.web.app as app_module
+
+    seen: list[str] = []
+
+    def record(directory, scenario_id):
+        seen.append(scenario_id)
+        return {"published": True, "reason": ""}
+
+    monkeypatch.setattr(app_module.publish, "publish_trip", record)
+    return seen
+
+
+def test_every_write_of_a_trip_publishes_it_not_only_the_save_button(client, monkeypatch):
+    """The publish used to hang off Save in the page, which covered one writer
+    out of seven.
+
+    The narrowing panel was one of the other six, and it is the screen whose
+    entire job is deciding what the next sweep prices. On 2 Sep it narrowed
+    japan-philippines to a single departure day here while the branch kept the
+    old six-day band, so the 13:00 sweep would have priced dates nobody had
+    asked for - and reported them under the narrowing on screen.
+    """
+    api, _ = client
+    seen = published(monkeypatch)
+
+    trip = api.get("/api/scenarios/jp-ph").json()
+    trip["focus_start"] = "2027-01-12"
+    trip["focus_end"] = "2027-01-12"
+    assert api.put("/api/scenarios/jp-ph", json=trip).status_code == 200
+
+    assert seen == ["jp-ph"]
+
+
+def test_picking_a_date_to_watch_publishes_the_trip_too(client, monkeypatch):
+    """The watch list lives in the trip file, and the probe reads that file off
+    the branch. A preference saved only here is a preference nothing watches."""
+    api, _ = client
+    seen = published(monkeypatch)
+
+    assert api.post(
+        "/api/watch/jp-ph",
+        json={"depart_dates": ["2027-01-10", "2027-01-20", "2027-01-30"]},
+    ).status_code == 201
+    assert api.delete("/api/watch/jp-ph/2027-01-10").status_code == 200
+
+    assert seen == ["jp-ph", "jp-ph"]
+
+
+def test_a_new_trip_is_on_the_branch_before_anyone_asks_for_it(client, monkeypatch):
+    api, _ = client
+    seen = published(monkeypatch)
+
+    trip = api.get("/api/scenarios/jp-ph").json()
+    trip["id"] = "second-trip"
+    assert api.post("/api/scenarios", json=trip).status_code == 201
+
+    assert seen == ["second-trip"]
+
+
+def test_deleting_a_trip_takes_it_off_the_branch_in_the_same_call(client, monkeypatch):
+    """A trip deleted only here goes on being swept from the branch every night.
+
+    The page did this itself, in the delete handler. It is the same fact as
+    every other write of the file, so it is written in the same place.
+    """
+    api, _ = client
+    seen = published(monkeypatch)
+
+    assert api.delete("/api/scenarios/jp-ph").status_code == 200
+
+    assert seen == ["jp-ph"]
+
+
+def test_a_save_still_succeeds_when_the_branch_cannot_be_reached(client):
+    """`no_real_git` is what being offline looks like from in here. The file is
+    written either way, and a 500 would be a complaint about a save that worked."""
+    api, _ = client
+
+    trip = api.get("/api/scenarios/jp-ph").json()
+    trip["name"] = "Saved while offline"
+    assert api.put("/api/scenarios/jp-ph", json=trip).status_code == 200
+    assert api.get("/api/scenarios/jp-ph").json()["name"] == "Saved while offline"
+
+
 def test_the_trip_id_is_checked_before_it_becomes_a_path(client):
     """The name goes into a filename and into a URL on github.com.
 

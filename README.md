@@ -889,12 +889,19 @@ the other half of the same arithmetic: it is ~50 searches, which is not too many
 nearly half of what this machine gets in a day, spent on the cheapest question the app asks.
 
 The cloud searches the trip **committed to the branch**, so all four buttons refuse, by name, a trip
-that is not on it or differs from it. Saving now publishes it: the trip file goes onto `origin/main`
-through the GitHub contents API — one file, no local commit, no merge, whatever branch this checkout
-happens to be sitting on — and deleting a trip takes it off again, so a deleted trip stops being
-swept. When that could not be done (offline, no `gh`, a protected branch), the warning in the
-schedule panel says why and carries the button to try again. Running a sweep on this machine is
+that is not on it or differs from it. Every write of a trip file publishes it: the file goes onto
+`origin/main` through the GitHub contents API — one file, no local commit, no merge, whatever branch
+this checkout happens to be sitting on — and deleting a trip takes it off again, so a deleted trip
+stops being swept. *Every* write, not the Save button alone: the button was one writer out of seven,
+and the narrowing panel — the one screen whose whole job is deciding what the next sweep prices —
+was another. When the publish cannot be done (offline, no `gh`, a protected branch), the warning in
+the schedule panel says why and carries the button to try again. Running a sweep on this machine is
 still what `make run` is for.
+
+Coming back the other way, runs the branch has and this machine has not are announced in a bar that
+sticks to the top of the page, above every tab. It offers **Get them** only when git would actually
+fast-forward — commits of your own, or an open edit to a file the branch also changed, and it offers
+**Just get the results** instead, which copies the run directories and moves no history.
 
 Sizing follows the mode: `scripts/plan_sweep.py --mode explore` shards from the probe's own plan.
 Without it a probe of `grand-tour` would be sized off that trip's 660-search sweep and dealt 36

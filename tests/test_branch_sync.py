@@ -209,15 +209,28 @@ def test_a_diverged_checkout_is_refused_and_nothing_moves(repo):
     assert head(repo) == before
 
 
-def test_a_modified_file_the_pull_would_overwrite_is_refused_by_git_verbatim(repo):
-    """Git decides this, and git's own sentence is what gets shown.
+def test_a_modified_file_the_pull_would_overwrite_is_named_before_the_button(repo):
+    """The refusal has to be knowable *before* the button offers to do it.
 
-    It names the file. "Could not sync" would not, and this app keeps replacing
-    exactly that kind of summary.
+    `can_fast_forward` was `ahead == 0` alone, on the reasoning that the cloud
+    commits `data/` while the person here edits code, so the two never collide.
+    The app began publishing trip files to the branch on 2 Sep and that stopped
+    being true the same afternoon: a narrowed trip left `scenarios/*.json` dirty
+    against a branch commit touching it, *Get them* was offered anyway, and the
+    finished sweep stayed on the branch behind a button that had promised to
+    fetch it.
     """
     # The branch amends README.md; so does this checkout, without committing.
     write(repo / "README.md", "edited here and never committed\n")
     before = head(repo)
+
+    found = state(repo)
+    assert found["in_the_way"] == ["README.md"]
+    assert found["can_fast_forward"] is False
+    assert "README.md" in found["blocked_by"]
+    # And the way out is in the same sentence, because the runs it is refusing
+    # need no merge at all.
+    assert "take just the results" in found["blocked_by"]
 
     result = branch_sync.pull(repo / "data", [TRIP])
 
@@ -230,6 +243,41 @@ def test_a_modified_file_the_pull_would_overwrite_is_refused_by_git_verbatim(rep
     )
 
 
+def test_the_results_can_still_be_taken_when_an_open_edit_blocks_the_merge(repo):
+    """The refusal is about history and about this afternoon's typing. It is not
+    about the runs, which are directories this machine does not have at all."""
+    write(repo / "README.md", "edited here and never committed\n")
+    before = head(repo)
+
+    result = branch_sync.take(repo / "data", [TRIP])
+
+    assert result["took"] is True
+    assert result["taken"][TRIP] == sorted(CLOUD_SWEEPS, reverse=True)
+    assert result["missing_count"] == 0
+    # Nothing about the checkout moved, and the edit is still there to save.
+    assert head(repo) == before
+    assert (repo / "README.md").read_text(encoding="utf-8") == (
+        "edited here and never committed\n"
+    )
+
+
+def test_git_gets_the_last_word_when_the_check_does_not_see_it(repo, monkeypatch):
+    """The check runs when the page is drawn and the merge runs when the button
+    is pressed, so a file can go dirty in between. Git decides, and git's own
+    sentence is what gets shown - it names the file, and "could not sync" is
+    exactly the kind of summary this app keeps replacing."""
+    write(repo / "README.md", "dirtied after the page was drawn\n")
+    monkeypatch.setattr(branch_sync, "_in_the_way", lambda: [])
+    before = head(repo)
+
+    result = branch_sync.pull(repo / "data", [TRIP])
+
+    assert result["synced"] is False
+    assert "would be overwritten" in result["reason"]
+    assert "README.md" in result["reason"]
+    assert head(repo) == before
+
+
 def test_an_edit_git_would_not_touch_does_not_block_the_pull(repo):
     """A dirty tree is not a reason to refuse, and treating it as one was a bug.
 
@@ -239,7 +287,12 @@ def test_an_edit_git_would_not_touch_does_not_block_the_pull(repo):
     into a second thing to work around.
     """
     write(repo / "src" / "app.py", "SPEED = 2  # mid-edit\n")
-    assert state(repo)["dirty"] is True
+    found = state(repo)
+    assert found["dirty"] is True
+    # The narrower question, and it has to stay narrow: naming every dirty file
+    # would put the panel back to refusing every morning.
+    assert found["in_the_way"] == []
+    assert found["can_fast_forward"] is True
 
     result = branch_sync.pull(repo / "data", [TRIP])
 

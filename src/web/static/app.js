@@ -1420,7 +1420,11 @@ function cloudRunRow(run) {
 
    Shown as a count of *runs*, never of commits. The probe commits every two
    hours, so "6 commits behind" was three sweeps and three observations, and only
-   one of those numbers is the one being asked about. */
+   one of those numbers is the one being asked about.
+
+   One bar at the top of the page, not a copy inside three panels. The copies
+   were each a screenful down, so the arrival of a sweep was announced under the
+   table it changes - read on 2 Sep only because the table looked wrong first. */
 async function renderCloudSync() {
   let body;
   try {
@@ -1437,24 +1441,24 @@ async function renderCloudSync() {
     : `${missing} cloud ${missing === 1 ? 'run is' : 'runs are'} on the branch ` +
       'but not on this machine' + describeMissing(body.missing) + '.' +
       (body.can_fast_forward ? '' : ` ${body.blocked_by}`);
+  // Offered only when it can actually be done. `can_fast_forward` used to mean
+  // "no commits of our own" and nothing else, so on 2 Sep the button was there,
+  // git refused over an open trip file, and the run stayed on the branch behind
+  // a button that had just said it would fetch it. The server now answers the
+  // question git would answer.
   const actionable = Boolean(body.known && missing > 0 && body.can_fast_forward);
-  // The other half of the same question. A checkout with commits of its own
-  // cannot fast-forward and should not try - but that refusal is about history,
-  // and the runs behind it are directories this machine does not have. Copying
-  // those needs no merge, so the sentence stops appearing with nothing under it.
+  // The other half of the same question. A checkout with commits of its own, or
+  // with an edit open in a file the branch also changed, cannot fast-forward and
+  // should not try - but that refusal is about history and about this afternoon's
+  // typing, and the runs behind it are directories this machine does not have.
+  // Copying those needs no merge, so the sentence never appears with nothing
+  // under it.
   const takeable = Boolean(body.known && missing > 0 && !body.can_fast_forward);
 
-  for (const [box, text, button, take] of [
-    ['cloud-sync', 'cloud-sync-text', 'cloud-sync-get', 'cloud-sync-take'],
-    ['cloud-sync-cloud', 'cloud-sync-cloud-text', 'cloud-sync-cloud-get', 'cloud-sync-cloud-take'],
-    ['final-cloud-sync', 'final-cloud-sync-text', 'final-cloud-sync-get', 'final-cloud-sync-take'],
-  ]) {
-    if (!$(box)) continue;
-    $(box).hidden = !show;
-    $(text).textContent = message;
-    $(button).hidden = !actionable;
-    if ($(take)) $(take).hidden = !takeable;
-  }
+  $('cloud-sync').hidden = !show;
+  $('cloud-sync-text').textContent = message;
+  $('cloud-sync-get').hidden = !actionable;
+  $('cloud-sync-take').hidden = !takeable;
 
   const ok = $('cloud-sync-ok');
   if (ok) {
@@ -1504,18 +1508,19 @@ async function pullCloudResults(button, path = '/api/cloud-sync') {
     // Verbatim: when git refuses it names the files, and that sentence is the
     // whole point of surfacing this rather than summarising it.
     showError(error.message);
+    // And redraw, because a refusal means the bar was offering something that
+    // cannot be done - a file went dirty since it was last drawn. The button
+    // that just failed must not still be sitting there inviting a second try.
+    await renderCloudSync();
   } finally {
     button.disabled = false;
     button.textContent = original;
   }
 }
 
-for (const id of ['cloud-sync-get', 'cloud-sync-cloud-get', 'final-cloud-sync-get']) {
-  if ($(id)) $(id).onclick = (event) => pullCloudResults(event.target);
-}
-for (const id of ['cloud-sync-take', 'cloud-sync-cloud-take', 'final-cloud-sync-take']) {
-  if ($(id)) $(id).onclick = (event) => pullCloudResults(event.target, '/api/cloud-sync/take');
-}
+$('cloud-sync-get').onclick = (event) => pullCloudResults(event.target);
+$('cloud-sync-take').onclick = (event) =>
+  pullCloudResults(event.target, '/api/cloud-sync/take');
 
 $('cloud-queue').onclick = async (event) => {
   const button = event.target.closest('button[data-drop]');
@@ -1814,14 +1819,14 @@ async function saveTrip() {
     pending.length = 0;
     renderPending();
     await refreshEstimate();
-    // A save that stops at the disk is half a save. The cloud plans from the
-    // copy committed to the branch, so until this ran, saving a new trip left
-    // two different trips with one name - and every panel could say so while
-    // nothing on screen could do anything about it.
+    // The save above has already published it: every writer of a trip file does
+    // now, because this handler was one of seven and the other six - the
+    // narrowing panel, the watch list - wrote the file and stopped there.
     //
-    // Not fatal, and deliberately not an error: the file is written either way,
-    // and being offline is not a failed save. The night panel below is where
-    // the reason belongs, next to the warning it explains.
+    // So this is the read-back, not the deed. It costs one call that answers
+    // "already on the branch" from the last fetch, and it is what puts the
+    // reason on screen when there is one: the publish inside the save cannot
+    // fail loudly without colouring a save that worked.
     saveButtons('Publishing…');
     state.publishError = await publishTrip(state.scenario.id);
     // Saving is the moment the night sweep's answer can change: the box above
@@ -1851,9 +1856,10 @@ $('delete-trip-btn').onclick = async () => {
   try {
     await api(`/api/scenarios/${deleted}`, { method: 'DELETE' });
     await reloadScenarioList();
-    // The night sweep plans from the branch, so a trip deleted only here goes on
-    // being swept every night - the same gap as a new trip, the other way round.
-    // The same call publishes the absence.
+    // The DELETE above has already taken it off the branch - a trip deleted only
+    // here goes on being swept every night, which is the same gap as a new trip
+    // the other way round. Asked again for the reason if it did not, since
+    // "still on the branch" is the one outcome worth interrupting someone over.
     const reason = await publishTrip(deleted);
     if (reason) {
       showError(`Deleted here, but it is still on the branch the cloud sweeps, so it ` +
@@ -4843,10 +4849,31 @@ async function init() {
     };
 
     await reloadScenarioList();
+    watchTheBranch();
   } catch (error) {
     $('status-strip').className = 'status-strip is-error';
     $('status-text').textContent = `Could not start — ${error.message}`;
   }
+}
+
+/* How often the bar at the top re-asks what the branch has.
+
+   A minute, which is the server's own fetch window: asking faster only re-reads
+   a `git fetch` that has not run again. */
+const BRANCH_EVERY_MS = 60000;
+
+/* Keep the cloud-results bar current for as long as the page is open.
+
+   It used to be drawn only by the three panels that each carried a copy of it,
+   so the view everyone lands on - the trip form - never asked at all, and a run
+   that finished while the page sat open was announced on a tab nobody was
+   looking at. It is one fact about the whole app; it is now asked for like one.
+
+   Chained rather than `setInterval`: the answer costs half a dozen git calls,
+   and a slow one must not have a second one stacked behind it. */
+async function watchTheBranch() {
+  await renderCloudSync();
+  setTimeout(watchTheBranch, BRANCH_EVERY_MS);
 }
 
 /* ------------------------------------------------------------- narrowing --

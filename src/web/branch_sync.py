@@ -174,6 +174,39 @@ def _local_stamps(data_dir: Path, scenario_id: str) -> set[str]:
         return set()
 
 
+def _in_the_way() -> list[str]:
+    """Files the fast-forward would have to overwrite, so it will not run.
+
+    `git merge --ff-only` refuses when a file it must update is also modified
+    here, and it refuses before touching anything, which is right. What was
+    wrong was the panel above it: `can_fast_forward` was `ahead == 0` and
+    nothing else, so *Get them* was offered, git said no, and the answer came
+    back as a red error on a page that had promised the opposite a second
+    earlier.
+
+    This used to be reasoned away - the cloud commits `data/`, the person here
+    edits code, so the overlap does not happen. That stopped being true on
+    2 Sep, when the app began publishing trip files to the branch itself. Every
+    save now puts a commit on the branch touching `scenarios/<id>.json`, and the
+    next edit in the narrowing panel makes that same file dirty here. The
+    overlap is no longer an accident; it is the normal afternoon.
+
+    Both sides are asked of git rather than guessed, so the answer is the one
+    the merge itself would give: paths the merge must change, intersected with
+    paths that differ from HEAD in this checkout. Staged or unstaged both count,
+    because the merge refuses on either. Untracked files are absent from both
+    lists, and correctly so - a fast-forward does not overwrite them.
+    """
+    changed = git("diff", "--name-only", "HEAD", CLOUD_REF)
+    edited = git("diff", "--name-only", "HEAD")
+    if changed is None or edited is None:
+        return []
+    def named(out: str) -> set[str]:
+        return {line.strip() for line in out.splitlines() if line.strip()}
+
+    return sorted(named(changed) & named(edited))
+
+
 def state(data_dir: Path, scenario_ids: list[str]) -> dict:
     """How this checkout stands against the branch the cloud commits to.
 
@@ -214,16 +247,21 @@ def state(data_dir: Path, scenario_ids: list[str]) -> dict:
             if gap:
                 missing[scenario_id] = sorted(gap, reverse=True)
 
+    # Only worth asking when there is something to fast-forward *to*. Two more
+    # `git diff` calls on every page draw, to answer a question with no answer.
+    in_the_way = _in_the_way() if behind else []
+
     return {
         "known": True,
         "reason": "",
         "behind": behind,
         "ahead": ahead,
         "dirty": dirty,
+        "in_the_way": in_the_way,
         "missing": missing,
         "missing_count": sum(len(stamps) for stamps in missing.values()),
-        "can_fast_forward": ahead == 0,
-        "blocked_by": _blocked_by(ahead),
+        "can_fast_forward": ahead == 0 and not in_the_way,
+        "blocked_by": _blocked_by(ahead, in_the_way),
         "ref": CLOUD_REF,
     }
 
@@ -235,6 +273,7 @@ def _unknown(reason: str) -> dict:
         "behind": None,
         "ahead": None,
         "dirty": None,
+        "in_the_way": [],
         "missing": {},
         "missing_count": 0,
         "can_fast_forward": False,
@@ -243,23 +282,39 @@ def _unknown(reason: str) -> dict:
     }
 
 
-def _blocked_by(ahead: int) -> str:
+def _blocked_by(ahead: int, in_the_way: list[str]) -> str:
     """Why a fast-forward is not available, as a sentence to act on.
 
-    Only divergence is decided here. A dirty tree is deliberately *not* a gate:
-    `git merge --ff-only` refuses on its own, and only when the files it would
-    update are among the modified ones. Since the cloud commits `data/` and the
-    person here edits code, gating on any dirty file at all would refuse nearly
-    every morning for a conflict that does not exist. Git makes that call
-    exactly, and `pull` reports whatever it says.
+    Two different refusals, and they are not resolved the same way. Divergent
+    history is about commits and wants a push or a rebase; a file open here that
+    the branch also changed is about one afternoon's edit and wants a save. Both
+    end at the same button underneath - the results themselves need no merge -
+    so both sentences say so.
+
+    A dirty tree on its own is still *not* a gate. `git merge --ff-only` only
+    refuses over the files it would actually update, so gating on any modified
+    file at all would refuse nearly every morning over a conflict that does not
+    exist. `_in_the_way` asks the narrower question git asks.
     """
-    if not ahead:
-        return ""
-    return (
-        f"This checkout has {ahead} commit(s) the branch does not, so the cloud's "
-        "results cannot be fast-forwarded in. Nothing has been changed. Push or "
-        "rebase those commits, then try again."
-    )
+    if ahead:
+        return (
+            f"This checkout has {ahead} commit(s) the branch does not, so the cloud's "
+            "results cannot be fast-forwarded in. Nothing has been changed. Push or "
+            "rebase those commits, then take just the results below."
+        )
+    if in_the_way:
+        # Named, and capped. The point is to recognise the file - usually the
+        # trip you were editing a minute ago - not to read a manifest.
+        shown = ", ".join(in_the_way[:3])
+        rest = len(in_the_way) - 3
+        return (
+            f"This checkout has unsaved changes to {shown}"
+            + (f" and {rest} other file(s)" if rest > 0 else "")
+            + f", which {CLOUD_REF} has also changed, so git will not fast-forward "
+            "over them. Nothing has been changed. Commit or revert them, or take "
+            "just the results below - those need no merge."
+        )
+    return ""
 
 
 def pull(data_dir: Path, scenario_ids: list[str]) -> dict:
@@ -380,7 +435,7 @@ def _shape(found: dict) -> dict:
     return {
         key: found[key]
         for key in (
-            "known", "behind", "ahead", "dirty", "missing", "missing_count",
-            "can_fast_forward", "blocked_by", "ref",
+            "known", "behind", "ahead", "dirty", "in_the_way", "missing",
+            "missing_count", "can_fast_forward", "blocked_by", "ref",
         )
     }

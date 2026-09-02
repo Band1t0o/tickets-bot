@@ -9,6 +9,8 @@
   <link rel="stylesheet" href="/styles/app.css">
 </head>
 <body>
+  <!-- The strip and the cloud-results bar stick to the top as one piece. -->
+  <div class="topbar" id="topbar">
   <div class="status-strip" id="status-strip">
     <span class="status-strip__dot"></span>
     <span id="status-text">Idle</span>
@@ -24,6 +26,32 @@
       Explanations: off
     </button>
     <button class="small" id="theme-toggle" title="Toggle light / dark">◐</button>
+  </div>
+
+  <!--
+    Runs the cloud has committed to the branch that are not on this machine. The
+    sweep picker lists directories on disk and the sweep commits to git: on
+    22 Aug a deep run of 64 searches and 638 flights finished, committed, and
+    never appeared here, behind a picker that looked exactly as it does when
+    there is genuinely nothing new.
+
+    It used to say so from inside three panels, each of them a screenful down. A
+    sweep that landed while you were reading a table announced itself below the
+    table, and on 2 Sep it was missed for that reason alone. This is one fact
+    about the whole app, not about a panel, so it is one bar above every tab -
+    and it sticks, because a notice you have to scroll back up to find is a
+    notice about something you have already stopped looking for.
+  -->
+  <div class="notice notice--warning cloud-sync cloud-sync--bar" id="cloud-sync" hidden>
+    <span id="cloud-sync-text"></span>
+    <button class="small" id="cloud-sync-get">Get them</button>
+    <!-- Shown instead of the one above when a fast-forward is genuinely
+         impossible - the checkout has commits of its own, or an open edit to a
+         file the branch also changed. The runs behind that refusal are
+         directories this machine does not have at all, and copying those moves
+         no history. -->
+    <button class="small" id="cloud-sync-take" hidden>Just get the results</button>
+  </div>
   </div>
 
   <main class="main">
@@ -502,23 +530,9 @@
           <h2>Sweep</h2>
           <select id="sweep-select"></select>
         </div>
-        <!--
-          Runs the cloud has committed to the branch that are not on this
-          machine. The picker above lists directories on disk, and the sweep
-          commits to git: on 22 Aug a deep run of 64 searches and 638 flights
-          finished, committed, and never appeared here. The picker looked
-          exactly as it does when there is genuinely nothing new, which is why
-          this is a count on the screen and not a line in a log.
-        -->
-        <div class="notice notice--warning cloud-sync" id="cloud-sync" hidden>
-          <span id="cloud-sync-text"></span>
-          <button class="small" id="cloud-sync-get">Get them</button>
-          <!-- Shown instead of the one above when the checkout has commits
-               of its own. A fast-forward is genuinely impossible then, but
-               the runs it is refusing are directories this machine does not
-               have at all, and copying those moves no history. -->
-          <button class="small" id="cloud-sync-take" hidden>Just get the results</button>
-        </div>
+        <!-- The picker above lists directories on disk and the sweep commits to
+             git, so runs the branch has and this machine has not are announced
+             in the bar at the top of the page, above every tab. -->
         <div class="stat-row" id="headline"></div>
         <!-- Only drawn when the sweep behind these prices had holes in it. -->
         <div class="notice notice--warning" id="completeness" hidden></div>
@@ -640,14 +654,6 @@
           trips that fit what you decided, is a <em>different</em> one cheaper today than the one
           you had in mind?
         </p>
-        <!-- The third copy of the same notice, on the step the cloud files two
-             runs a day into. It was the one step that could not say any had
-             arrived; the renderer already loops over the panels that carry it. -->
-        <div class="notice notice--warning cloud-sync" id="final-cloud-sync" hidden>
-          <span id="final-cloud-sync-text"></span>
-          <button class="small" id="final-cloud-sync-get">Get them</button>
-          <button class="small" id="final-cloud-sync-take" hidden>Just get the results</button>
-        </div>
         <div class="stat-row" id="final-headline"></div>
         <div class="notice notice--warning" id="final-completeness" hidden></div>
         <div class="small panel__line" id="final-verification"></div>
@@ -909,17 +915,10 @@
         <div id="cloud-schedule" class="small"></div>
         <div id="cloud-unknown" class="badge badge--warning" hidden></div>
 
-        <!--
-          Stays visible rather than going behind a click with the lists: a
-          finished run commits its results to the branch, and until the checkout
-          is brought forward they exist and are invisible - which is exactly
-          what happened to three runs on 22 Aug.
-        -->
-        <div class="notice notice--warning cloud-sync" id="cloud-sync-cloud" hidden>
-          <span id="cloud-sync-cloud-text"></span>
-          <button class="small" id="cloud-sync-cloud-get">Get them</button>
-          <button class="small" id="cloud-sync-cloud-take" hidden>Just get the results</button>
-        </div>
+        <!-- The count and its button are in the bar at the top of the page. What
+             belongs here is the other answer, which no bar should be shouting:
+             that there is nothing waiting. "Cannot tell" and "nothing missing"
+             are different, and only one of them means the picker is complete. -->
         <div class="small muted" id="cloud-sync-ok" hidden></div>
 
         <!--

@@ -501,6 +501,31 @@ def _scenario_from_payload(payload: dict) -> Scenario:
     return scenario
 
 
+def _save_and_publish(scenario: Scenario) -> None:
+    """Write the trip to disk and put the same bytes on the branch the cloud reads.
+
+    Every writer of a trip file goes through here, and that is the whole point
+    of it existing. Publishing used to hang off the Save button in the page,
+    which covered exactly one of seven writers. The other six wrote the file and
+    stopped: the narrowing panel - the one screen whose entire job is deciding
+    what the next sweep prices - and the five that edit the watch list.
+
+    On 2 Sep that narrowed japan-philippines to a single departure day here
+    while the branch kept the old six-day band, so the 13:00 sweep would have
+    priced dates nobody had asked for and reported them under the narrowing on
+    screen. The same edit then left the trip file dirty against a branch commit
+    touching it, which is what made *Get them* unable to fast-forward the
+    results in. One missing publish, both faults.
+
+    Never raises. `publish_trip` answers with a reason instead of throwing, and
+    a save that reached the disk is a save - being offline does not make it one
+    that failed. The page asks for the reason separately, through the publish
+    endpoint, and the night panel says so on its own besides.
+    """
+    save_scenario(scenario, SCENARIO_DIR)
+    publish.publish_trip(SCENARIO_DIR, scenario.id)
+
+
 @app.post("/api/scenarios", status_code=201)
 def create_scenario(payload: dict = Body(...)) -> dict:
     scenario = _scenario_from_payload(payload)
@@ -510,7 +535,7 @@ def create_scenario(payload: dict = Body(...)) -> dict:
     # makes a collision something a person can hit by naming two trips alike.
     if (SCENARIO_DIR / f"{scenario.id}.json").exists():
         raise HTTPException(409, f"a trip with the id {scenario.id!r} already exists")
-    save_scenario(scenario, SCENARIO_DIR)
+    _save_and_publish(scenario)
     return scenario.to_dict()
 
 
@@ -520,6 +545,11 @@ def delete_scenario(scenario_id: str) -> dict:
     if not path.exists():
         raise HTTPException(404, f"No scenario {scenario_id!r}")
     path.unlink()
+    # The other half of the same write. A trip deleted only here carries on
+    # being swept from the branch every night, which is the same lie as a new
+    # trip the branch has never seen, in the other direction. `publish_trip`
+    # reads the disk itself and treats the absence as the instruction it is.
+    publish.publish_trip(SCENARIO_DIR, scenario_id)
     # `data/sweeps/<id>/` stays. It is committed history that took real Actions
     # minutes to gather, and deleting a plan is not a request to burn the
     # measurements taken under it.
@@ -536,7 +566,7 @@ def update_scenario(scenario_id: str, payload: dict = Body(...)) -> dict:
         raise HTTPException(
             400, f"body id {scenario.id!r} does not match the path id {scenario_id!r}"
         )
-    save_scenario(scenario, SCENARIO_DIR)
+    _save_and_publish(scenario)
     return scenario.to_dict()
 
 
@@ -2013,7 +2043,7 @@ def add_watch(scenario_id: str, payload: dict = Body(...)) -> dict:
             f"{WATCH_SEARCH_CAP}. Drop a preference, or give this one less slack.",
         )
 
-    save_scenario(proposed, SCENARIO_DIR)
+    _save_and_publish(proposed)
     return _watch_payload(proposed)
 
 
@@ -2108,7 +2138,7 @@ def edit_watch(scenario_id: str, depart_date: str, payload: dict = Body(...)) ->
             f"slack, or drop another preference.",
         )
 
-    save_scenario(proposed, SCENARIO_DIR)
+    _save_and_publish(proposed)
     return _watch_payload(proposed)
 
 
@@ -2130,7 +2160,7 @@ def remove_watch(scenario_id: str, depart_date: str) -> dict:
         preferences=kept,
         leg_watches=[w for w in scenario.leg_watches if w.source != depart_date],
     )
-    save_scenario(updated, SCENARIO_DIR)
+    _save_and_publish(updated)
     # The observations stay. They were real measurements that cost real
     # searches, and un-picking a trip is not a request to forget what it did -
     # the same reason deleting a trip leaves its sweeps behind.
@@ -2182,7 +2212,7 @@ def add_leg_watch(scenario_id: str, payload: dict = Body(...)) -> dict:
             f"watched flights together, so stop following one of either first.",
         )
 
-    save_scenario(proposed, SCENARIO_DIR)
+    _save_and_publish(proposed)
     return _watch_payload(proposed)
 
 
@@ -2193,7 +2223,7 @@ def remove_leg_watch(scenario_id: str, key: str) -> dict:
     if len(kept) == len(scenario.leg_watches):
         raise HTTPException(404, f"{key} is not being followed")
     updated = replace(scenario, leg_watches=kept)
-    save_scenario(updated, SCENARIO_DIR)
+    _save_and_publish(updated)
     # The observations stay, for the same reason un-picking a day leaves its
     # series behind: they were real measurements that cost real searches.
     return _watch_payload(updated)
