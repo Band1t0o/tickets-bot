@@ -31,6 +31,31 @@ REAL_TARGET = publish._target
 
 TRIP = "japan-philippines"
 PATH = f"scenarios/{TRIP}.json"
+SCHEMA = publish.SCHEMA
+
+# The trip format the branch is running, as far as these tests are concerned.
+# Only the field *names* are read - by `ast`, never executed - so this is the
+# shortest thing that carries them.
+CURRENT_SCHEMA = """
+@dataclass
+class Stop:
+    airports: list[str]
+    stay_days: tuple[int, int]
+    label: str = ""
+    arrive_via: str | None = None
+
+
+@dataclass
+class Scenario:
+    id: str
+    name: str = ""
+    stops: list[Stop] = ()
+    enabled: bool = True
+"""
+
+# The same file one release older: no `arrive_via` on a stop. What a checkout
+# ahead of the branch is publishing into.
+OLDER_SCHEMA = CURRENT_SCHEMA.replace('    arrive_via: str | None = None\n', "")
 
 # Two versions of one trip, as the app writes them: LF, trailing newline.
 ON_BRANCH = '{\n  "id": "japan-philippines",\n  "stops": ["NRT", "MNL"]\n}\n'
@@ -88,7 +113,12 @@ def repo(tmp_path, monkeypatch):
     origin.mkdir()
     run(origin, "init", "-b", "main")
     write(origin / PATH, ON_BRANCH)
-    commit(origin, "the trip as the cloud has it")
+    # The branch carries the code that reads its trips, and since 2 Sep the
+    # publish is checked against it. An origin without one is not a repository
+    # this app would ever publish to, and every test here would be testing the
+    # refusal rather than the thing it names.
+    write(origin / SCHEMA, CURRENT_SCHEMA)
+    commit(origin, "the trip as the cloud has it, and the code that reads it")
 
     clone = tmp_path / "clone"
     run(tmp_path, "clone", str(origin), str(clone))
@@ -188,6 +218,91 @@ def test_a_trip_the_branch_already_matches_is_not_committed_again(repo, sent):
 
     assert answer["already_current"] is True
     assert answer["published"] is False
+    assert sent == []
+
+
+# ------------------------------------------- what the branch's code can read
+#
+# The 2 Sep failure, and the reason this section exists. The app writes trip
+# files in the schema of the code it is running; the branch reads them with the
+# code *it* is running. A checkout several commits ahead publishes a trip the
+# branch cannot load - and because the sweep loads the whole directory at once,
+# that is not one trip lost but every trip, on every scheduled run, until
+# somebody looks at Actions.
+
+
+@pytest.fixture
+def branch_runs(repo, tmp_path):
+    """Change the code the branch runs, and let the clone see that it changed.
+
+    The fetch matters: everything here reads `origin/main` out of the clone, and
+    a schema committed to the origin that nobody fetched is a schema the module
+    under test cannot see.
+    """
+    def set_schema(source: str) -> None:
+        origin = tmp_path / "origin"
+        write(origin / SCHEMA, source)
+        commit(origin, "the code the branch runs, one release older")
+        branch_sync.fetch()
+
+    return set_schema
+
+
+def test_a_trip_the_branch_could_not_load_is_refused_before_it_is_sent(repo, sent):
+    """One unreadable trip stops every trip, so this cannot be a warning.
+
+    `Scenario.from_dict` refuses unknown fields outright, and the sweep's plan
+    step loads them all in one glob - so publishing a trip with a field the
+    branch has never heard of takes down the nightly sweep of trips nobody
+    touched.
+    """
+    write(repo / PATH, '{"id": "x", "stops": [], "preferences": [], "probe_extra": {}}')
+
+    answer = publish.publish_trip(repo / "scenarios", TRIP)
+
+    assert answer["published"] is False
+    assert "preferences" in answer["reason"]
+    assert "probe_extra" in answer["reason"]
+    assert sent == [], "nothing may be sent: the branch is what is being protected"
+
+
+def test_a_trip_the_branch_can_read_is_published_as_before(repo, sent):
+    """The guard must not refuse the ordinary case, which is every other save."""
+    write(repo / PATH, '{"id": "x", "name": "X", "stops": [], "enabled": true}')
+
+    answer = publish.publish_trip(repo / "scenarios", TRIP)
+
+    assert answer["published"] is True
+    assert answer["reason"] == ""
+    assert len(sent) == 1
+
+
+def test_a_field_the_branch_would_drop_from_a_stop_is_refused_too(repo, sent, branch_runs):
+    """A stop field the branch does not know is not an error there - it is
+    silently dropped, and the cloud then sweeps a trip that is not the one on
+    screen. Worse than the loud version: the two files are byte-identical, so
+    `_cloud_state` compares them and reports that everything agrees."""
+    branch_runs(OLDER_SCHEMA)
+    write(repo / PATH,
+          '{"id": "x", "name": "X", "stops": [{"airports": ["NRT"], "stay_days": [9, 11],'
+          ' "arrive_via": "KIX"}]}')
+
+    answer = publish.publish_trip(repo / "scenarios", TRIP)
+
+    assert answer["published"] is False
+    assert "arrive_via" in answer["reason"]
+    assert sent == []
+
+
+def test_a_branch_whose_schema_cannot_be_read_is_not_published_to(repo, sent, branch_runs):
+    """"Cannot check" is not "fine". Publishing blind is the thing that broke."""
+    branch_runs("x = 1  # no Scenario class here at all")
+    write(repo / PATH, NARROWED, newline="\r\n")
+
+    answer = publish.publish_trip(repo / "scenarios", TRIP)
+
+    assert answer["published"] is False
+    assert "cannot read the trip format" in answer["reason"]
     assert sent == []
 
 

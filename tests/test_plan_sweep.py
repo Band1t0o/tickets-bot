@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import json
 from datetime import timedelta
+from pathlib import Path
 
-from scripts.plan_sweep import choose, jobs, reason_for_nothing
+from scripts.plan_sweep import choose, jobs, readable, reason_for_nothing
 from src.scenario import save_scenario
 from tests.conftest import WINDOW_START, make_scenario
 
@@ -37,6 +38,68 @@ def healthy_sweep(tmp_path, scenario_id, **status):
     payload = {"state": "done", "legs_per_search": 9.4, **status}
     (directory / "status.json").write_text(json.dumps(payload), encoding="utf-8")
     return tmp_path / "data"
+
+
+def unreadable(directory, scenario_id="from-the-future"):
+    """A trip file this code cannot load, in the shape that really happened.
+
+    Not a corrupt file: a perfectly good trip saved by a *newer* copy of the
+    app, carrying a field this branch's `Scenario` has never heard of.
+    """
+    path = Path(directory) / f"{scenario_id}.json"
+    payload = json.loads((Path(directory) / "a.json").read_text(encoding="utf-8"))
+    payload["id"] = scenario_id
+    payload["a_field_this_branch_never_heard_of"] = True
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def test_a_trip_this_code_cannot_read_does_not_take_the_others_with_it(tmp_path):
+    """The 2 Sep failure: one file, and the whole night gone.
+
+    `load_scenarios` raises on the first file it cannot read and every caller
+    globs the directory, so a trip published from an app newer than this branch
+    stopped the plan step dead - and with it the nightly sweep of a different
+    trip that read perfectly well.
+    """
+    directory = trips(tmp_path, make_scenario(id="a", enabled=True))
+    unreadable(directory)
+
+    assert choose(directory) == ["a"]
+    assert jobs(directory, choose(directory)), "the readable trip still gets runners"
+
+
+def test_the_unreadable_trip_is_named_rather_than_passed_over_in_silence(tmp_path):
+    """A trip that quietly stops being swept is the failure this repo keeps
+    paying for. Skipping it is right; skipping it silently is not."""
+    directory = trips(tmp_path, make_scenario(id="a", enabled=True))
+    unreadable(directory)
+
+    assert sorted(readable(directory)[1]) == ["from-the-future.json"]
+
+
+def test_a_dispatch_of_a_trip_that_cannot_be_read_says_exactly_that(tmp_path):
+    """"On the branch but unreadable" and "not on the branch" are opposites.
+
+    Told the second, the answer would be "yes it is, I can see the file" - and
+    the real cause, an app newer than the branch it published to, would never
+    be named.
+    """
+    directory = trips(tmp_path, make_scenario(id="a", enabled=True))
+    unreadable(directory)
+
+    assert choose(directory, "from-the-future") == []
+    reason = reason_for_nothing(directory, "from-the-future")
+    assert "cannot read it" in reason
+    assert "a_field_this_branch_never_heard_of" in reason
+    assert "newer copy of the app" in reason
+
+
+def test_a_trip_that_is_simply_absent_still_says_so(tmp_path):
+    """The other answer, unchanged: no file of that name at all."""
+    directory = trips(tmp_path, make_scenario(id="a", enabled=True))
+
+    assert "No trip is called" in reason_for_nothing(directory, "never-existed")
 
 
 def test_the_nightly_run_sweeps_every_enabled_trip(tmp_path):

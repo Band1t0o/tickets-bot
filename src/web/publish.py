@@ -33,6 +33,7 @@ direction.
 """
 from __future__ import annotations
 
+import ast
 import base64
 import hashlib
 import json
@@ -43,6 +44,9 @@ from . import branch_sync, cloud_runs
 
 # github.com/<owner>/<repo>, in either the https or the ssh spelling.
 REPO_URL = re.compile(r"github\.com[:/](?P<owner>[^/]+)/(?P<repo>[^/]+?)(?:\.git)?/?$")
+
+# Where the branch keeps the definition of what a trip file may contain.
+SCHEMA = "src/scenario.py"
 
 
 def _target() -> tuple[str, str, str] | None:
@@ -104,6 +108,92 @@ def _content(local: Path) -> bytes:
     would flip the file back and forth.
     """
     return local.read_text(encoding="utf-8").replace("\r\n", "\n").encode("utf-8")
+
+
+def _branch_schema() -> dict[str, set[str]] | None:
+    """The field names the branch's own `Scenario` and `Stop` declare.
+
+    Read out of `CLOUD_REF:src/scenario.py` with `ast`, because the question is
+    about *that* code and this process is running different code. Nothing is
+    executed: the file is parsed and the annotated class attributes are read,
+    which is exactly what `@dataclass` turns into `__dataclass_fields__` - the
+    set `from_dict` subtracts the payload from.
+
+    None when it cannot be told, which the caller treats as a refusal rather
+    than as permission. A publish that cannot be checked is the one that took
+    the branch down.
+    """
+    source = branch_sync.git("show", f"{branch_sync.CLOUD_REF}:{SCHEMA}")
+    if source is None:
+        return None
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
+    found = {
+        node.name: {
+            item.target.id
+            for item in node.body
+            if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name)
+        }
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef) and node.name in ("Scenario", "Stop")
+    }
+    if not found.get("Scenario") or not found.get("Stop"):
+        return None
+    return found
+
+
+def _unreadable_on_branch(content: bytes) -> str:
+    """Why the branch's code could not read this trip, or "" when it can.
+
+    The failure this exists for, in full, from 2 Sep 2026. The app writes trip
+    files in the schema of the code it is running; the branch reads them with
+    the code *it* is running, and on a checkout that is several commits ahead
+    those are not the same schema. `jak-filipiny.json` went up carrying three
+    fields the branch had never heard of, and `Scenario.from_dict` refuses
+    unknown fields outright - so the plan job died in a traceback.
+
+    What made it expensive rather than annoying is that the sweep loads the
+    whole directory at once. One unreadable trip is every trip: the nightly
+    sweep of a perfectly good trip nobody had touched would have swept nothing
+    that night, and a sweep that swept nothing looks exactly like a quiet day.
+
+    Both levels are checked, and they fail differently. An unknown field on the
+    trip *raises* there. An unknown field on a stop is silently dropped, which
+    is worse in its own way: the branch would sweep a trip that is not the one
+    on screen, and `_cloud_state` would compare the two files, find them
+    identical, and say everything agrees.
+
+    Not checked: fields the branch has and this app does not. Publishing an
+    older shape to a newer branch is the reverse drift, `from_dict` fills most
+    of it from defaults, and guessing which of those defaults it supplies would
+    mean modelling the branch's loader rather than reading its fields.
+    """
+    known = _branch_schema()
+    if known is None:
+        return (
+            f"This app cannot read the trip format {branch_sync.CLOUD_REF} uses, so it "
+            "cannot tell whether the cloud would be able to load this trip at all. "
+            "Publishing it blind is how one trip stopped every sweep on 2 Sep."
+        )
+    try:
+        payload = json.loads(content.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return "This trip file is not readable JSON, so nothing should carry it further."
+
+    unknown = set(payload) - known["Scenario"]
+    for stop in payload.get("stops") or []:
+        if isinstance(stop, dict):
+            unknown |= set(stop) - known["Stop"]
+    if not unknown:
+        return ""
+    return (
+        f"{branch_sync.CLOUD_REF} runs an older copy of this app: its trip format does "
+        f"not know {', '.join(sorted(unknown))}. Publishing this trip would stop the "
+        f"cloud sweeping *any* trip, because the sweep loads them all at once. Merge "
+        f"this app's code into {branch_sync.CLOUD_REF} first."
+    )
 
 
 def _commit_url(raw: str) -> str:
@@ -181,6 +271,13 @@ def _put(repo: str, branch: str, path: str, sha: str, scenario_id: str,
         # than committing an empty change: a save that alters nothing about the
         # trip - a rename, a re-open - must not put a commit on the branch.
         return _answer(already_current=True, path=path)
+
+    # Checked after "nothing to do" and before anything is sent. A trip already
+    # on the branch byte for byte is one the branch is evidently living with,
+    # and refusing to leave it alone would be a refusal to do nothing.
+    refusal = _unreadable_on_branch(content)
+    if refusal:
+        return _answer(reason=refusal, path=path)
 
     command = [
         "api", f"repos/{repo}/contents/{path}",

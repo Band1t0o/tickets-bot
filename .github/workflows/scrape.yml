@@ -99,6 +99,7 @@ jobs:
       depth: ${{ steps.pick.outputs.depth }}
       mode: ${{ steps.pick.outputs.mode }}
       reason: ${{ steps.pick.outputs.reason }}
+      unreadable: ${{ steps.pick.outputs.unreadable }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -145,6 +146,18 @@ jobs:
           # sweep would deal 36 searches across seven runners.
           python scripts/plan_sweep.py --depth "$DEPTH" --shards "${INPUT_SHARDS:-0}" --only "${INPUT_SCENARIO:-}" --mode "$MODE" $FINAL >> "$GITHUB_OUTPUT"
           cat "$GITHUB_OUTPUT"
+      # A trip the branch cannot read is skipped rather than fatal - one bad
+      # file used to take every other trip's night with it - so the run stays
+      # green and this is the only place that would ever say so. Silence here
+      # is how a trip stops being swept and nobody finds out for weeks.
+      - name: Name the trips that could not be read
+        if: steps.pick.outputs.unreadable != '[]'
+        # Through `env` rather than interpolated, like every other value in this
+        # file: an expression is pasted in as text before bash sees the line.
+        env:
+          UNREADABLE: ${{ steps.pick.outputs.unreadable }}
+        run: |
+          echo "::warning::Not swept, because this branch's code cannot read them: $UNREADABLE"
 
   # A dispatch that named a trip and planned nothing for it is a failure, and
   # has to look like one. Three runs on 22 Aug asked for `tokyo-round-trip`,
@@ -262,7 +275,13 @@ jobs:
     # Always, for the same reason: two shards out of three is a sweep with holes
     # in its date grid, which coverage reports honestly. Losing them all is
     # another blank night.
-    if: always() && needs.plan.outputs.scenarios != '[]'
+    #
+    # `always()` covers a failed *sweep*, never a failed *plan*. A plan that
+    # died leaves every one of its outputs empty, and `'' != '[]'` is true - so
+    # this job used to go on to `fromJson('')` and fail evaluating its own
+    # strategy. On 2 Sep that turned one traceback into three errors, two of
+    # them filed under `sweep`, which had never run at all.
+    if: always() && needs.plan.result == 'success' && needs.plan.outputs.scenarios != '[]'
     runs-on: ubuntu-latest
     strategy:
       # Serial, because every trip commits to the same branch.

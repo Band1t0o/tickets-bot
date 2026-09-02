@@ -17,8 +17,29 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.scenario import load_scenarios  # noqa: E402
+from src.scenario import read_scenarios  # noqa: E402
 from src.sweep.planner import PLANS, plan_searches, shards_for  # noqa: E402
+
+
+def readable(directory: Path) -> tuple[list, dict[str, str]]:
+    """Every trip that loads, and the reason for each one that does not.
+
+    `load_scenarios` is strict on purpose - a sweep asked for one trip should
+    fail loudly rather than quietly run something else - but every caller here
+    globs the whole directory, so that strictness was landing on trips nobody
+    had named. On 2 Sep a trip file carrying three fields this branch's
+    `Scenario` does not know raised inside the plan step, and took with it the
+    nightly sweep of a different trip that was perfectly readable: the step
+    exited 1, `needs.plan.outputs.*` came back empty, and `merge` was handed
+    `fromJson('')`. A sweep that swept nothing looks exactly like a quiet day.
+
+    The loudness is kept where it was earned. A dispatch that names a trip this
+    code cannot read still fails, by name and with the parse error in the
+    sentence - see `reason_for_nothing`. What it no longer does is fail about
+    the trips it was not asked about.
+    """
+    trips, problems = read_scenarios(directory)
+    return trips, {problem["file"]: problem["error"] for problem in problems}
 
 
 def has_narrowing(scenario) -> bool:
@@ -79,7 +100,7 @@ def choose(
     booking decision is waiting on. If the site is still refusing, coverage
     records it honestly and nothing is lost.
     """
-    trips = list(load_scenarios(directory))
+    trips, _ = readable(directory)
     if wanted:
         # Naming a trip *is* the instruction, so `enabled` does not get a vote
         # here. It used to: the tick was applied first, and dispatching a trip
@@ -121,7 +142,20 @@ def reason_for_nothing(
     if not wanted or choose(directory, wanted, final, data_dir, watching):
         return ""
 
-    trips = {s.id: s for s in load_scenarios(directory)}
+    loaded, problems = readable(directory)
+    trips = {s.id: s for s in loaded}
+    # Before "no trip is called that", because the two are opposite answers and
+    # only one of them is true here: the file is on the branch, and this code
+    # could not read it. Told the other, the reply would be "yes it is, I can
+    # see it" - and the actual cause, an app newer than the branch it publishes
+    # to, would go unnamed.
+    broken = problems.get(f"{wanted}.json")
+    if broken:
+        return (
+            f"{wanted!r} is on the branch, but this branch's code cannot read it: "
+            f"{broken}. That is what a trip saved by a newer copy of the app looks "
+            "like here; the branch needs that code before it can sweep the trip."
+        )
     if wanted not in trips:
         listed = ", ".join(sorted(trips)) or "none at all"
         return (
@@ -173,7 +207,7 @@ def jobs(
     `shards` is the workflow_dispatch override, which exists for testing the
     rate limit and has to mean what it says.
     """
-    by_id = {s.id: s for s in load_scenarios(directory)}
+    by_id = {s.id: s for s in readable(directory)[0]}
     entries: list[dict] = []
     for scenario_id in chosen:
         scenario = by_id[scenario_id]
@@ -234,6 +268,10 @@ def main() -> None:
     # a single `include` list rather than as two matrix axes because the count
     # now differs per trip: a cross product of trips and shard indices cannot
     # give one trip five runners and another one.
+    # Named, not counted, and on their own line so a trip that quietly stopped
+    # being swept has somewhere to be seen. The workflow turns a non-empty list
+    # into a warning annotation on the run.
+    print("unreadable=" + json.dumps(sorted(readable(directory)[1])))
     print(
         "jobs="
         + json.dumps(
