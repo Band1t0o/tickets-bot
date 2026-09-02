@@ -1,0 +1,15 @@
+{"origin": "KIX", "destination": "CEB", "depart_date": "2027-01-23", "leg_index": 0, "answered": true, "legs": 10}
+{"origin": "CEB", "destination": "VIE", "depart_date": "2027-02-10", "leg_index": 1, "answered": true, "legs": 8}
+{"origin": "CEB", "destination": "VIE", "depart_date": "2027-02-06", "leg_index": 1, "answered": true, "legs": 10}
+{"origin": "KIX", "destination": "CEB", "depart_date": "2027-01-28", "leg_index": 0, "answered": true, "legs": 10}
+{"origin": "KIX", "destination": "CEB", "depart_date": "2027-01-24", "leg_index": 0, "answered": true, "legs": 10}
+{"origin": "CEB", "destination": "VIE", "depart_date": "2027-02-11", "leg_index": 1, "answered": true, "legs": 8}
+{"origin": "CEB", "destination": "VIE", "depart_date": "2027-02-07", "leg_index": 1, "answered": true, "legs": 6}
+{"origin": "KIX", "destination": "CEB", "depart_date": "2027-01-29", "leg_index": 0, "answered": true, "legs": 10}
+{"origin": "KIX", "destination": "CEB", "depart_date": "2027-01-25", "leg_index": 0, "answered": true, "legs": 10}
+{"origin": "CEB", "destination": "VIE", "depart_date": "2027-02-12", "leg_index": 1, "answered": true, "legs": 10}
+{"origin": "CEB", "destination": "VIE", "depart_date": "2027-02-08", "leg_index": 1, "answered": true, "legs": 8}
+{"origin": "KIX", "destination": "CEB", "depart_date": "2027-01-30", "leg_index": 0, "answered": true, "legs": 10}
+{"origin": "KIX", "destination": "CEB", "depart_date": "2027-01-26", "leg_index": 0, "answered": true, "legs": 10}
+{"origin": "KIX", "destination": "CEB", "depart_date": "2027-01-27", "leg_index": 0, "answered": true, "legs": 10}
+{"origin": "CEB", "destination": "VIE", "depart_date": "2027-02-09", "leg_index": 1, "answered": true, "legs": 10}
