@@ -166,6 +166,111 @@ def lane_is_busy(runs: list[dict] | None = None) -> bool:
     return any(run["live"] for run in runs)
 
 
+# ------------------------------------------------------ the scheduled runs
+#
+# Stopping the machine, which is a different question from `Scenario.enabled`
+# and was the one nothing could answer. Unticking every trip takes them out of
+# the rotation and stops the searching, but the workflows still wake on their
+# crons, and the volatility probe is tied to no trip at all - so an idle repo
+# still bills. That matters because the intended end of a trip is: book it,
+# stop the runs, make the repo private so the data is not public while nothing
+# is using it. The last two steps had no support.
+#
+# Disabling is `gh workflow disable`, the same call the Actions UI's own Disable
+# button makes. Deliberately not "make the workflow exit early": a run that
+# wakes and decides to do nothing has already started a runner and already
+# billed for it, and 21 wakes a day is most of a private repo's allowance spent
+# on checkouts.
+
+SCHEDULED_WORKFLOWS = ("scrape.yml", "watch.yml", "probe.yml")
+
+# `test.yml` is deliberately not in that tuple. It runs on push and pull request
+# only, so an idle repo never starts it, and disabling it would silently turn
+# off the checks on the next commit.
+
+# The three states `gh workflow list` reports, and they are three answers rather
+# than a boolean. GitHub switches scheduled workflows off by itself after 60
+# days of repo inactivity; a repo that went quiet and a repo that was paused on
+# purpose are indistinguishable unless that is said out loud, and only one of
+# them is a thing the owner did.
+ACTIVE = "active"
+DISABLED_BY_HAND = "disabled_manually"
+DISABLED_BY_GITHUB = "disabled_inactivity"
+
+WHY_OFF = {
+    DISABLED_BY_HAND: "paused here",
+    DISABLED_BY_GITHUB: "GitHub switched this off after 60 days of quiet",
+}
+
+
+def workflow_states() -> list[dict]:
+    """Every scheduled workflow and whether it is on. Raises CloudError if it cannot.
+
+    `--all` is not optional: without it `gh workflow list` reports only the
+    active ones, so a fully paused repo would come back as an empty list and
+    read as "there are no workflows" rather than "they are all off" - the same
+    confident emptiness `list_runs` exists to avoid.
+    """
+    raw = gh("workflow", "list", "--all", "--json", "name,path,state")
+    try:
+        found = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise CloudError("gh answered something that was not JSON") from exc
+    if not isinstance(found, list):
+        raise CloudError("gh answered something that was not a list of workflows")
+
+    by_file = {}
+    for entry in found:
+        if not isinstance(entry, dict):
+            continue
+        by_file[str(entry.get("path") or "").rsplit("/", 1)[-1]] = entry
+
+    states = []
+    for filename in SCHEDULED_WORKFLOWS:
+        entry = by_file.get(filename)
+        # A workflow the branch has but GitHub has never seen. Not an error and
+        # not "off": there is nothing to pause, and saying "active" would be a
+        # lie in the one direction that costs money.
+        if entry is None:
+            states.append({
+                "file": filename,
+                "name": filename,
+                "state": "",
+                "active": False,
+                "why": "GitHub has not seen this workflow yet",
+            })
+            continue
+        state = str(entry.get("state") or "")
+        states.append({
+            "file": filename,
+            "name": str(entry.get("name") or filename),
+            "state": state,
+            "active": state == ACTIVE,
+            "why": "" if state == ACTIVE else WHY_OFF.get(state, "off"),
+        })
+    return states
+
+
+def set_scheduled(active: bool) -> list[dict]:
+    """Turn every scheduled workflow on or off, one at a time.
+
+    Never raises, and reports per workflow rather than as one boolean. A partial
+    result is the case worth designing for: `gh` losing the network halfway
+    leaves two of three paused, and "could not pause" over the whole set would
+    describe neither what happened nor what is still running.
+    """
+    verb = "enable" if active else "disable"
+    results = []
+    for filename in SCHEDULED_WORKFLOWS:
+        try:
+            gh("workflow", verb, filename)
+        except CloudError as exc:
+            results.append({"file": filename, "ok": False, "error": str(exc)})
+        else:
+            results.append({"file": filename, "ok": True, "error": ""})
+    return results
+
+
 # --------------------------------------------------------------- the queue
 #
 # In this process, like `_running` and `_stops` in `app.py`, and deliberately not

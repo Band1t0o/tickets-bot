@@ -168,3 +168,125 @@ def test_dropping_a_held_run_reports_whether_there_was_one(monkeypatch):
     cloud_runs.enqueue("jp-ph")
     assert cloud_runs.drop("jp-ph") is True
     assert cloud_runs.drop("jp-ph") is False
+
+
+# ------------------------------------------------------- the scheduled runs
+#
+# Stopping the machine, which the app could not do at all. `Scenario.enabled`
+# answers "does the schedule sweep this trip"; none of it answers "is anything
+# scheduled", and only the second question decides whether a repo can be made
+# private without paying for the privilege.
+
+
+def workflow(name: str, path: str, state: str = cloud_runs.ACTIVE) -> dict:
+    return {"name": name, "path": f".github/workflows/{path}", "state": state}
+
+
+def listing(monkeypatch, workflows, seen=None):
+    """`gh workflow list` answering, and recording what it was asked."""
+    asked = seen if seen is not None else []
+
+    def fake(*args, **kwargs):
+        asked.append(args)
+        return json.dumps(workflows)
+
+    monkeypatch.setattr(cloud_runs, "gh", fake)
+    return asked
+
+
+def test_every_scheduled_workflow_is_reported(monkeypatch):
+    listing(monkeypatch, [
+        workflow("sweep", "scrape.yml"),
+        workflow("watch", "watch.yml"),
+        workflow("probe", "probe.yml"),
+        workflow("test", "test.yml"),
+    ])
+    states = cloud_runs.workflow_states()
+    assert [s["file"] for s in states] == list(cloud_runs.SCHEDULED_WORKFLOWS)
+    assert all(state["active"] for state in states)
+
+
+def test_the_test_workflow_is_left_alone():
+    """It runs on push only, so an idle repo never starts it - and disabling it
+    would quietly turn off the checks on the next commit."""
+    assert "test.yml" not in cloud_runs.SCHEDULED_WORKFLOWS
+
+
+def test_disabled_workflows_are_asked_for(monkeypatch):
+    """Without `--all`, `gh` lists only the active ones, so a fully paused repo
+    would come back empty and read as "there are no workflows"."""
+    asked = listing(monkeypatch, [])
+    cloud_runs.workflow_states()
+    assert "--all" in asked[0]
+
+
+def test_a_pause_is_told_apart_from_githubs_own(monkeypatch):
+    """GitHub switches scheduled workflows off after 60 days of repo inactivity.
+    A repo that went quiet and one paused on purpose are the same picture."""
+    listing(monkeypatch, [
+        workflow("sweep", "scrape.yml", cloud_runs.DISABLED_BY_HAND),
+        workflow("watch", "watch.yml", cloud_runs.DISABLED_BY_GITHUB),
+        workflow("probe", "probe.yml"),
+    ])
+    by_file = {state["file"]: state for state in cloud_runs.workflow_states()}
+    assert by_file["scrape.yml"]["why"] == "paused here"
+    assert "60 days" in by_file["watch.yml"]["why"]
+    assert by_file["probe.yml"]["why"] == ""
+
+
+def test_a_workflow_github_has_never_seen_is_not_called_active(monkeypatch):
+    """Not an error and not "off": there is nothing to pause, and "active" would
+    be wrong in the one direction that bills."""
+    listing(monkeypatch, [workflow("sweep", "scrape.yml")])
+    by_file = {state["file"]: state for state in cloud_runs.workflow_states()}
+    assert by_file["probe.yml"]["active"] is False
+    assert "not seen" in by_file["probe.yml"]["why"]
+
+
+def test_states_cannot_be_read_without_gh():
+    """`no_real_gh` in conftest is the only `gh` here, and it refuses."""
+    with pytest.raises(cloud_runs.CloudError):
+        cloud_runs.workflow_states()
+
+
+def test_answering_something_that_is_not_json_is_a_cloud_error(monkeypatch):
+    monkeypatch.setattr(cloud_runs, "gh", lambda *a, **k: "not json")
+    with pytest.raises(cloud_runs.CloudError):
+        cloud_runs.workflow_states()
+
+
+def test_pausing_disables_exactly_the_scheduled_workflows(monkeypatch):
+    asked = []
+    monkeypatch.setattr(cloud_runs, "gh", lambda *args, **k: asked.append(args) or "")
+    results = cloud_runs.set_scheduled(False)
+    assert asked == [("workflow", "disable", name) for name in cloud_runs.SCHEDULED_WORKFLOWS]
+    assert all(result["ok"] for result in results)
+
+
+def test_resuming_enables_them_again(monkeypatch):
+    asked = []
+    monkeypatch.setattr(cloud_runs, "gh", lambda *args, **k: asked.append(args) or "")
+    cloud_runs.set_scheduled(True)
+    assert asked == [("workflow", "enable", name) for name in cloud_runs.SCHEDULED_WORKFLOWS]
+
+
+def test_half_a_pause_names_which_workflow_is_still_running(monkeypatch):
+    """The case worth designing for: `gh` losing the network halfway leaves two
+    of three paused, and one boolean would describe neither what happened nor
+    what is still going."""
+    def fake(*args, **kwargs):
+        if args[-1] == "watch.yml":
+            raise cloud_runs.CloudError("gh failed: offline")
+        return ""
+
+    monkeypatch.setattr(cloud_runs, "gh", fake)
+    results = cloud_runs.set_scheduled(False)
+    failed = [result for result in results if not result["ok"]]
+    assert [result["file"] for result in failed] == ["watch.yml"]
+    assert "offline" in failed[0]["error"]
+
+
+def test_setting_the_schedule_never_raises():
+    """It runs behind a button, and the whole point is to report per workflow."""
+    results = cloud_runs.set_scheduled(False)
+    assert all(not result["ok"] for result in results)

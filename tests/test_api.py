@@ -2805,6 +2805,109 @@ def test_the_cloud_listing_reports_the_runs_and_what_is_held(client, cloud, monk
     assert [e["scenario_id"] for e in body["queued"]] == ["jp-ph"]
 
 
+# ------------------------------------------------------- the scheduled runs
+
+
+def test_the_schedule_endpoint_says_it_cannot_tell_without_gh(client):
+    """Same rule as the run listing. Without `gh` the app cannot see Actions,
+    and a confident "active" would be wrong in the direction that bills."""
+    app, _ = client
+    body = app.get("/api/schedules").json()
+    assert body["known"] is False
+    assert body["reason"]
+    assert body["workflows"] == []
+    assert body["all_active"] is False
+    assert body["all_paused"] is False
+
+
+def test_the_wake_count_is_read_out_of_the_workflow_files(client):
+    """The crons are answerable with or without `gh`, and the two shapes this
+    repo uses are both counted: a plain daily cron and `*/N` in the hour field.
+    Counting only the daily ones reported the watch and the probe as free."""
+    app, _ = client
+    wakes = app.get("/api/schedules").json()["wakes_per_day"]
+    assert wakes["scrape.yml"] == 3
+    assert wakes["watch.yml"] == 6
+    assert wakes["probe.yml"] == 12
+
+
+def test_an_idle_repo_is_costed_before_a_single_search(client):
+    """The number the whole panel exists for: what a repo bills while every trip
+    is unticked and nothing is being searched."""
+    app, _ = client
+    body = app.get("/api/schedules").json()
+    # Without `gh` this cannot say what is on, so it does not put a number on
+    # what the repo bills - only on what it would bill with everything running.
+    assert body["idle_minutes_per_month"] is None
+    assert body["idle_minutes_if_all_active"] == 21 * 30
+
+
+def test_a_paused_repo_is_reported_as_paused(client, monkeypatch):
+    from src.web import cloud_runs
+
+    app, _ = client
+    monkeypatch.setattr(cloud_runs, "workflow_states", lambda: [
+        {"file": name, "name": name, "state": cloud_runs.DISABLED_BY_HAND,
+         "active": False, "why": "paused here"}
+        for name in cloud_runs.SCHEDULED_WORKFLOWS
+    ])
+    body = app.get("/api/schedules").json()
+    assert body["all_paused"] is True
+    assert body["all_active"] is False
+    # Nothing wakes, so nothing bills - which is what makes going private free.
+    assert body["idle_minutes_per_month"] == 0
+
+
+def test_a_partly_paused_repo_is_costed_for_what_is_still_on(client, monkeypatch):
+    """The ordinary in-between state, and it deserves its own number rather than
+    the one the repo would cost with everything running."""
+    from src.web import cloud_runs
+
+    app, _ = client
+    monkeypatch.setattr(cloud_runs, "workflow_states", lambda: [
+        {"file": "scrape.yml", "name": "sweep", "state": "active", "active": True, "why": ""},
+        {"file": "watch.yml", "name": "watch", "state": "disabled_manually",
+         "active": False, "why": "paused here"},
+        {"file": "probe.yml", "name": "probe", "state": "disabled_manually",
+         "active": False, "why": "paused here"},
+    ])
+    body = app.get("/api/schedules").json()
+    assert body["all_paused"] is False
+    assert body["all_active"] is False
+    assert body["idle_minutes_per_month"] == 3 * 30
+
+
+def test_pausing_leaves_every_trip_exactly_as_it_was(client, monkeypatch):
+    """The two levers stay separate: resuming has to bring back the rotation
+    that was there, so pausing must not touch `enabled`."""
+    from src.web import cloud_runs
+
+    app, _ = client
+    monkeypatch.setattr(cloud_runs, "set_scheduled", lambda active: [
+        {"file": name, "ok": True, "error": ""} for name in cloud_runs.SCHEDULED_WORKFLOWS
+    ])
+    before = app.get("/api/scenarios/jp-ph").json()
+    body = app.post("/api/schedules", json={"active": False}).json()
+    assert body["ok"] is True
+    assert body["active"] is False
+    assert app.get("/api/scenarios/jp-ph").json() == before
+
+
+def test_half_a_pause_is_reported_by_name(client, monkeypatch):
+    from src.web import cloud_runs
+
+    app, _ = client
+    monkeypatch.setattr(cloud_runs, "set_scheduled", lambda active: [
+        {"file": "scrape.yml", "ok": True, "error": ""},
+        {"file": "watch.yml", "ok": False, "error": "gh failed: offline"},
+        {"file": "probe.yml", "ok": True, "error": ""},
+    ])
+    body = app.post("/api/schedules", json={"active": False}).json()
+    assert body["ok"] is False
+    assert "watch.yml" in body["reason"]
+    assert "offline" in body["reason"]
+
+
 # --------------------------------------------------- results on this machine
 
 

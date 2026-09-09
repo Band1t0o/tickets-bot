@@ -912,6 +912,31 @@
           whether or not this page is open. This is that schedule, what is going now, and
           what the last runs actually did.
         </p>
+        <!--
+          Whether the machine is running at all. That is a different question
+          from which trips are ticked into the rotation, and it is the one going
+          private depends on: the workflows wake on their crons whether or not
+          any trip is enabled, and a wake bills a runner minute before it
+          decides to do nothing.
+
+          One button rather than three, because the thing being asked for is
+          "stop everything" - and per-workflow control already exists, in the
+          repo's own Actions settings, for the rare case that wants it.
+        -->
+        <div id="schedule-switch" class="schedule-switch">
+          <div class="schedule-switch__head">
+            <div class="small" id="schedule-state">&mdash;</div>
+            <button class="small" id="schedule-toggle" hidden></button>
+          </div>
+          <div class="night-list small" id="schedule-workflows"></div>
+          <p class="explain small">
+            Pausing disables the scheduled workflows in GitHub Actions, the same as the
+            Disable button in the repo&rsquo;s own Actions tab. It leaves every trip exactly
+            as it is, so resuming brings back the schedule you had. Nothing here affects a
+            run you start by hand from the Run row.
+          </p>
+        </div>
+
         <div id="cloud-schedule" class="small"></div>
         <div id="cloud-unknown" class="badge badge--warning" hidden></div>
 

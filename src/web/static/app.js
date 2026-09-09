@@ -44,7 +44,7 @@ const state = {
    was lost: the page rendered an empty trip picker and empty charts, which is
    exactly what a deleted database looks like, when in fact nothing on disk had
    changed and the answer was `make ui` again. */
-const EXPECTED_CONTRACT = 16;
+const EXPECTED_CONTRACT = 17;
 
 /* Preferences that may be followed at once, mirroring `scenario.MAX_PREFERENCES`.
    Only ever used to *say* the number - "2 of 4" - never to refuse anything. The
@@ -450,6 +450,7 @@ function showTab(name) {
   if (step === 'setup') {
     renderNightSweep();
     renderCloudRuns();
+    renderSchedules();
     renderCloudSync();
     renderSources();
     renderNotifyTarget();
@@ -1530,6 +1531,115 @@ $('cloud-queue').onclick = async (event) => {
   } catch (error) {
     showError(error.message);
   }
+  await renderCloudRuns();
+};
+
+/* ------------------------------------------------------- scheduled runs */
+
+/* Whether the machine is running at all.
+
+   `Scenario.enabled` answers "does the schedule sweep this trip", and it was
+   the only thing the app could say. It is not the question a finished trip
+   asks. Untick every trip and the workflows still wake on their crons - three
+   sweep slots, six watch slots and twelve probe runs a day - and a wake that
+   decides to do nothing has already started a runner and already billed for it.
+   That is most of a private repo's 2,000 monthly minutes spent on checkouts,
+   which is exactly what stopped the repo going private between trips.
+
+   So the number on screen is a floor and says so: it counts the wake and never
+   the sweep. A floor is the honest figure for the decision this supports, which
+   is only ever "is pausing worth doing". */
+async function renderSchedules() {
+  const line = $('schedule-state');
+  const list = $('schedule-workflows');
+  const toggle = $('schedule-toggle');
+
+  let body;
+  try {
+    body = await api('/api/schedules');
+  } catch (error) {
+    line.textContent = error.message;
+    list.innerHTML = '';
+    toggle.hidden = true;
+    return;
+  }
+
+  // Same rule as the runs list above: no `gh` means this app cannot see
+  // Actions, which is not the same as Actions having stopped. A button offered
+  // here would be a button that cannot work.
+  if (!body.known) {
+    line.innerHTML = `<span class="muted">Cannot tell whether anything is scheduled. ` +
+      `${escapeHtml(body.reason)}</span>`;
+    list.innerHTML = '';
+    toggle.hidden = true;
+    return;
+  }
+
+  const perMonth = body.idle_minutes_per_month ?? 0;
+  if (body.all_paused) {
+    line.innerHTML = '<strong>Nothing is scheduled.</strong> This repo starts no runs ' +
+      'of its own, so it costs no Actions minutes and can be private for free.';
+  } else if (body.all_active) {
+    line.innerHTML = '<strong>Everything is scheduled.</strong> These start ' +
+      `${count(sumWakes(body.wakes_per_day))} runs a day between them, which is at least ` +
+      `${perMonth} min a month before a single flight is searched.`;
+  } else {
+    line.innerHTML = '<strong>Partly paused.</strong> What is still on starts ' +
+      `${count(sumWakes(activeWakes(body)))} runs a day, at least ${perMonth} min a month.`;
+  }
+
+  list.innerHTML = (body.workflows ?? []).map((workflow) =>
+    '<div class="night-list__row">' +
+    `<span class="night-list__name">${escapeHtml(workflow.name)}</span>` +
+    `<span class="night-list__cost">${workflow.active
+      ? `on · ${count(workflow.wakes_per_day)} runs a day`
+      // Why it is off, not just that it is. GitHub switches scheduled workflows
+      // off by itself after 60 days of repo inactivity, and a repo that went
+      // quiet looks identical to one paused on purpose unless it is said.
+      : escapeHtml(workflow.why || 'off')}</span></div>`).join('');
+
+  toggle.hidden = false;
+  toggle.textContent = body.all_paused ? 'Resume scheduled runs' : 'Pause all scheduled runs';
+  toggle.dataset.active = body.all_paused ? 'true' : 'false';
+}
+
+function sumWakes(wakes) {
+  return Object.values(wakes ?? {}).reduce((total, each) => total + each, 0);
+}
+
+/* Only the workflows still on, so a partly-paused repo is costed for what it is
+   running rather than for what it could run. */
+function activeWakes(body) {
+  const wakes = {};
+  for (const workflow of body.workflows ?? []) {
+    if (workflow.active) wakes[workflow.file] = workflow.wakes_per_day;
+  }
+  return wakes;
+}
+
+$('schedule-toggle').onclick = async (event) => {
+  const button = event.target;
+  const active = button.dataset.active === 'true';
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = active ? 'Resuming…' : 'Pausing…';
+  try {
+    const body = await api('/api/schedules', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ active }),
+    });
+    // Named, not counted. Half a pause is the case worth reporting properly:
+    // saying "could not pause" would describe neither what happened nor what
+    // is still running.
+    if (!body.ok) showError(body.reason);
+  } catch (error) {
+    showError(error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
+  }
+  await renderSchedules();
   await renderCloudRuns();
 };
 

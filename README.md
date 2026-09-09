@@ -602,6 +602,30 @@ The repo is **public**, so Actions minutes are free and depth is no longer ratio
 | Volatility probe ([probe.yml](.github/workflows/probe.yml)) | every 2 h | ~2 min |
 | Tests ([test.yml](.github/workflows/test.yml)) | every push | ~1 min |
 
+### Stopping all of it
+
+A trip that has been booked is done, and the natural next step is to make the repo private so its
+data is not public while nothing is using it. That needs the schedule to be off first, and
+`Scenario.enabled` does not do it. Unticking every trip takes them out of the rotation and stops
+the searching, but the workflows still wake on their crons, and the volatility probe is tied to no
+trip at all. **21 wakes a day**, and a wake that decides to do nothing has already started a runner
+and already billed for it -- 630 min a month against a private repo's 2,000, before a single flight
+is searched.
+
+So **The cloud** in the gear carries one button, *Pause all scheduled runs*, which disables
+`scrape.yml`, `watch.yml` and `probe.yml` through `gh workflow disable` -- the same call the Actions
+tab's own Disable button makes, and the only one that takes the cost to zero. `test.yml` is left
+alone: it runs on push, so an idle repo never starts it.
+
+Two things the panel says that a boolean could not. It **separates a pause from GitHub's own**,
+which switches scheduled workflows off after 60 days of repo inactivity -- a repo that went quiet
+and one paused on purpose are otherwise the same picture, and only one of them is something you
+did. And it **names the workflow** when only some of them stopped, since `gh` losing the network
+halfway leaves two of three paused and "could not pause" would describe neither what happened nor
+what is still running.
+
+Pausing touches no trip, so resuming brings back the schedule that was there.
+
 **What stops a sweep is a browser session.** Not an address, and not a rate -- both of which the
 first two readings were taken for. Three cloud runs settle it:
 

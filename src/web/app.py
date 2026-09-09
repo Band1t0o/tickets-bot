@@ -122,6 +122,18 @@ FINAL_CRONS = ("0 13 * * *", "0 20 * * *")
 # a trip saved as `quick` is still swept deep every night, and a panel restating
 # the file's depth would report a plan seven times smaller than the real one.
 FORCED_DEPTH = re.compile(r"INPUT_DEPTH:-(\w+)")
+# The directory the schedule panel reads, so the wake counts on screen come from
+# the same files Actions runs rather than from a second copy of the crons.
+WORKFLOW_DIR = SWEEP_WORKFLOW.parent
+# Every cron, not just the plain daily ones `DAILY_CRON` understands. The watch
+# and the probe are both `*/N` in the hour field, and counting only daily crons
+# would have reported the two cheapest workflows as costing nothing.
+ANY_CRON = re.compile(r"cron:\s*'([^']+)'")
+EVERY_N_HOURS = re.compile(r"^\S+\s+\*/(\d{1,2})\s")
+# What one wake costs before it searches anything: checkout, Python, and the
+# decision to do nothing. Rounded up from the twelve-second runs that plan
+# nothing, because Actions bills whole minutes.
+IDLE_MINUTES_PER_WAKE = 1
 
 # Bumped whenever this file and `static/app.js` must be deployed together: a new
 # endpoint the page relies on, or a changed response shape.
@@ -132,7 +144,7 @@ FORCED_DEPTH = re.compile(r"INPUT_DEPTH:-(\w+)")
 # and 400s for things it needs, and renders them as emptiness - which is
 # indistinguishable from "you have no saved trips". `static/app.js` carries the
 # same number and refuses to render until they match.
-API_CONTRACT = 16
+API_CONTRACT = 17
 
 app = FastAPI(title="Flight scenario watcher")
 
@@ -906,6 +918,107 @@ def cloud_run_listing(limit: int = 12) -> dict:
         "queued": cloud_runs.queued(),
         "schedule": _night_schedule(),
         "busy": any(run["live"] for run in runs),
+    }
+
+
+def _wakes_per_day(filename: str) -> int:
+    """How many times a workflow's crons fire in a day, read out of the file.
+
+    Only the two shapes this repo actually uses are understood - a plain daily
+    cron and `*/N` in the hour field - and anything else counts as one wake
+    rather than as zero. Undercounting here would make a paused repo look
+    cheaper than it is, which is the direction that costs money.
+    """
+    try:
+        text = (WORKFLOW_DIR / filename).read_text(encoding="utf-8")
+    except OSError:
+        return 0
+    wakes = 0
+    for cron in ANY_CRON.findall(text):
+        every = EVERY_N_HOURS.match(cron)
+        wakes += 24 // int(every.group(1)) if every else 1
+    return wakes
+
+
+@app.get("/api/schedules")
+def schedule_state() -> dict:
+    """Whether the machine is running at all, and what it costs while it is.
+
+    A different question from `/api/night-sweep`, which answers "what will the
+    schedule sweep tonight" and assumes there is a schedule. This one is what
+    going private depends on: Actions is free on a public repo and capped at
+    2,000 minutes a month on a private one, and the workflows wake whether or
+    not any trip is ticked into the rotation.
+
+    `known: false` is a real answer, as it is for `/api/cloud-runs`. Without
+    `gh` this app cannot see Actions, and drawing a confident "active" would be
+    wrong in the one direction that bills.
+    """
+    wakes = {name: _wakes_per_day(name) for name in cloud_runs.SCHEDULED_WORKFLOWS}
+    # Stated per month and as a floor, not an estimate of a real bill: it counts
+    # the wake and not the sweep, so the true figure for a repo with a trip
+    # ticked in is far higher. A floor is the honest number for the decision
+    # this panel supports, which is whether pausing is worth doing at all.
+    idle_floor = sum(wakes.values()) * IDLE_MINUTES_PER_WAKE * 30
+
+    try:
+        workflows = cloud_runs.workflow_states()
+    except cloud_runs.CloudError as exc:
+        return {
+            "known": False,
+            "reason": str(exc),
+            "workflows": [],
+            "wakes_per_day": wakes,
+            # None, not the floor: what a repo is *currently* billing depends on
+            # which workflows are on, and that is the one thing this branch could
+            # not find out. Quoting the all-on figure here would read as a
+            # measurement of this repo rather than as an upper bound.
+            "idle_minutes_per_month": None,
+            "idle_minutes_if_all_active": idle_floor,
+            "all_active": False,
+            "all_paused": False,
+        }
+
+    for workflow in workflows:
+        workflow["wakes_per_day"] = wakes.get(workflow["file"], 0)
+    live = [w for w in workflows if w["active"]]
+    return {
+        "known": True,
+        "reason": "",
+        "workflows": workflows,
+        "wakes_per_day": wakes,
+        # What the repo is costing right now, rather than what it would cost if
+        # everything were on: a repo with the probe paused and the sweep running
+        # is the ordinary in-between state and deserves its own number.
+        "idle_minutes_per_month": sum(
+            wakes.get(w["file"], 0) for w in live
+        ) * IDLE_MINUTES_PER_WAKE * 30,
+        "idle_minutes_if_all_active": idle_floor,
+        "all_active": bool(workflows) and len(live) == len(workflows),
+        "all_paused": not live,
+    }
+
+
+@app.post("/api/schedules")
+def schedule_set(body: dict) -> dict:
+    """Pause or resume every scheduled workflow at once.
+
+    Deliberately does not touch any trip's `enabled` tick. The two are different
+    levers - one says which trips the schedule sweeps, the other says whether
+    the schedule runs - and folding them together would mean resuming could not
+    restore the rotation that was there before.
+    """
+    active = bool(body.get("active"))
+    results = cloud_runs.set_scheduled(active)
+    failed = [r for r in results if not r["ok"]]
+    return {
+        "active": active,
+        "results": results,
+        "ok": not failed,
+        # Named, not counted. "Could not pause" over the whole set would say
+        # neither what happened nor what is still running.
+        "reason": "; ".join(f"{r['file']}: {r['error']}" for r in failed),
+        "state": schedule_state(),
     }
 
 

@@ -946,6 +946,23 @@ label.field > select { font-weight: 400; color: var(--color-formInputText); }
 
 /* ------------------------------------------------------------- night sweep */
 
+/* The pause switch, above the schedule it governs. Boxed rather than loose in
+   the panel because it is the one control here that changes what GitHub does,
+   as against the readouts around it that only report. */
+.schedule-switch {
+  margin: 10px 0 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-tableBorder);
+  border-radius: 6px;
+}
+.schedule-switch__head {
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+  justify-content: space-between;
+}
+.schedule-switch__head button { white-space: nowrap; }
+
 /* One line per trip, so "which of these runs tonight" is a column to run an eye
    down rather than a paragraph to parse. Both kinds are listed: a trip left out
    and hidden is how two trips came to sit unswept for a fortnight while their
