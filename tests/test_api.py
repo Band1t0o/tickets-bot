@@ -2831,6 +2831,24 @@ def test_the_wake_count_is_read_out_of_the_workflow_files(client):
     assert wakes["probe.yml"] == 12
 
 
+def test_a_commented_out_cron_is_not_counted():
+    """Commenting the `schedule:` block out is the obvious way to turn a
+    workflow off, and the crons are found by regex rather than by parsing YAML.
+    Without this the panel bills for a workflow that fires never."""
+    from src.web.app import ANY_CRON, _live_lines
+
+    workflow = (
+        "name: probe\n"
+        "# To schedule it, put back:\n"
+        "#   schedule:\n"
+        "#     - cron: '0 */2 * * *'\n"
+        "on:\n"
+        "  workflow_dispatch: {}\n"
+    )
+    assert ANY_CRON.findall(workflow), "the regex would find it without the filter"
+    assert ANY_CRON.findall(_live_lines(workflow)) == []
+
+
 def test_an_idle_repo_is_costed_before_a_single_search(client):
     """The number the whole panel exists for: what a repo bills while every trip
     is unticked and nothing is being searched."""

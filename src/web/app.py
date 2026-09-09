@@ -436,7 +436,7 @@ def _night_schedule(now: datetime | None = None) -> list[dict]:
     except OSError:
         return []
     slots = []
-    for minute, hour in DAILY_CRON.findall(text):
+    for minute, hour in DAILY_CRON.findall(_live_lines(text)):
         cron = f"{int(minute)} {int(hour)} * * *"
         at = now.replace(hour=int(hour), minute=int(minute), second=0, microsecond=0)
         if at <= now:
@@ -921,6 +921,19 @@ def cloud_run_listing(limit: int = 12) -> dict:
     }
 
 
+def _live_lines(text: str) -> str:
+    """The workflow with its commented-out lines dropped.
+
+    A cron in a comment is a cron that does not run, and the crons here are
+    found by regex rather than by parsing YAML. Turning a schedule off by
+    commenting it out is the obvious way to do it, and without this the panel
+    would go on billing for it - reporting a workflow that fires never as firing
+    twelve times a day.
+    """
+    kept = [line for line in text.splitlines() if not line.lstrip().startswith("#")]
+    return "\n".join(kept)
+
+
 def _wakes_per_day(filename: str) -> int:
     """How many times a workflow's crons fire in a day, read out of the file.
 
@@ -934,7 +947,7 @@ def _wakes_per_day(filename: str) -> int:
     except OSError:
         return 0
     wakes = 0
-    for cron in ANY_CRON.findall(text):
+    for cron in ANY_CRON.findall(_live_lines(text)):
         every = EVERY_N_HOURS.match(cron)
         wakes += 24 // int(every.group(1)) if every else 1
     return wakes
