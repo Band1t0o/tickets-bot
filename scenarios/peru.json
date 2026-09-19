@@ -2,10 +2,7 @@
   "id": "peru",
   "name": "Peru",
   "origins": [
-    "PRG",
-    "FRA",
-    "VIE",
-    "MUC"
+    "PRG"
   ],
   "stops": [
     {
