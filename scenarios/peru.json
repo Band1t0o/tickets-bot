@@ -12,22 +12,8 @@
         "SCL"
       ],
       "stay_days": [
-        12,
-        18
-      ],
-      "overland": false,
-      "arrive_via": null,
-      "depart_via": null
-    },
-    {
-      "label": "",
-      "airports": [
-        "SCL",
-        "LIM"
-      ],
-      "stay_days": [
-        12,
-        18
+        15,
+        20
       ],
       "overland": false,
       "arrive_via": null,
