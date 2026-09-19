@@ -1,0 +1,62 @@
+{
+  "id": "peru",
+  "name": "Peru",
+  "origins": [
+    "PRG"
+  ],
+  "stops": [
+    {
+      "label": "",
+      "airports": [
+        "LIM"
+      ],
+      "stay_days": [
+        12,
+        18
+      ],
+      "overland": false,
+      "arrive_via": null,
+      "depart_via": null
+    },
+    {
+      "label": "",
+      "airports": [
+        "SCL"
+      ],
+      "stay_days": [
+        12,
+        18
+      ],
+      "overland": false,
+      "arrive_via": null,
+      "depart_via": null
+    }
+  ],
+  "window_start": "2027-02-08",
+  "window_end": "2027-03-05",
+  "return_to": null,
+  "one_way": false,
+  "focus_start": null,
+  "focus_end": null,
+  "return_focus_start": null,
+  "return_focus_end": null,
+  "total_days": null,
+  "adults": 1,
+  "depth": "deep",
+  "currency": "CZK",
+  "alert_threshold": null,
+  "bag_estimate": 1500,
+  "enabled": false,
+  "notes": "",
+  "preferred_origins": [],
+  "notify": [
+    "cheapest",
+    "preferred"
+  ],
+  "preferences": [],
+  "leg_watches": [],
+  "probe_extra": {},
+  "probe_both_orders": false,
+  "sweep_narrowing": true,
+  "notify_quiet": true
+}
