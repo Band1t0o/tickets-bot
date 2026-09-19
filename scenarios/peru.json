@@ -15,7 +15,7 @@
         12,
         18
       ],
-      "overland": true,
+      "overland": false,
       "arrive_via": null,
       "depart_via": null
     },
@@ -29,7 +29,7 @@
         12,
         18
       ],
-      "overland": true,
+      "overland": false,
       "arrive_via": null,
       "depart_via": null
     }
