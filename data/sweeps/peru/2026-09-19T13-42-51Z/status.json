@@ -1,0 +1,54 @@
+{
+  "scenario_id": "peru",
+  "state": "done",
+  "mode": "sweep",
+  "total": 60,
+  "completed": 60,
+  "current": "",
+  "legs_found": 585,
+  "errors": [],
+  "error_count": 0,
+  "legs_per_search": 9.75,
+  "route_coverage": 1.0,
+  "routes_planned": 4,
+  "routes_with_legs": 4,
+  "routes_with_no_results": [],
+  "route_searches": {
+    "PRG->LIM": 15,
+    "LIM->PRG": 15,
+    "PRG->SCL": 15,
+    "SCL->PRG": 15
+  },
+  "route_legs": {
+    "PRG->LIM": 145,
+    "LIM->PRG": 149,
+    "PRG->SCL": 146,
+    "SCL->PRG": 145
+  },
+  "route_errors": {
+    "PRG->LIM": 0,
+    "LIM->PRG": 0,
+    "PRG->SCL": 0,
+    "SCL->PRG": 0
+  },
+  "answered": 60,
+  "planned": 60,
+  "coverage": 1.0,
+  "unanswered": 0,
+  "shard": null,
+  "shards": [
+    [
+      0,
+      1
+    ]
+  ],
+  "focus": null,
+  "narrowing": {
+    "focus": null,
+    "return_focus": null,
+    "total_days": null
+  },
+  "started_at": "2026-09-19T13:32:44+00:00",
+  "finished_at": "2026-09-19T13:42:33+00:00",
+  "depth": "deep"
+}
