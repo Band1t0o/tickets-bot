@@ -1,10 +1,10 @@
 {
   "cheapest": {
-    "last_total": 24514.0,
+    "last_total": 24475.0,
     "currency": "CZK",
-    "recorded_at": "2026-09-27T22:55:10+00:00",
-    "best_total": 24478.0,
-    "best_at": "2026-09-27T17:31:41+00:00"
+    "recorded_at": "2026-09-28T08:00:08+00:00",
+    "best_total": 24475.0,
+    "best_at": "2026-09-28T08:00:08+00:00"
   },
   "final:cheapest": {
     "last_total": 25967.0,
