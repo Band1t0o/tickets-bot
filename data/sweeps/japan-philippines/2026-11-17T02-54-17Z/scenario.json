@@ -1,0 +1,121 @@
+{
+  "id": "japan-philippines",
+  "name": "Europe → Japan → Philippines → Europe",
+  "origins": [
+    "VIE"
+  ],
+  "stops": [
+    {
+      "label": "Japan",
+      "airports": [
+        "HND",
+        "KIX"
+      ],
+      "stay_days": [
+        12,
+        16
+      ],
+      "overland": true,
+      "arrive_via": "HND",
+      "depart_via": "KIX"
+    },
+    {
+      "label": "Philippines",
+      "airports": [
+        "CEB"
+      ],
+      "stay_days": [
+        11,
+        14
+      ],
+      "overland": false,
+      "arrive_via": null,
+      "depart_via": null
+    }
+  ],
+  "window_start": "2027-01-08",
+  "window_end": "2027-02-12",
+  "return_to": null,
+  "one_way": false,
+  "focus_start": "2027-01-12",
+  "focus_end": "2027-01-12",
+  "return_focus_start": "2027-01-30",
+  "return_focus_end": "2027-02-12",
+  "total_days": [
+    24,
+    28
+  ],
+  "adults": 1,
+  "depth": "deep",
+  "currency": "CZK",
+  "alert_threshold": null,
+  "bag_estimate": 1500,
+  "enabled": true,
+  "notes": "Main trip. Airports chosen from a live viability check: BRQ and BTS returned no long-haul inventory; FRA measured ~45% cheaper than PRG on a sample January date. Stays are 8-13 days: a [9,11] rule silently discarded a real 12-day Japan stay.",
+  "preferred_origins": [
+    [
+      "PRG",
+      "VIE"
+    ],
+    [
+      "BER",
+      "KRK",
+      "KTW"
+    ],
+    [
+      "FRA",
+      "MUC"
+    ]
+  ],
+  "notify": [
+    "cheapest",
+    "preferred"
+  ],
+  "preferences": [
+    {
+      "depart_dates": [
+        "2027-01-12",
+        "2027-01-25",
+        "2027-02-06"
+      ],
+      "label": "",
+      "slack_days": 2,
+      "added_at": "2026-08-23T20:01:54+00:00",
+      "added_price": 26544,
+      "currency": "CZK"
+    }
+  ],
+  "leg_watches": [
+    {
+      "origin": "VIE",
+      "destination": "HND",
+      "depart_date": "2027-01-12",
+      "added_at": "2026-08-23T08:46:19+00:00",
+      "added_price": 10400,
+      "currency": "CZK",
+      "source": ""
+    },
+    {
+      "origin": "KIX",
+      "destination": "MNL",
+      "depart_date": "2027-01-26",
+      "added_at": "2026-08-30T10:51:23+00:00",
+      "added_price": null,
+      "currency": "CZK",
+      "source": ""
+    },
+    {
+      "origin": "MNL",
+      "destination": "VIE",
+      "depart_date": "2027-02-08",
+      "added_at": "2026-08-30T10:51:56+00:00",
+      "added_price": null,
+      "currency": "CZK",
+      "source": ""
+    }
+  ],
+  "probe_extra": {},
+  "probe_both_orders": false,
+  "sweep_narrowing": true,
+  "notify_quiet": false
+}
